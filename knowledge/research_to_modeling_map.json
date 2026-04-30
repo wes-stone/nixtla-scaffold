@@ -1,0 +1,78 @@
+{
+  "purpose": "Make research-agent findings operational. Every important forecasting principle should map to package code, tests, and a runtime artifact.",
+  "runtime_artifacts": [
+    "profile.json",
+    "manifest.json",
+    "best_practice_receipts.csv",
+    "model_card.md",
+    "diagnostics.json",
+    "diagnostics.md",
+    "failure_diagnostics.json",
+    "backtest_metrics.csv",
+    "model_selection.csv",
+    "model_weights.csv",
+    "hierarchy_coherence.csv"
+  ],
+  "mappings": [
+    {
+      "research_topic": "FPPy tidy forecasting workflow",
+      "modeling_surface": "Data canonicalization, profiling, repair, and model card warnings",
+      "files": ["src/nixtla_scaffold/data.py", "src/nixtla_scaffold/profile.py", "src/nixtla_scaffold/explain.py"],
+      "tests": ["tests/test_profile.py", "tests/test_forecast.py"]
+    },
+    {
+      "research_topic": "FPPy benchmark methods",
+      "modeling_surface": "Baseline ladder and best-practice receipt for benchmark inclusion",
+      "files": ["src/nixtla_scaffold/models.py", "src/nixtla_scaffold/best_practices.py"],
+      "tests": ["tests/test_forecast.py"]
+    },
+    {
+      "research_topic": "Rolling-origin accuracy",
+      "modeling_surface": "Per-series cross-validation metrics and champion selection rationale",
+      "files": ["src/nixtla_scaffold/models.py"],
+      "tests": ["tests/test_forecast.py"]
+    },
+    {
+      "research_topic": "Prediction intervals",
+      "modeling_surface": "Conformal interval gate, emitted effective levels, and interval receipt",
+      "files": ["src/nixtla_scaffold/models.py", "src/nixtla_scaffold/schema.py"],
+      "tests": ["tests/test_forecast.py"]
+    },
+    {
+      "research_topic": "Event effects and drivers",
+      "modeling_surface": "DriverEvent dataclass and scenario overlay columns",
+      "files": ["src/nixtla_scaffold/schema.py", "src/nixtla_scaffold/transformations.py", "src/nixtla_scaffold/cli.py"],
+      "tests": ["tests/test_transformations.py"]
+    },
+    {
+      "research_topic": "Hierarchical coherence",
+      "modeling_surface": "Hierarchy node aggregation, metadata, coherence diagnostics, not-reconciled warning",
+      "files": ["src/nixtla_scaffold/hierarchy.py", "src/nixtla_scaffold/outputs.py"],
+      "tests": ["tests/test_hierarchy.py"]
+    },
+    {
+      "research_topic": "Nixtla docs and source-code treasure map",
+      "modeling_surface": "Searchable links from Nixtlaverse docs to the exact GitHub source files that should guide future implementation",
+      "files": ["src/nixtla_scaffold/knowledge_base.json", "knowledge/nixtla_dictionary.seed.json"],
+      "tests": ["tests/test_knowledge.py"]
+    },
+    {
+      "research_topic": "Nixtla example notebooks",
+      "modeling_surface": "Knowledge map points agents to runnable Nixtla notebooks for StatsForecast, intermittent demand, MLForecast, and hierarchy reconciliation patterns",
+      "files": ["src/nixtla_scaffold/knowledge_base.json", "knowledge/nixtla_dictionary.seed.json"],
+      "tests": ["tests/test_knowledge.py"]
+    },
+    {
+      "research_topic": "Weighted model combinations",
+      "modeling_surface": "Inverse-error WeightedEnsemble forecasts with model_weights.csv audit output",
+      "files": ["src/nixtla_scaffold/models.py", "src/nixtla_scaffold/schema.py", "src/nixtla_scaffold/outputs.py"],
+      "tests": ["tests/test_forecast.py"]
+    },
+    {
+      "research_topic": "LLM handoff and failure diagnostics",
+      "modeling_surface": "Machine-readable run diagnostics and failure diagnostics for future agents",
+      "files": ["src/nixtla_scaffold/diagnostics.py", "src/nixtla_scaffold/cli.py", "src/nixtla_scaffold/outputs.py"],
+      "tests": ["tests/test_forecast.py"]
+    }
+  ]
+}

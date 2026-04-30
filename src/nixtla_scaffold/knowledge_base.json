@@ -1,0 +1,289 @@
+{
+  "scope": "Open-source Nixtla and FPPy guidance for nixtla_scaffold. TimeGPT is excluded.",
+  "fppy_citation": "Hyndman, R.J., Athanasopoulos, G., Garza, A., Challu, C., Mergenthaler, M., & Olivares, K.G. (2025). Forecasting: Principles and Practice, the Pythonic Way. OTexts: Melbourne, Australia. Available at: OTexts.com/fpppy. Accessed on 28 April 2026.",
+  "principles": [
+    {
+      "title": "Simplicity is key",
+      "guidance": "Default workflow is load, profile, forecast, explain, export. Add advanced options only when a demo workflow needs them.",
+      "source": "Approved project plan; Nixtla simplicity posture"
+    },
+    {
+      "title": "Baselines are mandatory",
+      "guidance": "Always compare candidate models with Naive, SeasonalNaive, HistoricAverage, and RandomWalkWithDrift when eligible.",
+      "implemented_by": "models.py baseline/StatsForecast ladders; best_practice_receipts.csv id=benchmarks_included.",
+      "source": "https://otexts.com/fpppy/05-toolbox.html"
+    },
+    {
+      "title": "Rolling-origin evaluation",
+      "guidance": "Use time-series cross-validation, never random splits, and compare models on the production-like horizon where history allows.",
+      "implemented_by": "models.py per-series cross_validation/backtest; audit/model_selection.csv; best_practice_receipts.csv id=rolling_origin_evaluation.",
+      "source": "https://otexts.com/fpppy/05-toolbox.html"
+    },
+    {
+      "title": "Intervals need evidence",
+      "guidance": "Expose 80% and 95% intervals only when the model and history support them; otherwise explain why intervals were skipped.",
+      "implemented_by": "models.py conformal interval gate; manifest effective_levels; best_practice_receipts.csv id=intervals_supported_by_history.",
+      "source": "https://otexts.com/fpppy/13-practical.html"
+    },
+    {
+      "title": "Coherent hierarchy",
+      "guidance": "Do not present parent and child forecasts together unless rollups reconcile under the same aggregation rule.",
+      "implemented_by": "hierarchy.py aggregation/coherence diagnostics now; future HierarchicalForecast reconciliation via S_df/tags.",
+      "source": "https://otexts.com/fpppy/11-hierarchical-forecasting.html"
+    },
+    {
+      "title": "Nixtla source-first workflow",
+      "guidance": "When a modeling choice is unclear, check both Nixtlaverse docs and the implementation source. Docs explain workflow; repo code reveals supported model classes, arguments, validation helpers, and example notebooks.",
+      "implemented_by": "knowledge_base repo_code_map; diagnostics.md next steps; best_practice_receipts modeling hooks.",
+      "source": "https://github.com/Nixtla"
+    },
+    {
+      "title": "Weighted ensembles need receipts",
+      "guidance": "Weighted forecasts should be learned from rolling-origin error, exposed as a named model, and accompanied by audit/model_weights.csv so an analyst or LLM can audit why each model received weight.",
+      "implemented_by": "models.py WeightedEnsemble; audit/model_weights.csv; best_practice_receipts.csv id=weighted_ensemble_audited.",
+      "source": "https://otexts.com/fpppy/05-toolbox.html"
+    }
+  ],
+  "libraries": [
+    {
+      "name": "StatsForecast",
+      "use": "Default statistical forecasting engine.",
+      "apis": "StatsForecast.forecast, StatsForecast.cross_validation; Naive, SeasonalNaive, HistoricAverage, RandomWalkWithDrift, AutoETS, AutoARIMA, AutoTheta, MSTL.",
+      "contract": "Long DataFrame with unique_id, ds, y.",
+      "caveat": "Requires correct frequency and season_length; conformal intervals need enough history.",
+      "repo_code": "https://github.com/Nixtla/statsforecast/tree/main/python/statsforecast; key files: core.py, models.py, arima.py, ets.py, theta.py, mstl.py, utils.py.",
+      "source": "https://nixtlaverse.nixtla.io/statsforecast/"
+    },
+    {
+      "name": "UtilsForecast",
+      "use": "Evaluation, preprocessing, losses, and plotting helpers.",
+      "apis": "fill_gaps, evaluate, rmse, mase, mqloss, plot_series.",
+      "contract": "Long DataFrame; evaluation expects actuals and model columns.",
+      "caveat": "Utility layer, not a forecasting model library.",
+      "repo_code": "https://github.com/Nixtla/utilsforecast/tree/main/utilsforecast; key files: preprocessing.py, evaluation.py, losses.py, plotting.py, processing.py, validation.py.",
+      "source": "https://nixtlaverse.nixtla.io/utilsforecast/"
+    },
+    {
+      "name": "HierarchicalForecast",
+      "use": "Generic hierarchy and grouped reconciliation.",
+      "apis": "HierarchicalReconciliation.reconcile; BottomUp, TopDown, MinTrace; aggregate.",
+      "contract": "Base forecasts plus historical data, summing matrix S_df, and tags.",
+      "caveat": "Needs hierarchy metadata and base forecasts before reconciliation.",
+      "repo_code": "https://github.com/Nixtla/hierarchicalforecast/tree/main/hierarchicalforecast; key files: core.py, methods.py, probabilistic_methods.py, evaluation.py, utils.py.",
+      "source": "https://nixtlaverse.nixtla.io/hierarchicalforecast/"
+    },
+    {
+      "name": "MLForecast",
+      "use": "Optional v2 path for known future drivers and regressors.",
+      "apis": "MLForecast.fit, predict, cross_validation; lag transforms and date features.",
+      "contract": "Long DataFrame with unique_id, ds, y plus known future exogenous columns.",
+      "caveat": "More moving parts; guard against leakage and only use when future drivers are known.",
+      "repo_code": "https://github.com/Nixtla/mlforecast; key docs/source areas: forecast.py, lag_transforms.py, target_transforms.py, feature engineering examples, cross-validation guides.",
+      "source": "https://nixtlaverse.nixtla.io/mlforecast/"
+    },
+    {
+      "name": "NeuralForecast",
+      "use": "Research-only optional future extension.",
+      "apis": "NeuralForecast.fit, predict; NBEATS, NHITS and related models.",
+      "contract": "Long DataFrame with unique_id, ds, y.",
+      "caveat": "Heavier dependencies and lower interpretability; not a core MVP default.",
+      "repo_code": "https://github.com/Nixtla/neuralforecast; research-only for now, especially model modules and example notebooks.",
+      "source": "https://nixtlaverse.nixtla.io/neuralforecast/"
+    }
+  ],
+  "nixtla_doc_deep_links": [
+    {
+      "name": "StatsForecast complete getting started",
+      "use": "Production-style workflow for multiple series: read long data, explore, train candidate models, cross-validate, and select best models.",
+      "treasure": "Explicitly names StatsForecast.plot, forecast, cross_validation and explains local forecasting/model-per-series selection.",
+      "source": "https://nixtlaverse.nixtla.io/statsforecast/docs/getting-started/getting_started_complete.html"
+    },
+    {
+      "name": "StatsForecast model catalog",
+      "use": "Model discovery for AutoARIMA, ETS, Theta, CES, benchmarks, intermittent demand, and multiple seasonality models.",
+      "treasure": "Use this before adding new model-policy branches so the scaffold chooses models based on frequency, sparsity, and history length.",
+      "source": "https://nixtlaverse.nixtla.io/statsforecast/src/core/models_intro.html"
+    },
+    {
+      "name": "StatsForecast intermittent demand tutorial",
+      "use": "Sparse/zero-heavy finance series such as long-tail SKUs, low-volume products, and sporadic usage.",
+      "treasure": "Shows ADIDA, CrostonClassic, IMAPA, and TSB with plot/evaluation workflow; use before adding intermittent model policy.",
+      "source": "https://nixtlaverse.nixtla.io/statsforecast/docs/tutorials/intermittentdata.html"
+    },
+    {
+      "name": "UtilsForecast preprocessing/evaluation quickstart",
+      "use": "Reference for fill_gaps, plot_series, evaluate, losses, and MASE-style validation helpers.",
+      "treasure": "Direct source for replacing homegrown repair/evaluation pieces with Nixtla utilities when behavior stabilizes.",
+      "source": "https://nixtlaverse.nixtla.io/utilsforecast/index.html"
+    },
+    {
+      "name": "MLForecast end-to-end walkthrough",
+      "use": "Future driver/regressor path with lags, rolling/date features, fit/predict, cross-validation, and selection.",
+      "treasure": "Useful when moving DriverEvent from scenario overlay to true known-future exogenous variables.",
+      "source": "https://nixtlaverse.nixtla.io/mlforecast/docs/getting-started/end_to_end_walkthrough.html"
+    },
+    {
+      "name": "MLForecast cross-validation",
+      "use": "Backtesting ML regressors with lags/date/exogenous features without leakage.",
+      "treasure": "Use before promoting DriverEvent overlays into true known-future exogenous regressors.",
+      "source": "https://nixtlaverse.nixtla.io/mlforecast/docs/how-to-guides/cross_validation.html"
+    },
+    {
+      "name": "MLForecast prediction intervals",
+      "use": "Conformal intervals for ML models when future driver support is added.",
+      "treasure": "Keep interval logic model-specific; do not blindly reuse statistical intervals for ML regressors.",
+      "source": "https://nixtlaverse.nixtla.io/mlforecast/docs/tutorials/prediction_intervals_in_forecasting_models.html"
+    },
+    {
+      "name": "HierarchicalForecast introduction",
+      "use": "Roadmap for coherent hierarchy: BottomUp, TopDown, MiddleOut, MinTrace, ERM, probabilistic coherent methods, and temporal reconciliation.",
+      "treasure": "Requires base forecasts, historical data, S_df, and tags; current scaffold diagnostics prepare those contracts.",
+      "source": "https://nixtlaverse.nixtla.io/hierarchicalforecast/index.html"
+    }
+  ],
+  "repo_code_map": [
+    {
+      "name": "StatsForecast core",
+      "repo": "Nixtla/statsforecast",
+      "paths": ["python/statsforecast/core.py", "python/statsforecast/models.py", "python/statsforecast/arima.py", "python/statsforecast/ets.py", "python/statsforecast/theta.py", "python/statsforecast/mstl.py"],
+      "examples": ["nbs/docs/getting-started/getting_started_complete.ipynb", "nbs/docs/tutorials/IntermittentData.ipynb"],
+      "verified_at": "2026-04-24; repository HEAD observed at 22d39b36a9c4c972fda25407531715e394c80269",
+      "use": "Primary source for StatsForecast constructor behavior, forecast/cross_validation surfaces, model aliases, season_length requirements, intervals, and model class availability.",
+      "source": "https://github.com/Nixtla/statsforecast/tree/main/python/statsforecast"
+    },
+    {
+      "name": "UtilsForecast utilities",
+      "repo": "Nixtla/utilsforecast",
+      "paths": ["utilsforecast/preprocessing.py", "utilsforecast/evaluation.py", "utilsforecast/losses.py", "utilsforecast/plotting.py", "utilsforecast/validation.py", "utilsforecast/model_selection.py"],
+      "examples": ["docs/index examples for fill_gaps, plot_series, evaluate"],
+      "verified_at": "2026-04-24; repository HEAD observed at 22ae12ea862401ee616ff459b899855f44a36b29",
+      "use": "Reference for future replacement of homegrown gap repair, losses, plotting, and model-selection helpers.",
+      "source": "https://github.com/Nixtla/utilsforecast/tree/main/utilsforecast"
+    },
+    {
+      "name": "HierarchicalForecast reconciliation",
+      "repo": "Nixtla/hierarchicalforecast",
+      "paths": ["hierarchicalforecast/core.py", "hierarchicalforecast/methods.py", "hierarchicalforecast/probabilistic_methods.py", "hierarchicalforecast/evaluation.py", "hierarchicalforecast/utils.py"],
+      "examples": ["nbs/examples/TourismSmall.ipynb", "nbs/examples/"],
+      "verified_at": "2026-04-24; repository HEAD observed at 420b5bd5137e567d2b705524dfbf9d1f90883c24",
+      "use": "Implementation target for full reconciliation beyond current independent-node forecasts and coherence diagnostics.",
+      "source": "https://github.com/Nixtla/hierarchicalforecast/tree/main/hierarchicalforecast"
+    },
+    {
+      "name": "MLForecast drivers",
+      "repo": "Nixtla/mlforecast",
+      "paths": ["mlforecast/core.py", "mlforecast/forecast.py", "mlforecast/feature_engineering.py", "mlforecast/lag_transforms.py", "mlforecast/target_transforms.py", "mlforecast/utils.py", "mlforecast/auto.py"],
+      "examples": ["nbs/docs/getting-started/end_to_end_walkthrough.ipynb", "nbs/docs/how-to-guides/cross_validation.ipynb"],
+      "verified_at": "2026-04-24; repository HEAD observed at 38455f016f99c07b1082570dca6cf4ca53e6216a",
+      "use": "Future source for known-future driver models, lag/rolling feature transforms, target transformations, and cross-validation.",
+      "source": "https://github.com/Nixtla/mlforecast"
+    },
+    {
+      "name": "NeuralForecast research-only source",
+      "repo": "Nixtla/neuralforecast",
+      "paths": ["neuralforecast/core.py", "neuralforecast/auto.py", "neuralforecast/models/"],
+      "examples": ["nbs/docs/"],
+      "verified_at": "2026-04-24; research-only, not core MVP",
+      "use": "Optional future research for NHITS/NBEATS-style models when explainability and dependency weight are acceptable.",
+      "source": "https://github.com/Nixtla/neuralforecast"
+    }
+  ],
+  "checklist": [
+    {
+      "check": "Data contract",
+      "guidance": "Validate unique_id, ds, y; fail fast on duplicate keys and invalid numeric targets.",
+      "source": "Project review findings"
+    },
+    {
+      "check": "Frequency and seasonality",
+      "guidance": "Infer frequency conservatively and keep canonical season lengths by frequency; gate model eligibility separately.",
+      "source": "Project review findings; https://otexts.com/fpppy/13-practical.html"
+    },
+    {
+      "check": "Backtest receipts",
+      "guidance": "When enough history exists, include rolling-origin metrics and selected-model rationale in the run artifacts.",
+      "source": "https://otexts.com/fpppy/05-toolbox.html"
+    },
+    {
+      "check": "Finance explanation",
+      "guidance": "Explain forecast vs baseline/prior year, uncertainty, data warnings, and whether driver assumptions were included.",
+      "source": "https://otexts.com/fpppy/"
+    },
+    {
+      "check": "LLM diagnostics",
+      "guidance": "Every run should include machine-readable diagnostics, warnings, model weights, and next debugging steps so future agents can recover quickly from failures or questionable outputs.",
+      "source": "Project review findings"
+    }
+  ],
+  "transformations": [
+    {
+      "name": "Fiscal calendar features",
+      "use": "Add fiscal_year, fiscal_quarter, fiscal_month, and fiscal_period for finance review. Default GitHub-style year starts Feb 1.",
+      "apis": "add_fiscal_calendar(frame, fiscal_year_start_month=2)",
+      "caveat": "Fiscal fields are explanatory features in the MVP; they do not change the forecast model unless a future MLForecast path uses them.",
+      "source": "Project finance standards"
+    },
+    {
+      "name": "Price normalization",
+      "use": "Normalize revenue by a positive factor so forecasts can separate underlying demand from pricing or definition changes.",
+      "apis": "normalize_by_factor(frame, factor_col='price_factor')",
+      "caveat": "The normalization factor must come from an auditable finance assumption or source system.",
+      "source": "Project finance standards"
+    },
+    {
+      "name": "Driver events and scenarios",
+      "use": "Apply auditable additive or multiplicative event assumptions such as launches, pricing actions, migrations, or one-time ramps.",
+      "apis": "DriverEvent; apply_event_adjustments; forecast --event '{...}'",
+      "caveat": "Scenario columns are overlays on the statistical baseline, not proof the event will happen.",
+      "source": "Project finance standards"
+    },
+    {
+      "name": "Best-practice receipts",
+      "use": "Every forecast run emits a receipt table mapping FPP/Nixtla principles to runtime evidence.",
+      "apis": "ForecastRun.best_practice_receipts(); best_practice_receipts.csv; manifest best_practice_receipts",
+      "caveat": "A warning receipt is not a failure; it is an explicit review flag for short history, unreconciled hierarchies, or missing intervals.",
+      "source": "https://otexts.com/fpppy/05-toolbox.html"
+    },
+    {
+      "name": "Weighted ensemble forecasts",
+      "use": "Combine eligible candidate models using inverse-error rolling-origin weights and emit the weights for audit.",
+      "apis": "ForecastSpec.weighted_ensemble; WeightedEnsemble; audit/model_weights.csv",
+      "caveat": "Requires finite backtest metrics; otherwise the run emits a warning and the ensemble is skipped.",
+      "source": "https://otexts.com/fpppy/05-toolbox.html"
+    },
+    {
+      "name": "LLM diagnostics artifacts",
+      "use": "Give future agents a runbook with spec, profile, warnings, selected models, weights, receipts, outputs, and next checks.",
+      "apis": "ForecastRun.diagnostics(); diagnostics.json; diagnostics.md; failure_diagnostics.json",
+      "caveat": "Diagnostics explain what happened; they do not replace data review or finance sign-off.",
+      "source": "Project review findings"
+    }
+  ],
+  "agent_recipes": [
+    {
+      "name": "Agent setup intake",
+      "source": "nixtla-scaffold setup",
+      "steps": "Start broad forecasting requests with setup. Capture data source, number of series, interval posture, exploration mode, MCP regressor-search permission, and requested outputs before modeling.",
+      "command": "nixtla-scaffold setup --workspace runs\\my_forecast_setup --data-source kusto --series-count many --target-name ARR --time-col Month --freq ME --horizon 6 --intervals auto --model-families statsforecast mlforecast hierarchicalforecast --exploration-mode --mcp-regressor-search --outputs all"
+    },
+    {
+      "name": "Excel MCP handoff",
+      "source": "excel-mcp",
+      "steps": "Read workbook or sheet, export a table, run nixtla-scaffold profile, then forecast with column mapping flags.",
+      "command": "nixtla-scaffold forecast --input workbook.xlsx --sheet Data --id-col Product --time-col Month --target-col Revenue --horizon 6 --output runs\\excel_forecast"
+    },
+    {
+      "name": "DAX MCP handoff",
+      "source": "dax-query-server",
+      "steps": "Use list_connections and get_connection_context, query at forecast grain, export CSV/JSON, then run ingest so the scaffold writes canonical unique_id/ds/y plus query metadata before forecasting.",
+      "command": "nixtla-scaffold ingest --input dax_export.csv --source dax --query-file query.dax --id-col Product --time-col FiscalMonth --target-col ARR --output runs\\dax_input.csv --forecast-output runs\\dax_forecast --freq ME --horizon 6"
+    },
+    {
+      "name": "Kusto MCP handoff",
+      "source": "data-query or azure-kusto",
+      "steps": "Aggregate logs or finance telemetry in KQL, export CSV/JSON/columnar MCP output, then run ingest with explicit time/target/id mapping and optional immediate forecast.",
+      "command": "nixtla-scaffold ingest --input kusto_export.json --source kusto --query-file query.kql --id-value \"Premium Overage ARR\" --time-col day_dt --target-col ARR_30day_avg --output runs\\premium_overage_arr_input.csv --forecast-output runs\\premium_overage_arr_demo --freq ME --horizon 6"
+    }
+  ]
+}
+

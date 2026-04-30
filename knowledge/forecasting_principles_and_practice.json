@@ -1,0 +1,74 @@
+{
+  "source": {
+    "title": "Forecasting: Principles and Practice, the Pythonic Way",
+    "url": "https://otexts.com/fpppy/",
+    "citation": "Hyndman, R.J., Athanasopoulos, G., Garza, A., Challu, C., Mergenthaler, M., & Olivares, K.G. (2025). Forecasting: Principles and Practice, the Pythonic Way. OTexts: Melbourne, Australia. Available at: OTexts.com/fpppy. Accessed on 28 April 2026.",
+    "accessed": "2026-04-28",
+    "last_updated_by_source": "2026-04-19"
+  },
+  "principles_to_enforce": [
+    {
+      "id": "tidy_data_checked",
+      "fpp_guidance": "Prepare data, identify missing values, filter/repair time series, and understand data features before estimating models.",
+      "source_url": "https://otexts.com/fpppy/05-toolbox.html",
+      "package_enforcement": ["canonicalize_forecast_frame", "profile_dataset", "repair_time_index"],
+      "runtime_receipt": "ForecastRun.manifest()['best_practice_receipts']"
+    },
+    {
+      "id": "visual_and_diagnostic_mindset",
+      "fpp_guidance": "Graphical/diagnostic methods are central for understanding data and model validity.",
+      "source_url": "https://otexts.com/fpppy/",
+      "package_enforcement": ["profile.json", "model_card.md", "best_practice_receipts.csv"],
+      "runtime_receipt": "Model card headline, warnings, and best-practice receipts"
+    },
+    {
+      "id": "benchmarks_included",
+      "fpp_guidance": "Simple benchmark forecasts such as mean, naive, drift, and seasonal naive are surprisingly effective and should be used as references.",
+      "source_url": "https://otexts.com/fpppy/05-toolbox.html",
+      "package_enforcement": ["Naive", "HistoricAverage", "RandomWalkWithDrift", "WindowAverage", "SeasonalNaive"],
+      "runtime_receipt": "benchmarks_included"
+    },
+    {
+      "id": "rolling_origin_evaluation",
+      "fpp_guidance": "Forecast methods should be checked with time-ordered validation and accuracy measures.",
+      "source_url": "https://otexts.com/fpppy/05-toolbox.html",
+      "package_enforcement": ["StatsForecast.cross_validation", "baseline rolling-origin backtest"],
+      "runtime_receipt": "rolling_origin_evaluation"
+    },
+    {
+      "id": "intervals_supported_by_history",
+      "fpp_guidance": "Prediction intervals are part of practical forecasting but should be presented only when model/history support them.",
+      "source_url": "https://otexts.com/fpppy/13-practical.html",
+      "package_enforcement": ["ConformalIntervals gate", "effective_levels"],
+      "runtime_receipt": "intervals_supported_by_history"
+    },
+    {
+      "id": "driver_events_explicit",
+      "fpp_guidance": "Holiday/event effects and known future changes require explicit variables or assumptions rather than blind extrapolation.",
+      "source_url": "https://otexts.com/fpppy/13-practical.html",
+      "package_enforcement": ["DriverEvent", "apply_event_adjustments", "forecast --event"],
+      "runtime_receipt": "drivers_are_audited_overlays"
+    },
+    {
+      "id": "hierarchy_coherence_visible",
+      "fpp_guidance": "Parent and child forecasts must be checked for coherence before being presented together.",
+      "source_url": "https://otexts.com/fpppy/11-hierarchical-forecasting.html",
+      "package_enforcement": ["aggregate_hierarchy_frame", "hierarchy_coherence", "not reconciled warning"],
+      "runtime_receipt": "hierarchy_coherence_visible"
+    },
+    {
+      "id": "weighted_ensemble_audited",
+      "fpp_guidance": "Forecast combinations can be useful, but weights must be based on validation evidence and exposed for review.",
+      "source_url": "https://otexts.com/fpppy/05-toolbox.html",
+      "package_enforcement": ["WeightedEnsemble", "model_weights.csv", "backtest_metrics.csv"],
+      "runtime_receipt": "weighted_ensemble_audited"
+    },
+    {
+      "id": "llm_diagnostics_visible",
+      "fpp_guidance": "Forecasting workflows should be reproducible and inspectable; failures need enough context to debug data, model, and assumption issues.",
+      "source_url": "https://otexts.com/fpppy/",
+      "package_enforcement": ["diagnostics.json", "diagnostics.md", "failure_diagnostics.json"],
+      "runtime_receipt": "diagnostics artifacts in manifest outputs"
+    }
+  ]
+}

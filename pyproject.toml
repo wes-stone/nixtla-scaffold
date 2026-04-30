@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nixtla-scaffold"
+version = "0.1.0"
+description = "Simple, explainable Nixtla forecasting scaffold for finance users and AI agents."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26",
+    "openpyxl>=3.1",
+    "pandas>=2.0",
+    "plotly>=6.0",
+    "pyyaml>=6.0",
+    "statsforecast>=1.7",
+    "streamlit>=1.56.0",
+    "utilsforecast>=0.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+hierarchy = ["hierarchicalforecast>=1.0"]
+ml = ["lightgbm>=4.0", "mlforecast>=1.0"]
+neural = ["neuralforecast>=2.0"]
+datasets = [
+    "datasetsforecast>=1.0.0",
+]
+
+[project.scripts]
+nixtla-scaffold = "nixtla_scaffold.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

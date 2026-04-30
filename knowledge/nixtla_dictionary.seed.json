@@ -1,0 +1,68 @@
+{
+  "scope": "Open-source Nixtla ecosystem for nixtla_scaffold. TimeGPT is excluded from implementation and recommendations.",
+  "last_research_refresh": "2026-04-24",
+  "fppy_citation": "Hyndman, R.J., Athanasopoulos, G., Garza, A., Challu, C., Mergenthaler, M., & Olivares, K.G. (2025). Forecasting: Principles and Practice, the Pythonic Way. OTexts: Melbourne, Australia. Available at: OTexts.com/fpppy. Accessed on 28 April 2026.",
+  "library_map": [
+    {
+      "library": "StatsForecast",
+      "default_role": "Core statistical model ladder and rolling-origin evaluation engine.",
+      "canonical_contract": "Long DataFrame with unique_id, ds, y.",
+      "models_used_now": ["Naive", "HistoricAverage", "RandomWalkWithDrift", "WindowAverage", "SeasonalNaive", "AutoETS", "AutoARIMA", "AutoTheta"],
+      "models_to_add_later": ["MSTL", "CrostonClassic", "CrostonOptimized", "CrostonSBA", "ADIDA", "IMAPA", "TSB"],
+      "implemented_in": ["src/nixtla_scaffold/models.py", "tests/test_forecast.py"],
+      "source_docs": ["https://nixtlaverse.nixtla.io/statsforecast/", "https://nixtlaverse.nixtla.io/statsforecast/docs/getting-started/getting_started_complete.html", "https://nixtlaverse.nixtla.io/statsforecast/src/core/models_intro.html", "https://nixtlaverse.nixtla.io/statsforecast/docs/tutorials/intermittentdata.html"],
+      "source_code": ["https://github.com/Nixtla/statsforecast/tree/main/python/statsforecast", "python/statsforecast/core.py", "python/statsforecast/models.py", "python/statsforecast/arima.py", "python/statsforecast/ets.py", "python/statsforecast/theta.py", "python/statsforecast/mstl.py", "python/statsforecast/utils.py"],
+      "source_examples": ["nbs/docs/getting-started/getting_started_complete.ipynb", "nbs/docs/tutorials/IntermittentData.ipynb"],
+      "sources": ["https://nixtlaverse.nixtla.io/statsforecast/", "https://otexts.com/fpppy/05-toolbox.html", "https://otexts.com/fpppy/13-practical.html"]
+    },
+    {
+      "library": "UtilsForecast",
+      "default_role": "Reference for evaluation, losses, plotting, gap filling, and feature utilities.",
+      "canonical_contract": "Long DataFrame with actuals and model columns.",
+      "implemented_now": "Concepts reflected in WAPE/MAE/bias metrics, backtest receipts, and gap repair; direct utility wrappers are deferred until a demo needs them.",
+      "implemented_in": ["src/nixtla_scaffold/profile.py", "src/nixtla_scaffold/models.py", "src/nixtla_scaffold/best_practices.py"],
+      "source_docs": ["https://nixtlaverse.nixtla.io/utilsforecast/", "https://nixtlaverse.nixtla.io/utilsforecast/index.html"],
+      "source_code": ["https://github.com/Nixtla/utilsforecast/tree/main/utilsforecast", "utilsforecast/preprocessing.py", "utilsforecast/evaluation.py", "utilsforecast/losses.py", "utilsforecast/plotting.py", "utilsforecast/model_selection.py", "utilsforecast/validation.py"],
+      "sources": ["https://nixtlaverse.nixtla.io/utilsforecast/", "https://otexts.com/fpppy/05-toolbox.html"]
+    },
+    {
+      "library": "HierarchicalForecast",
+      "default_role": "Future reconciliation engine after base forecasts and hierarchy metadata are stable.",
+      "canonical_contract": "Historical data, base forecasts, summing matrix, and tags.",
+      "implemented_now": "Generic hierarchy aggregation, metadata preservation, not-reconciled warning, and coherence diagnostics.",
+      "implemented_in": ["src/nixtla_scaffold/hierarchy.py", "tests/test_hierarchy.py"],
+      "source_docs": ["https://nixtlaverse.nixtla.io/hierarchicalforecast/", "https://nixtlaverse.nixtla.io/hierarchicalforecast/index.html"],
+      "source_code": ["https://github.com/Nixtla/hierarchicalforecast/tree/main/hierarchicalforecast", "hierarchicalforecast/core.py", "hierarchicalforecast/methods.py", "hierarchicalforecast/probabilistic_methods.py", "hierarchicalforecast/evaluation.py", "hierarchicalforecast/utils.py"],
+      "sources": ["https://nixtlaverse.nixtla.io/hierarchicalforecast/", "https://otexts.com/fpppy/11-hierarchical-forecasting.html"]
+    },
+    {
+      "library": "MLForecast",
+      "default_role": "Future path for known future drivers/regressors with lags/date/rolling features.",
+      "canonical_contract": "Long DataFrame with unique_id, ds, y plus known future exogenous variables.",
+      "implemented_now": "DriverEvent scenario overlays are implemented as auditable post-model overlays; ML training is deferred to avoid leakage until known-future driver contracts are proven.",
+      "implemented_in": ["src/nixtla_scaffold/schema.py", "src/nixtla_scaffold/transformations.py", "tests/test_transformations.py"],
+      "source_docs": ["https://nixtlaverse.nixtla.io/mlforecast/", "https://nixtlaverse.nixtla.io/mlforecast/docs/getting-started/end_to_end_walkthrough.html", "https://nixtlaverse.nixtla.io/mlforecast/docs/how-to-guides/cross_validation.html", "https://nixtlaverse.nixtla.io/mlforecast/docs/tutorials/prediction_intervals_in_forecasting_models.html"],
+      "source_code": ["https://github.com/Nixtla/mlforecast", "mlforecast/core.py", "mlforecast/forecast.py", "mlforecast/feature_engineering.py", "mlforecast/lag_transforms.py", "mlforecast/target_transforms.py", "mlforecast/utils.py", "mlforecast/auto.py"],
+      "sources": ["https://nixtlaverse.nixtla.io/mlforecast/", "https://otexts.com/fpppy/13-practical.html"]
+    },
+    {
+      "library": "NeuralForecast",
+      "default_role": "Research-only optional future extension for heavier neural models.",
+      "canonical_contract": "Long DataFrame with unique_id, ds, y.",
+      "implemented_now": "Not in the core package; retained as optional research because finance explainability and dependency weight are concerns.",
+      "implemented_in": [],
+      "source_code": ["https://github.com/Nixtla/neuralforecast", "neuralforecast/core.py", "neuralforecast/auto.py", "neuralforecast/models/"],
+      "sources": ["https://nixtlaverse.nixtla.io/neuralforecast/"]
+    }
+  ],
+  "modeling_policy_summary": [
+    "Always validate canonical data before modeling.",
+    "Always include benchmark forecasts when eligible.",
+    "Use rolling-origin backtests when history allows.",
+    "Expose intervals only when there is enough history/model support.",
+    "Keep driver/event assumptions as explicit scenario overlays.",
+    "Treat hierarchy parent/child forecasts as diagnostic until reconciled.",
+    "Keep weighted forecasts auditable via model_weights.csv.",
+    "Keep diagnostics.json and failure_diagnostics.json easy for future LLMs to parse."
+  ]
+}
