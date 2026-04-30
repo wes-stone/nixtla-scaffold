@@ -6,10 +6,11 @@ Simple, explainable Nixtla forecasting scaffolding for finance users and AI agen
 
 **AI agent skill:** use the bundled [`nixtla-forecast` skill](skills/nixtla-forecast/SKILL.md) when asking an AI agent to run this workflow. It gives agents the intake questions, FPPy guardrails, Nixtla command map, model-selection rules, prediction-interval checks, hierarchy guidance, and post-forecast review checklist. From a source clone, copy `skills/nixtla-forecast/` into your agent's skills directory; from an installed wheel, run `nixtla-scaffold guide skill` to print the same packaged skill text.
 
-Install from GitHub until a PyPI release is published:
+Install from PyPI:
 
 ```powershell
-python -m pip install "nixtla-scaffold[ml,hierarchy] @ git+https://github.com/wes-stone/nixtla-scaffold.git"
+python -m pip install nixtla-scaffold
+python -m pip install "nixtla-scaffold[ml,hierarchy]"
 ```
 
 For local development, use `uv sync --extra ml --extra hierarchy`, then run commands with `uv run nixtla-scaffold ...`.
