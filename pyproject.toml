@@ -8,6 +8,27 @@ version = "0.1.0"
 description = "Simple, explainable Nixtla forecasting scaffold for finance users and AI agents."
 readme = "README.md"
 requires-python = ">=3.10"
+license = { file = "LICENSE" }
+keywords = [
+    "forecasting",
+    "finance",
+    "nixtla",
+    "statsforecast",
+    "mlforecast",
+    "time-series",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business :: Financial",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
 dependencies = [
     "numpy>=1.26",
     "openpyxl>=3.1",
@@ -30,6 +51,31 @@ datasets = [
 
 [project.scripts]
 nixtla-scaffold = "nixtla_scaffold.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/wes-stone/nixtla-scaffold"
+Repository = "https://github.com/wes-stone/nixtla-scaffold"
+Issues = "https://github.com/wes-stone/nixtla-scaffold/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nixtla_scaffold"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"skills/nixtla-forecast/SKILL.md" = "nixtla_scaffold/skills/nixtla-forecast/SKILL.md"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/LICENSE",
+    "/README.md",
+    "/pyproject.toml",
+    "/src",
+    "/tests",
+    "/examples",
+    "/docs",
+    "/knowledge",
+    "/skills/nixtla-forecast/SKILL.md",
+    "/uv.lock",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -15,7 +15,7 @@ from nixtla_scaffold.drivers import parse_driver_events, parse_known_future_regr
 from nixtla_scaffold.external_scoring import write_external_forecast_scores
 from nixtla_scaffold.forecast import run_forecast
 from nixtla_scaffold.hierarchy import aggregate_hierarchy_frame, hierarchy_summary
-from nixtla_scaffold.knowledge import format_knowledge, search_knowledge
+from nixtla_scaffold.knowledge import format_knowledge, load_agent_skill, search_knowledge
 from nixtla_scaffold.presets import PRESET_NAMES, forecast_spec_preset, preset_catalog
 from nixtla_scaffold.profile import profile_dataset
 from nixtla_scaffold.release_gates import OPTIONAL_EXTRAS, format_release_gate_console_summary, run_release_gates
@@ -453,6 +453,9 @@ def _run(args: argparse.Namespace) -> int:
         return 0 if payload["summary"]["status"] == "passed" else 1
 
     if args.command == "guide":
+        if args.query in {"skill", "agent-skill", "nixtla-forecast"}:
+            print(load_agent_skill())
+            return 0
         if args.query == "presets":
             print(json.dumps(preset_catalog(), indent=2, default=str))
             return 0

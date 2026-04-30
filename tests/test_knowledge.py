@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from nixtla_scaffold.cli import main
 from nixtla_scaffold.citations import FPPY_CITATION
-from nixtla_scaffold.knowledge import format_knowledge, search_knowledge
+from nixtla_scaffold.knowledge import format_knowledge, load_agent_skill, search_knowledge
 from nixtla_scaffold.mcp_contracts import describe_contract
 
 
@@ -11,6 +12,17 @@ def test_guide_search_returns_readable_sections() -> None:
     assert "## Intervals need evidence" in rendered
     assert "\n\n- guidance:" in rendered
     assert FPPY_CITATION in rendered
+
+
+def test_guide_skill_prints_bundled_agent_skill(capsys) -> None:
+    assert "name: nixtla-forecast" in load_agent_skill()
+
+    exit_code = main(["guide", "skill"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "name: nixtla-forecast" in output
+    assert "End-to-end FPPy-aligned time series forecasting" in output
 
 
 def test_guide_search_includes_agent_recipes() -> None:

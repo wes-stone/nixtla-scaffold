@@ -40,6 +40,14 @@ REQUIRED_PACKAGE_MEMBERS = (
     "nixtla_scaffold/scenario_lab.py",
     "nixtla_scaffold/release_gates.py",
 )
+REQUIRED_WHEEL_MEMBERS = (
+    *REQUIRED_PACKAGE_MEMBERS,
+    "nixtla_scaffold/skills/nixtla-forecast/SKILL.md",
+)
+REQUIRED_SDIST_MEMBERS = (
+    *REQUIRED_PACKAGE_MEMBERS,
+    "skills/nixtla-forecast/SKILL.md",
+)
 REQUIRED_RUN_OUTPUTS = (
     "history.csv",
     "forecast.csv",
@@ -189,7 +197,14 @@ def _package_metadata_gate() -> ReleaseGateResult:
     text = pyproject.read_text(encoding="utf-8")
     required = [
         'name = "nixtla-scaffold"',
+        'license = { file = "LICENSE" }',
+        '"License :: OSI Approved :: MIT License"',
+        '"Topic :: Scientific/Engineering :: Information Analysis"',
         'nixtla-scaffold = "nixtla_scaffold.cli:main"',
+        "[project.urls]",
+        'Repository = "https://github.com/wes-stone/nixtla-scaffold"',
+        "[tool.hatch.build.targets.wheel.force-include]",
+        '"skills/nixtla-forecast/SKILL.md" = "nixtla_scaffold/skills/nixtla-forecast/SKILL.md"',
         "[project.optional-dependencies]",
         "hierarchy",
         "ml",
@@ -246,20 +261,25 @@ def _install_smoke_gate(output_dir: Path, wheel_path: Path | None) -> ReleaseGat
         return _failed("install_smoke", {"step": "uv pip install", **install}, artifact=str(venv_dir))
     code = (
         "from nixtla_scaffold import ForecastSpec, build_executive_headline, forecast_spec_preset; "
+        "from nixtla_scaffold.knowledge import load_agent_skill; "
         "from nixtla_scaffold.cli import main; "
         "assert ForecastSpec(horizon=1).horizon == 1; "
         "assert forecast_spec_preset('quick').model_policy == 'baseline'; "
         "assert callable(build_executive_headline); "
+        "assert 'name: nixtla-forecast' in load_agent_skill(); "
         "raise SystemExit(main(['guide', 'presets']))"
     )
     smoke = _run_command([str(python_exe), "-c", code], cwd=output_dir, timeout=120)
     console_script = venv_dir / ("Scripts/nixtla-scaffold.exe" if sys.platform == "win32" else "bin/nixtla-scaffold")
     console_smoke = _run_command([str(console_script), "guide", "presets"], cwd=output_dir, timeout=120)
+    console_skill_smoke = _run_command([str(console_script), "guide", "skill"], cwd=output_dir, timeout=120)
     failures: list[str] = []
     if smoke["returncode"] != 0 or not _command_output_contains(smoke, '"quick"'):
         failures.append("public API smoke failed")
     if console_smoke["returncode"] != 0 or not _command_output_contains(console_smoke, '"quick"'):
         failures.append("installed console-script smoke failed")
+    if console_skill_smoke["returncode"] != 0 or not _command_output_contains(console_skill_smoke, "name: nixtla-forecast"):
+        failures.append("installed bundled skill smoke failed")
     status = "passed" if not failures else "failed"
     return ReleaseGateResult(
         gate="install_smoke",
@@ -271,6 +291,7 @@ def _install_smoke_gate(output_dir: Path, wheel_path: Path | None) -> ReleaseGat
             "console_script": str(console_script),
             "public_api_smoke": smoke,
             "console_script_smoke": console_smoke,
+            "console_skill_smoke": console_skill_smoke,
             "failures": failures,
         },
         artifact=str(venv_dir),
@@ -445,7 +466,7 @@ def _live_streamlit_gate(run_dir: Path, *, timeout_seconds: int) -> ReleaseGateR
         "--server.address",
         "127.0.0.1",
     ]
-    proc = subprocess.Popen(command, cwd=run_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    proc = subprocess.Popen(command, cwd=run_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
     url = f"http://127.0.0.1:{port}"
     health_url = f"{url}/_stcore/health"
     status_code: int | None = None
@@ -523,20 +544,26 @@ def _inspect_package_artifacts(wheels: list[Path], sdists: list[Path]) -> dict[s
     for wheel in wheels:
         with zipfile.ZipFile(wheel) as archive:
             names = archive.namelist()
-        absent = [member for member in REQUIRED_PACKAGE_MEMBERS if not any(name.endswith(member) for name in names)]
+        absent = [member for member in REQUIRED_WHEEL_MEMBERS if not _package_member_present(names, member)]
         if absent:
             missing[str(wheel)] = absent
     for sdist in sdists:
         with tarfile.open(sdist, "r:gz") as archive:
             names = archive.getnames()
-        absent = [
-            member
-            for member in REQUIRED_PACKAGE_MEMBERS
-            if not any(name.endswith("src/" + member) or name.endswith(member) for name in names)
-        ]
+        absent = [member for member in REQUIRED_SDIST_MEMBERS if not _package_member_present(names, member)]
         if absent:
             missing[str(sdist)] = absent
-    return {"required_members": list(REQUIRED_PACKAGE_MEMBERS), "missing": missing}
+    return {
+        "required_members": {
+            "wheel": list(REQUIRED_WHEEL_MEMBERS),
+            "sdist": list(REQUIRED_SDIST_MEMBERS),
+        },
+        "missing": missing,
+    }
+
+
+def _package_member_present(names: list[str], member: str) -> bool:
+    return any(name.endswith(member) or name.endswith("src/" + member) for name in names)
 
 
 def _interval_sanity_failures(forecast: pd.DataFrame) -> list[str]:
@@ -567,7 +594,7 @@ def _interval_sanity_failures(forecast: pd.DataFrame) -> list[str]:
 
 def _run_command(command: list[str], *, cwd: Path, timeout: int) -> dict[str, Any]:
     try:
-        completed = subprocess.run(command, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False)
+        completed = subprocess.run(command, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, check=False)
         return {
             "command": command,
             "returncode": completed.returncode,

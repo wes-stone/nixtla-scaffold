@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import json
 import sys
+import tarfile
+import zipfile
 
 from nixtla_scaffold.cli import main
 import nixtla_scaffold.release_gates as release_gates
 from nixtla_scaffold.release_gates import (
     _artifact_hygiene_gate,
+    _inspect_package_artifacts,
     _interval_sanity_failures,
     _optional_extras_gate,
+    _package_metadata_gate,
     _run_command,
     run_release_gates,
 )
@@ -53,6 +57,36 @@ def test_release_gates_fast_path_writes_summary(tmp_path) -> None:
     assert "valid interval containment" in markdown
     csv_text = (tmp_path / "release" / "release_gate_results.csv").read_text(encoding="utf-8")
     assert "reason,remediation,artifact,details_json" in csv_text
+
+
+def test_package_metadata_gate_requires_public_publish_metadata() -> None:
+    result = _package_metadata_gate()
+
+    assert result.status == "passed"
+    assert result.details["missing"] == []
+
+
+def test_build_inspection_requires_bundled_skill_in_wheel_and_sdist(tmp_path) -> None:
+    wheel = tmp_path / "nixtla_scaffold-0.1.0-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for member in release_gates.REQUIRED_WHEEL_MEMBERS:
+            if member == "nixtla_scaffold/skills/nixtla-forecast/SKILL.md":
+                continue
+            archive.writestr(member, "")
+
+    sdist = tmp_path / "nixtla_scaffold-0.1.0.tar.gz"
+    with tarfile.open(sdist, "w:gz") as archive:
+        for member in release_gates.REQUIRED_SDIST_MEMBERS:
+            if member == "skills/nixtla-forecast/SKILL.md":
+                continue
+            path = tmp_path / member.replace("/", "_")
+            path.write_text("", encoding="utf-8")
+            archive.add(path, arcname=f"nixtla_scaffold-0.1.0/src/{member}" if member.startswith("nixtla_scaffold/") else f"nixtla_scaffold-0.1.0/{member}")
+
+    inspection = _inspect_package_artifacts([wheel], [sdist])
+
+    assert inspection["missing"][str(wheel)] == ["nixtla_scaffold/skills/nixtla-forecast/SKILL.md"]
+    assert inspection["missing"][str(sdist)] == ["skills/nixtla-forecast/SKILL.md"]
 
 
 def test_release_gates_cli_compact_success_is_low_noise(tmp_path, capsys) -> None:
