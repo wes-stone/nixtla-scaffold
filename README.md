@@ -1,3 +1,5 @@
+Trying to minimize issues with people vibe coding forecasts what could possible go wrong!!!
+
 # nixtla-scaffold
 
 Simple, explainable Nixtla forecasting scaffolding for finance users and AI agents.
@@ -11,14 +13,14 @@ nixtla-scaffold forecast --input examples\monthly_finance_csv\input.csv --preset
 
 Open these first:
 
-| File | Why it matters |
-| --- | --- |
-| `model_card.md` top paragraph or `diagnostics.json.executive_headline` | One-paragraph deterministic forecast headline. Read or quote this first if you only have 60 seconds. |
-| `trust_summary.csv` | First-stop High/Medium/Low readiness, caveats, next actions, and whether the full requested horizon is validated. |
-| `report.html` | Human-readable decision summary, model review, horizon trust, intervals, seasonality, and backtest evidence. |
-| `llm_context.json` | One-attachment LLM handoff packet with the headline, trust/horizon/interval/residual/seasonality/hierarchy/driver context, artifact index, guardrails, and questions to ask. |
-| `forecast.csv` | Selected forecast only. Start with `row_horizon_status` to identify beyond-validated-horizon rows; `planning_eligible=True` means the row passed the horizon-validation gate, not global planning approval. Pair it with trust, interval, residual, hierarchy, and data-quality review. |
-| `forecast_long.csv` | Primary model-feed output with every future series/model/date row, selected-model flag, intervals when available, interval status, row-level horizon validation, and `planning_eligibility_scope`. |
+| File                                                                   | Why it matters                                                                                                                                                                                                                                                                          |
+| ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model_card.md` top paragraph or `diagnostics.json.executive_headline` | One-paragraph deterministic forecast headline. Read or quote this first if you only have 60 seconds.                                                                                                                                                                                    |
+| `trust_summary.csv`                                                    | First-stop High/Medium/Low readiness, caveats, next actions, and whether the full requested horizon is validated.                                                                                                                                                                       |
+| `report.html`                                                          | Human-readable decision summary, model review, horizon trust, intervals, seasonality, and backtest evidence.                                                                                                                                                                            |
+| `llm_context.json`                                                     | One-attachment LLM handoff packet with the headline, trust/horizon/interval/residual/seasonality/hierarchy/driver context, artifact index, guardrails, and questions to ask.                                                                                                            |
+| `forecast.csv`                                                         | Selected forecast only. Start with `row_horizon_status` to identify beyond-validated-horizon rows; `planning_eligible=True` means the row passed the horizon-validation gate, not global planning approval. Pair it with trust, interval, residual, hierarchy, and data-quality review. |
+| `forecast_long.csv`                                                    | Primary model-feed output with every future series/model/date row, selected-model flag, intervals when available, interval status, row-level horizon validation, and `planning_eligibility_scope`.                                                                                      |
 
 Trust rubric: **High >=75**, **Medium 40-74**, **Low <40**. A High score still means "statistical baseline with evidence," not a plan or guarantee. `planning_eligible=True` in `forecast.csv` / `forecast_long.csv` only means the row passed the horizon-validation gate (`planning_eligibility_scope=horizon_validation_only`); it does not override Low trust, interval issues, residual warnings, hierarchy tradeoffs, or data-quality caveats. Agents should quote `diagnostics.json.executive_headline.paragraph` verbatim rather than rewriting it into a stronger claim. The generated Streamlit app also shows a copy-safe "Copy headline" text box so the deterministic headline can be pasted without paraphrasing.
 
@@ -34,10 +36,10 @@ nixtla-scaffold report --run runs\latest
 
 For demos and QA, think in two layers:
 
-| Layer | Scenarios | Use |
-| --- | --- | --- |
-| Flagship refresh demos | `monthly_basic`, `hierarchy_reconciled` | The first examples to show analysts: a normal monthly forecast and a reconciled parent/child finance rollup. |
-| Finance guardrails | `limited_history_new_product`, `normalized_target_forecast` | Edge-case checks that keep the scaffold honest for new products/metrics with sparse history and pricing, FX, inflation, or definition-change normalization. |
+| Layer                  | Scenarios                                                   | Use                                                                                                                                                         |
+| ---------------------- | ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Flagship refresh demos | `monthly_basic`, `hierarchy_reconciled`                     | The first examples to show analysts: a normal monthly forecast and a reconciled parent/child finance rollup.                                                |
+| Finance guardrails     | `limited_history_new_product`, `normalized_target_forecast` | Edge-case checks that keep the scaffold honest for new products/metrics with sparse history and pricing, FX, inflation, or definition-change normalization. |
 
 Champion selection uses backtested **RMSE** when available because it penalizes large misses; trust and benchmark review also show **MAE, MASE, RMSSE, WAPE, and bias** so scale-free and business-readable checks are visible.
 
@@ -45,11 +47,11 @@ Champion selection uses backtested **RMSE** when available because it penalizes 
 
 The core input contract is a long table with three required columns:
 
-| Column | Meaning |
-| --- | --- |
+| Column      | Meaning                                                         |
+| ----------- | --------------------------------------------------------------- |
 | `unique_id` | Series name, product, SKU, account, or other forecasting grain. |
-| `ds` | Timestamp/date at the forecast grain. |
-| `y` | Numeric value to forecast. |
+| `ds`        | Timestamp/date at the forecast grain.                           |
+| `y`         | Numeric value to forecast.                                      |
 
 Single-series files can omit `unique_id`; the loader creates `series_1`. Business-friendly column names can be mapped with `--id-col`, `--time-col`, and `--target-col`. Use `--unit-label` (for example `$`, `USD`, `seats`, or `ARR`) when you want executive headlines to show currency/units and signed absolute deltas alongside percentage direction.
 
@@ -72,16 +74,16 @@ external = load_external_forecasts(
 
 Supported inputs:
 
-| Format | Required shape | Notes |
-| --- | --- | --- |
-| Long | Date column plus forecast-value column (`ds` / `yhat` by default) | Include a model column or pass `model_name`; omit `unique_id` only for single-series files. |
-| Wide | One row per series/model with date-like forecast columns | Pass `format="wide"` for finance workbooks; date columns are melted to `ds` and non-date columns stay as metadata. Prefer explicit `format=` for ambiguous sheets so incidental date-like metadata headers are not treated as forecast periods. |
+| Format | Required shape                                                    | Notes                                                                                                                                                                                                                                           |
+| ------ | ----------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Long   | Date column plus forecast-value column (`ds` / `yhat` by default) | Include a model column or pass `model_name`; omit `unique_id` only for single-series files.                                                                                                                                                     |
+| Wide   | One row per series/model with date-like forecast columns          | Pass `format="wide"` for finance workbooks; date columns are melted to `ds` and non-date columns stay as metadata. Prefer explicit `format=` for ambiguous sheets so incidental date-like metadata headers are not treated as forecast periods. |
 
 The canonical output keeps analyst metadata (`owner`, `model_version`, `scenario_name`, `notes`, source file/sheet), sets `family="external"`, `is_external_forecast=True`, and uses explicit evidence labels:
 
-| `comparison_evidence_status` | Meaning |
-| --- | --- |
-| `future_only_unscored` | A future-only imported forecast. Use for directional comparison only; do not claim accuracy or backtest validity. |
+| `comparison_evidence_status`         | Meaning                                                                                                                                                                      |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `future_only_unscored`               | A future-only imported forecast. Use for directional comparison only; do not claim accuracy or backtest validity.                                                            |
 | `historical_cutoff_labeled_unscored` | A `cutoff` / `forecast_origin` label exists and is before the target date, but the origin has not been independently verified and rows have not been scored against actuals. |
 
 `is_backtested` is always `False` at import time. Backtest claims require a later scoring workflow that joins cutoff-labeled external forecasts to actuals, preserves chronology, and reports accuracy metrics. Do not concatenate external `yhat` rows into the core `unique_id`, `ds`, `y` training data.
@@ -175,12 +177,12 @@ The core intake questions are:
 
 Presets keep the first touch simple while still making strict and hierarchy workflows discoverable:
 
-| Preset | Use when | Key defaults |
-| --- | --- | --- |
-| `quick` | You need a fast first read or smoke run | Baseline ladder, 6-period horizon, concise verbose-off execution |
-| `finance` | You need the standard serious finance forecast | Auto model policy, trust/action artifacts, intervals, weighted ensemble, full diagnostics |
-| `strict` | The forecast feeds a high-stakes decision | Requires backtests and full-horizon CV for champion selection |
-| `hierarchy` | Parent/child planning totals must tie | Finance defaults plus `bottom_up` reconciliation unless overridden |
+| Preset      | Use when                                       | Key defaults                                                                              |
+| ----------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `quick`     | You need a fast first read or smoke run        | Baseline ladder, 6-period horizon, concise verbose-off execution                          |
+| `finance`   | You need the standard serious finance forecast | Auto model policy, trust/action artifacts, intervals, weighted ensemble, full diagnostics |
+| `strict`    | The forecast feeds a high-stakes decision      | Requires backtests and full-horizon CV for champion selection                             |
+| `hierarchy` | Parent/child planning totals must tie          | Finance defaults plus `bottom_up` reconciliation unless overridden                        |
 
 CLI flags always win over preset defaults:
 
@@ -204,14 +206,14 @@ run.to_directory("runs/finance_forecast")
 
 Use these when a new analyst or agent needs a concrete starting point:
 
-| Path | What it teaches | Command |
-| --- | --- | --- |
-| `examples\quickstart_csv` | Smallest CSV-to-forecast flow using `preset="quick"` | `uv run python examples\quickstart_csv\forecast_quick.py` |
-| `examples\serious_finance_forecast` | Finance target normalization plus an auditable future event overlay | `uv run python examples\serious_finance_forecast\forecast_finance.py` |
-| `examples\custom_finance_model` | Opt-in custom challenger: recent MoM growth to annual run-rate, allocated by historical monthly seasonality | `uv run python examples\custom_finance_model\forecast_custom.py` |
-| `examples\hierarchy_reconciliation` | Leaf data -> hierarchy nodes -> coherent bottom-up planning forecast | `uv run python examples\hierarchy_reconciliation\forecast_hierarchy.py` |
-| `examples\datasetsforecast_tourism_small` | Optional public real-data validation using Nixtla DatasetsForecast TourismSmall quarterly hierarchy | `uv run --extra datasets python examples\datasetsforecast_tourism_small\forecast_tourism_small.py --allow-download` |
-| `examples\python_api_templates\dataframe_forecast.py` | Minimal DataFrame API template for agents and notebooks | import `run_example(...)` or adapt the function |
+| Path                                                  | What it teaches                                                                                             | Command                                                                                                             |
+| ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `examples\quickstart_csv`                             | Smallest CSV-to-forecast flow using `preset="quick"`                                                        | `uv run python examples\quickstart_csv\forecast_quick.py`                                                           |
+| `examples\serious_finance_forecast`                   | Finance target normalization plus an auditable future event overlay                                         | `uv run python examples\serious_finance_forecast\forecast_finance.py`                                               |
+| `examples\custom_finance_model`                       | Opt-in custom challenger: recent MoM growth to annual run-rate, allocated by historical monthly seasonality | `uv run python examples\custom_finance_model\forecast_custom.py`                                                    |
+| `examples\hierarchy_reconciliation`                   | Leaf data -> hierarchy nodes -> coherent bottom-up planning forecast                                        | `uv run python examples\hierarchy_reconciliation\forecast_hierarchy.py`                                             |
+| `examples\datasetsforecast_tourism_small`             | Optional public real-data validation using Nixtla DatasetsForecast TourismSmall quarterly hierarchy         | `uv run --extra datasets python examples\datasetsforecast_tourism_small\forecast_tourism_small.py --allow-download` |
+| `examples\python_api_templates\dataframe_forecast.py` | Minimal DataFrame API template for agents and notebooks                                                     | import `run_example(...)` or adapt the function                                                                     |
 
 For workbook users, put the same `unique_id`, `ds`, `y` columns in an Excel sheet and run:
 
@@ -243,22 +245,22 @@ Model-family posture:
 
 Model-policy semantics are explicit and audited in `manifest.json` under `model_policy_resolution`:
 
-| Policy | What it means | Failure/skipping behavior |
-| --- | --- | --- |
-| `auto` | Run StatsForecast/classical models and add MLForecast when the panel has at least 30 observations per series and optional dependencies are available. | MLForecast import/runtime/no-candidate failures are warnings; the run continues with eligible classical/baseline models. |
-| `all` | Run every eligible open-source family. "All" means all families that are valid for the data, not every model regardless of history. | If MLForecast is eligible but unavailable, fails, or produces no candidates, the run raises instead of silently downgrading. If history is below the 30-observation ML gate, the skip is disclosed and classical models continue. |
-| `statsforecast` | Run the classical/open-source statistical ladder only. | StatsForecast failures are surfaced rather than hidden behind MLForecast. |
-| `mlforecast` | Run MLForecast only. | Missing dependencies, runtime failures, or no candidates raise because this policy explicitly requested ML. |
-| `baseline` | Run simple benchmark models only. | Always available for usable history; useful for smoke tests and short-series fallbacks. |
+| Policy          | What it means                                                                                                                                         | Failure/skipping behavior                                                                                                                                                                                                         |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `auto`          | Run StatsForecast/classical models and add MLForecast when the panel has at least 30 observations per series and optional dependencies are available. | MLForecast import/runtime/no-candidate failures are warnings; the run continues with eligible classical/baseline models.                                                                                                          |
+| `all`           | Run every eligible open-source family. "All" means all families that are valid for the data, not every model regardless of history.                   | If MLForecast is eligible but unavailable, fails, or produces no candidates, the run raises instead of silently downgrading. If history is below the 30-observation ML gate, the skip is disclosed and classical models continue. |
+| `statsforecast` | Run the classical/open-source statistical ladder only.                                                                                                | StatsForecast failures are surfaced rather than hidden behind MLForecast.                                                                                                                                                         |
+| `mlforecast`    | Run MLForecast only.                                                                                                                                  | Missing dependencies, runtime failures, or no candidates raise because this policy explicitly requested ML.                                                                                                                       |
+| `baseline`      | Run simple benchmark models only.                                                                                                                     | Always available for usable history; useful for smoke tests and short-series fallbacks.                                                                                                                                           |
 
 When StatsForecast and MLForecast both run, family-local `WeightedEnsemble` columns are removed before the combined tournament is scored. The scaffold recomputes one unioned `WeightedEnsemble`, learns weights only from common finite cross-validation support, and records each weighted model's `family` in `audit\model_weights.csv`.
 
 Use a long table:
 
-| unique_id | ds | y |
-| --- | --- | --- |
-| Revenue | 2024-01-31 | 100000 |
-| Revenue | 2024-02-29 | 104000 |
+| unique_id | ds         | y      |
+| --------- | ---------- | ------ |
+| Revenue   | 2024-01-31 | 100000 |
+| Revenue   | 2024-02-29 | 104000 |
 
 - `unique_id`: series name, product, SKU, account, or other grain.
 - `ds`: date.
@@ -333,25 +335,25 @@ Row-level horizon fields use `row_horizon_status` as the clearest per-row status
 
 `horizon_trust_state` glossary:
 
-| Value | Where you'll see it | Meaning |
-| --- | --- | --- |
-| `full_horizon_validated` | `trust_summary.csv`, `forecast.csv`, `forecast_long.csv`, report/workbench | Rolling-origin model selection evaluated the champion through the requested horizon. Check `full_horizon_claim_allowed`: fewer than two CV windows means the full horizon was evaluated but not strong enough for a planning-ready champion claim. |
-| `partial_horizon_validated` | `trust_summary.csv`, `forecast.csv`, `forecast_long.csv`, report/workbench | Model selection had rolling-origin evidence, but only through a shorter horizon. Steps beyond `validated_through_horizon` are directional and not planning-ready by themselves. |
-| `beyond_validated_horizon` | row-level `forecast.csv` / `forecast_long.csv` | This specific forecast row is after the validated CV horizon; `planning_eligible=False`. |
-| `no_rolling_origin_evidence` | `trust_summary.csv`, `forecast.csv`, `forecast_long.csv` | No usable rolling-origin evidence exists for the selected champion; trust is capped Low and the forecast should be treated as exploratory. |
+| Value                        | Where you'll see it                                                        | Meaning                                                                                                                                                                                                                                            |
+| ---------------------------- | -------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `full_horizon_validated`     | `trust_summary.csv`, `forecast.csv`, `forecast_long.csv`, report/workbench | Rolling-origin model selection evaluated the champion through the requested horizon. Check `full_horizon_claim_allowed`: fewer than two CV windows means the full horizon was evaluated but not strong enough for a planning-ready champion claim. |
+| `partial_horizon_validated`  | `trust_summary.csv`, `forecast.csv`, `forecast_long.csv`, report/workbench | Model selection had rolling-origin evidence, but only through a shorter horizon. Steps beyond `validated_through_horizon` are directional and not planning-ready by themselves.                                                                    |
+| `beyond_validated_horizon`   | row-level `forecast.csv` / `forecast_long.csv`                             | This specific forecast row is after the validated CV horizon; `planning_eligible=False`.                                                                                                                                                           |
+| `no_rolling_origin_evidence` | `trust_summary.csv`, `forecast.csv`, `forecast_long.csv`                   | No usable rolling-origin evidence exists for the selected champion; trust is capped Low and the forecast should be treated as exploratory.                                                                                                         |
 
 `interval_status` glossary:
 
-| Value | Where you'll see it | Meaning |
-| --- | --- | --- |
-| `calibrated` | `forecast_long.csv`, `trust_summary.csv`, from `interval_diagnostics.csv` | Future bands have matching rolling-origin interval coverage evidence for the model/horizon. |
-| `calibration_warning` | `forecast_long.csv`, `trust_summary.csv`, from `interval_diagnostics.csv` | Empirical coverage exists but the gap is large enough to review before planning use. |
-| `calibration_fail` | `forecast_long.csv`, `trust_summary.csv`, from `interval_diagnostics.csv` | Empirical coverage indicates undercoverage risk. |
-| `future_only` | `forecast_long.csv`, `trust_summary.csv` | Future interval bands exist, but matching rolling-origin interval coverage evidence is unavailable for that horizon. |
-| `adjusted_not_recalibrated` | `forecast_long.csv`, `trust_summary.csv` | Final selected bands were shifted/scaled/reconciled after model calibration, so they are planning aids rather than freshly calibrated uncertainty. |
-| `point_only_ensemble` | `forecast_long.csv`, `trust_summary.csv` | `WeightedEnsemble` is point-only; use component-model intervals or select a single calibrated model if planning ranges matter. Model disagreement lines are not prediction intervals. |
-| `unavailable` | `forecast_long.csv`, `trust_summary.csv` | No interval bands are available for that model row. |
-| `insufficient_observations` | `trust_summary.csv`, from `interval_diagnostics.csv` | Too few interval backtest observations exist to validate coverage. |
+| Value                       | Where you'll see it                                                       | Meaning                                                                                                                                                                               |
+| --------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `calibrated`                | `forecast_long.csv`, `trust_summary.csv`, from `interval_diagnostics.csv` | Future bands have matching rolling-origin interval coverage evidence for the model/horizon.                                                                                           |
+| `calibration_warning`       | `forecast_long.csv`, `trust_summary.csv`, from `interval_diagnostics.csv` | Empirical coverage exists but the gap is large enough to review before planning use.                                                                                                  |
+| `calibration_fail`          | `forecast_long.csv`, `trust_summary.csv`, from `interval_diagnostics.csv` | Empirical coverage indicates undercoverage risk.                                                                                                                                      |
+| `future_only`               | `forecast_long.csv`, `trust_summary.csv`                                  | Future interval bands exist, but matching rolling-origin interval coverage evidence is unavailable for that horizon.                                                                  |
+| `adjusted_not_recalibrated` | `forecast_long.csv`, `trust_summary.csv`                                  | Final selected bands were shifted/scaled/reconciled after model calibration, so they are planning aids rather than freshly calibrated uncertainty.                                    |
+| `point_only_ensemble`       | `forecast_long.csv`, `trust_summary.csv`                                  | `WeightedEnsemble` is point-only; use component-model intervals or select a single calibrated model if planning ranges matter. Model disagreement lines are not prediction intervals. |
+| `unavailable`               | `forecast_long.csv`, `trust_summary.csv`                                  | No interval bands are available for that model row.                                                                                                                                   |
+| `insufficient_observations` | `trust_summary.csv`, from `interval_diagnostics.csv`                      | Too few interval backtest observations exist to validate coverage.                                                                                                                    |
 
 ```powershell
 nixtla-scaffold forecast --input examples\monthly_finance_csv\input.csv --horizon 6 --weighted-ensemble --output runs\weighted
@@ -374,18 +376,18 @@ Forecast runs now write two classes of artifacts:
    - `model_window_metrics.csv`: per-cutoff RMSE/MAE/MASE/RMSSE/WAPE/bias so rolling-origin windows can be reviewed one at a time.
    - `residual_diagnostics.csv`: horizon-step residual diagnostics for checking whether errors worsen further into the forecast horizon.
    - `residual_tests.csv`: heuristic residual bias, one-step autocorrelation, outlier, and early/late structural-break checks over rolling-origin residuals. These are diagnostic screening tools, not formal model adequacy tests; small samples are directional only.
-    - `interval_diagnostics.csv`: empirical prediction-interval coverage, width, conformal method label, horizon metadata, and calibration status when interval backtests are available.
-    - `trust_summary.csv`: first-stop decision artifact with per-series High/Medium/Low trust, score drivers, horizon trust, full-horizon claim gate, caveats, and recommended next actions. Rubric: High >=75, Medium 40-74, Low <40.
-    - `model_explainability.csv`: MLForecast lag/calendar feature importance or coefficient magnitudes when ML models run.
-    - `scenario_assumptions.csv`: event/scenario overlay assumptions when `--event` or `--event-file` is supplied.
-    - `scenario_forecast.csv`: baseline `yhat` beside `yhat_scenario`, `event_adjustment`, and `event_names` for scenario review.
-    - `known_future_regressors.csv`: declared known-future driver contracts from `--regressor` or `--regressor-file`.
-    - `driver_availability_audit.csv`: leakage, future-coverage, known-as-of, audit-status, and modeling-decision checks for declared regressors.
-    - `driver_experiment_summary.csv`: one summary table covering event overlays and known-future regressor audit outcomes.
-    - `llm_context.json`: single LLM feeder packet with executive headline, run summary, per-series review, trust/horizon/interval/residual/seasonality/hierarchy/driver context, artifact index, guardrails, and recommended questions.
-    - `forecast.xlsx`: a curated workbook with the consolidated outputs plus audit sheets.
-    - `hierarchy_reconciliation.csv`: reconciliation method summary and pre/post max gap when hierarchy reconciliation is enabled. Reconciliation enforces parent = sum(children) coherence; node-level accuracy may decrease, so inspect `audit\hierarchy_backtest_comparison.csv`.
-    - `hierarchy_contribution.csv`: parent/child contribution and gap attribution for hierarchy storytelling. Gap contributions are allocation heuristics, not reconciliation algorithm outputs.
+   - `interval_diagnostics.csv`: empirical prediction-interval coverage, width, conformal method label, horizon metadata, and calibration status when interval backtests are available.
+   - `trust_summary.csv`: first-stop decision artifact with per-series High/Medium/Low trust, score drivers, horizon trust, full-horizon claim gate, caveats, and recommended next actions. Rubric: High >=75, Medium 40-74, Low <40.
+   - `model_explainability.csv`: MLForecast lag/calendar feature importance or coefficient magnitudes when ML models run.
+   - `scenario_assumptions.csv`: event/scenario overlay assumptions when `--event` or `--event-file` is supplied.
+   - `scenario_forecast.csv`: baseline `yhat` beside `yhat_scenario`, `event_adjustment`, and `event_names` for scenario review.
+   - `known_future_regressors.csv`: declared known-future driver contracts from `--regressor` or `--regressor-file`.
+   - `driver_availability_audit.csv`: leakage, future-coverage, known-as-of, audit-status, and modeling-decision checks for declared regressors.
+   - `driver_experiment_summary.csv`: one summary table covering event overlays and known-future regressor audit outcomes.
+   - `llm_context.json`: single LLM feeder packet with executive headline, run summary, per-series review, trust/horizon/interval/residual/seasonality/hierarchy/driver context, artifact index, guardrails, and recommended questions.
+   - `forecast.xlsx`: a curated workbook with the consolidated outputs plus audit sheets.
+   - `hierarchy_reconciliation.csv`: reconciliation method summary and pre/post max gap when hierarchy reconciliation is enabled. Reconciliation enforces parent = sum(children) coherence; node-level accuracy may decrease, so inspect `audit\hierarchy_backtest_comparison.csv`.
+   - `hierarchy_contribution.csv`: parent/child contribution and gap attribution for hierarchy storytelling. Gap contributions are allocation heuristics, not reconciliation algorithm outputs.
 
 2. **Audit/detail outputs** for transparency and debugging live under `audit\`: `all_models.csv`, `model_selection.csv`, `backtest_metrics.csv`, `backtest_predictions.csv`, `backtest_windows.csv`, `model_weights.csv`, `target_transform_audit.csv`, `seasonality_profile.csv`, `seasonality_summary.csv`, `seasonality_diagnostics.csv`, `seasonality_decomposition.csv`, `hierarchy_backtest_comparison.csv`, `hierarchy_unreconciled_forecast.csv`, `hierarchy_coherence_pre.csv`, `hierarchy_coherence_post.csv`, and `interpretation.json`. `model_weights.csv` includes `family` so agents can see whether the ensemble learned from baseline, StatsForecast, or MLForecast candidates. `target_transform_audit.csv` records raw, adjusted, transformed, and modeled target values whenever log/log1p or finance normalization is enabled. `seasonality_diagnostics.csv` records cycle counts, credibility labels, warnings, and trend/seasonal/remainder strength so the report does not overclaim annual or weekly seasonality without enough complete cycles. Driver contract files stay at the root because analysts and agents need to review assumptions before using scenario-adjusted rows or driver candidates. The hierarchy comparison/pre/post artifacts preserve the independent forecast, compare selected rolling-origin errors before versus after reconciliation, show parent/child gaps before reconciliation, and confirm remaining gaps after reconciliation. `model_selection.csv` and `backtest_metrics.csv` include CV horizon metadata so agents can see whether validation matched the business horizon. StatsForecast and MLForecast use the same adaptive rolling-origin horizon/window/step contract where feasible; MLForecast lags are capped and disclosed rather than reducing its CV windows. `best_practice_receipts.csv` stays at the root because it is a compact compliance summary and now includes a horizon-claim receipt.
 
@@ -438,12 +440,12 @@ The CLI prints a compact one-glance verdict by default and writes `release_gate_
 
 How to read the gate:
 
-| Surface | What to check |
-| --- | --- |
-| Compact CLI output | Top-line `PASSED`/`FAILED`, version, Python, duration, failed gate names, remediation hints, skip reasons, provenance warnings, and artifact paths. |
-| `release_gate_summary.md` | Human-readable green-light artifact with gate table, provenance, required optional groups, scenario archetype scores, thresholds, exit codes, and failure actions. |
+| Surface                     | What to check                                                                                                                                                                             |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Compact CLI output          | Top-line `PASSED`/`FAILED`, version, Python, duration, failed gate names, remediation hints, skip reasons, provenance warnings, and artifact paths.                                       |
+| `release_gate_summary.md`   | Human-readable green-light artifact with gate table, provenance, required optional groups, scenario archetype scores, thresholds, exit codes, and failure actions.                        |
 | `release_gate_summary.json` | Full machine-readable payload with `summary.headline`, `failed_gates`, `failure_rollup`, provenance, git-SHA unavailable reason, options, per-gate durations, and nested command details. |
-| `release_gate_results.csv` | One-row-per-gate table with flattened status, reason, remediation, artifact, and details JSON for quick audit/filtering. |
+| `release_gate_results.csv`  | One-row-per-gate table with flattened status, reason, remediation, artifact, and details JSON for quick audit/filtering.                                                                  |
 
 Thresholds are intentionally broad smoke gates rather than brittle exact-value snapshots: scenario lab requires zero crashes, at least `count - 2` scenarios passing, composite score >= 70, validity >= 85, and explainability >= 80; workbench QA requires no failed golden scenarios and minimum usability score >= 90; quick forecast requires finite bounded selected forecasts, valid interval containment when interval columns exist, a numeric trust score, and an executive headline. Exit codes are `0` for passed gates, `1` for gate failure, and `2` for CLI/runtime errors. The live Streamlit smoke proves the generated dashboard launches in the current Python environment.
 
@@ -487,4 +489,3 @@ The knowledge base now includes Nixtla source-code maps for the repos that matte
 - `Nixtla/mlforecast`: future driver/regressor path using `core.py`, `forecast.py`, `feature_engineering.py`, lag transforms, target transforms, AutoML, and cross-validation guides
 
 It also links to high-value docs/notebooks such as StatsForecast complete getting started, StatsForecast intermittent demand, UtilsForecast fill/evaluate/plot examples, MLForecast cross-validation, and HierarchicalForecast tourism reconciliation examples.
-
