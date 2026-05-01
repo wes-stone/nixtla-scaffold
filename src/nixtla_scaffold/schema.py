@@ -13,6 +13,8 @@ from typing import Any, Literal
 
 import pandas as pd
 
+from nixtla_scaffold.model_families import MODEL_ALLOWLIST_CANDIDATES, canonicalize_model_allowlist
+
 FillMethod = Literal["ffill", "zero", "interpolate", "drop"]
 ModelPolicy = Literal["auto", "baseline", "statsforecast", "mlforecast", "all"]
 EventEffect = Literal["additive", "multiplicative"]
@@ -197,6 +199,7 @@ class ForecastSpec:
     time_col: str = "ds"
     target_col: str = "y"
     unit_label: str | None = None
+    model_allowlist: tuple[str, ...] = ()
     hierarchy: tuple[str, ...] = ()
     events: tuple[DriverEvent, ...] = field(default_factory=tuple)
     regressors: tuple[KnownFutureRegressor, ...] = field(default_factory=tuple)
@@ -218,6 +221,12 @@ class ForecastSpec:
             raise ValueError(f"interval levels must be between 0 and 100, got {invalid_levels}")
         if self.unit_label is not None and not str(self.unit_label).strip():
             raise ValueError("unit_label cannot be blank")
+        canonical_models, unknown_models = canonicalize_model_allowlist(tuple(self.model_allowlist))
+        if unknown_models:
+            unknown = ", ".join(repr(model) for model in unknown_models)
+            valid = ", ".join(sorted(MODEL_ALLOWLIST_CANDIDATES))
+            raise ValueError(f"unknown model_allowlist entr{'y' if len(unknown_models) == 1 else 'ies'}: {unknown}. Known models: {valid}")
+        object.__setattr__(self, "model_allowlist", canonical_models)
         if self.hierarchy_reconciliation not in {"none", "bottom_up", "mint_ols", "mint_wls_struct"}:
             raise ValueError("hierarchy_reconciliation must be one of: none, bottom_up, mint_ols, mint_wls_struct")
         if len(self.custom_models) > 1:
@@ -229,6 +238,7 @@ class ForecastSpec:
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["levels"] = list(self.levels)
+        data["model_allowlist"] = list(self.model_allowlist)
         data["hierarchy"] = list(self.hierarchy)
         data["events"] = [event.to_dict() for event in self.events]
         data["regressors"] = [regressor.to_dict() for regressor in self.regressors]

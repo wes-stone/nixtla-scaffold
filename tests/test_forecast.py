@@ -111,6 +111,174 @@ def test_long_statsforecast_ladder_includes_mstl_autoarima() -> None:
     assert "MSTL_AutoARIMA" in run.all_models.columns
 
 
+def test_model_allowlist_accepts_friendly_arima_aliases_and_filters_tournament() -> None:
+    df = pd.DataFrame(
+        {
+            "unique_id": ["Revenue"] * 36,
+            "ds": pd.date_range("2023-01-31", periods=36, freq="ME"),
+            "y": [100 + i * 4 + (18 if i % 12 == 11 else 0) - (8 if i % 12 == 6 else 0) for i in range(36)],
+        }
+    )
+
+    run = run_forecast(
+        df,
+        ForecastSpec(
+            horizon=3,
+            freq="ME",
+            levels=(),
+            model_policy="auto",
+            model_allowlist=("arima", "arima mstl"),
+            weighted_ensemble=False,
+            verbose=False,
+        ),
+    )
+
+    models = set(model_module.model_columns(run.all_models))
+    assert models == {"AutoARIMA", "MSTL_AutoARIMA"}
+    assert run.spec.model_allowlist == ("AutoARIMA", "MSTL_AutoARIMA")
+    assert run.manifest()["spec"]["model_allowlist"] == ["AutoARIMA", "MSTL_AutoARIMA"]
+    assert "model allowlist applied: AutoARIMA, MSTL_AutoARIMA" in run.warnings
+    assert not {"AutoETS", "MSTL", "SeasonalNaive", "LinearRegression", "LightGBM"} & models
+
+    resolution = run.model_policy_resolution
+    assert resolution["model_allowlist"] == ["AutoARIMA", "MSTL_AutoARIMA"]
+    ml_family = next(row for row in resolution["families"] if row["family"] == "mlforecast")
+    assert ml_family["ran"] is False
+    assert ml_family["reason_if_not_ran"] == "skipped_by_model_allowlist"
+
+
+def test_model_allowlist_rejects_unknown_names() -> None:
+    with pytest.raises(ValueError, match="unknown model_allowlist"):
+        ForecastSpec(model_allowlist=("definitely not a model",))
+
+
+def test_model_allowlist_ml_only_failure_does_not_fallback_to_disallowed_models(monkeypatch) -> None:
+    df = pd.DataFrame(
+        {
+            "unique_id": ["Revenue"] * 36,
+            "ds": pd.date_range("2023-01-31", periods=36, freq="ME"),
+            "y": [100 + i * 3 for i in range(36)],
+        }
+    )
+
+    def fail_mlforecast(*args, **kwargs):
+        raise ImportError("mlforecast unavailable")
+
+    monkeypatch.setattr(model_module, "forecast_with_mlforecast", fail_mlforecast)
+
+    with pytest.raises(ImportError, match="model_allowlist requested only MLForecast models"):
+        run_forecast(df, ForecastSpec(horizon=3, freq="ME", model_policy="auto", model_allowlist=("LightGBM",)))
+
+
+def test_model_allowlist_ml_only_resolution_marks_classical_families_skipped(monkeypatch) -> None:
+    df = pd.DataFrame(
+        {
+            "unique_id": ["Revenue"] * 36,
+            "ds": pd.date_range("2023-01-31", periods=36, freq="ME"),
+            "y": [100 + i * 3 for i in range(36)],
+        }
+    )
+
+    def fake_mlforecast(history, profile, spec):
+        future = pd.date_range(pd.Timestamp("2026-01-31"), periods=spec.horizon, freq="ME")
+        return ModelResult(
+            forecast=pd.DataFrame({"unique_id": "Revenue", "ds": future, "LightGBM": [200.0, 205.0, 210.0]}),
+            backtest_metrics=pd.DataFrame(
+                {
+                    "unique_id": ["Revenue"],
+                    "model": ["LightGBM"],
+                    "rmse": [1.0],
+                    "mae": [1.0],
+                    "wape": [0.01],
+                    "mase": [0.5],
+                    "rmsse": [0.5],
+                    "bias": [0.0],
+                    "abs_bias": [0.0],
+                    "observations": [3],
+                    "requested_horizon": [3],
+                    "selection_horizon": [3],
+                    "cv_windows": [2],
+                    "cv_step_size": [3],
+                    "cv_horizon_matches_requested": [True],
+                }
+            ),
+            backtest_predictions=pd.DataFrame(),
+            engine="mlforecast",
+            model_weights=pd.DataFrame(columns=["unique_id", "model", "family", "weight", "score_metric", "score_value"]),
+            warnings=("model allowlist applied: LightGBM",),
+        )
+
+    monkeypatch.setattr(model_module, "forecast_with_mlforecast", fake_mlforecast)
+
+    run = run_forecast(df, ForecastSpec(horizon=3, freq="ME", model_policy="auto", model_allowlist=("LightGBM",)))
+
+    resolution_by_family = {row["family"]: row for row in run.model_policy_resolution["families"]}
+    assert resolution_by_family["baseline"]["reason_if_not_ran"] == "skipped_by_model_allowlist"
+    assert resolution_by_family["statsforecast"]["reason_if_not_ran"] == "skipped_by_model_allowlist"
+    assert resolution_by_family["mlforecast"]["ran"] is True
+    assert resolution_by_family["mlforecast"]["contributed_models"] == ["LightGBM"]
+
+
+def test_model_allowlist_disallows_baseline_fallback_when_statsforecast_unavailable(monkeypatch) -> None:
+    df = pd.DataFrame(
+        {
+            "unique_id": ["Revenue"] * 36,
+            "ds": pd.date_range("2023-01-31", periods=36, freq="ME"),
+            "y": [100 + i * 3 for i in range(36)],
+        }
+    )
+
+    def fail_statsforecast(*args, **kwargs):
+        raise ImportError("statsforecast unavailable")
+
+    monkeypatch.setattr(model_module, "forecast_with_statsforecast", fail_statsforecast)
+
+    with pytest.raises(RuntimeError, match="baseline fallback would violate model_allowlist"):
+        run_forecast(df, ForecastSpec(horizon=3, freq="ME", model_policy="auto", model_allowlist=("arima",)))
+
+
+def test_cli_model_allowlist_writes_canonical_spec(tmp_path) -> None:
+    input_path = tmp_path / "input.csv"
+    output_path = tmp_path / "run"
+    pd.DataFrame(
+        {
+            "unique_id": ["Revenue"] * 36,
+            "ds": pd.date_range("2023-01-31", periods=36, freq="ME"),
+            "y": [100 + i * 3 + (12 if i % 12 == 11 else 0) for i in range(36)],
+        }
+    ).to_csv(input_path, index=False)
+
+    exit_code = main(
+        [
+            "forecast",
+            "--input",
+            str(input_path),
+            "--freq",
+            "ME",
+            "--horizon",
+            "3",
+            "--model-policy",
+            "statsforecast",
+            "--model",
+            "arima",
+            "--model",
+            "arima mstl",
+            "--levels",
+            "80",
+            "--no-weighted-ensemble",
+            "--no-verbose",
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    assert exit_code == 0
+    manifest = json.loads((output_path / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["spec"]["model_allowlist"] == ["AutoARIMA", "MSTL_AutoARIMA"]
+    all_models = pd.read_csv(output_path / "audit" / "all_models.csv")
+    assert set(model_module.model_columns(all_models)) == {"AutoARIMA", "MSTL_AutoARIMA"}
+
+
 def test_statsforecast_cv_intervals_feed_interval_diagnostics() -> None:
     df = pd.DataFrame(
         {
@@ -1238,14 +1406,27 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert "executive_headline" in streamlit_app
     assert "Forecast headline" in streamlit_app
     assert "Quote diagnostics.json executive_headline.paragraph verbatim" in streamlit_app
-    assert "Copy headline" in streamlit_app
-    assert "copy_headline_" in streamlit_app
+    assert "Copy-safe headline" in streamlit_app
+    assert "Use the copy icon in this code block" in streamlit_app
+    assert 'st.code(str(headline_text), language="text")' in streamlit_app
     assert "Decision summary" in streamlit_app
-    assert "Trust level" in streamlit_app
-    assert "Unvalidated steps" in streamlit_app
-    assert "Horizon score cap" in streamlit_app
-    assert 'data-baseweb="tab"' in streamlit_app
-    assert "font-size: 1.04rem" in streamlit_app
+    assert "Watchouts from this run" in streamlit_app
+    assert "Current model next actions" in streamlit_app
+    assert "Forecast operating loop" in streamlit_app
+    assert "Connect end to end" in streamlit_app
+    assert "Add drivers/regressors" in streamlit_app
+    assert "Track performance over time" in streamlit_app
+    assert 'if active_section == "Forecast review" and headline_text:' in streamlit_app
+    assert 'if active_section == "Forecast review" and not trust_summary.empty:' in streamlit_app
+    assert "Forecast review owns the executive headline" in streamlit_app
+    assert '"Forecast ledger"' in streamlit_app
+    assert 'read_json("ledger_context.json")' in streamlit_app
+    assert "official forecast locks" in streamlit_app
+    assert "Non-lock forecasts render as lighter lines" in streamlit_app
+    assert "Latest actuals are a clean line" in streamlit_app
+    assert "Applying corrected/normalized history to a forecast requires an explicit user action" in streamlit_app
+    assert "forecast snapshot" in streamlit_app
+    assert 'data-baseweb="tab"' not in streamlit_app
     assert "llm_context.json" in streamlit_app
     assert "planning_eligible is a horizon-validation flag only" in streamlit_app
     assert "horizon_message_severity" in streamlit_app
@@ -1276,7 +1457,20 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert "Model feed columns keep `yhat`, `yhat_lo_80`, `yhat_hi_80`, `yhat_lo_95`, and `yhat_hi_95` adjacent" in streamlit_app
     assert '"Prediction intervals"' in streamlit_app
     assert "Prediction interval focus" in streamlit_app
-    assert "All interval-bearing candidate models are selected by default" in streamlit_app
+    assert "st.cache_data" in streamlit_app
+    assert "cached_read_csv" in streamlit_app
+    assert "Workbench section" in streamlit_app
+    assert "Sidebar tabs stay visible" in streamlit_app
+    assert "Only the selected workbench section renders on each rerun" in streamlit_app
+    assert "fast tabs instead of hidden pages" in streamlit_app
+    assert "workbench_tab_" in streamlit_app
+    assert "section_key(section)" in streamlit_app
+    assert "render_workbench_section_nav" in streamlit_app
+    assert "st.button(" in streamlit_app
+    assert "st.selectbox(\n                \"Workbench section\"" not in streamlit_app
+    assert "st.tabs" not in streamlit_app
+    assert "The top interval-bearing candidate models are selected by default" in streamlit_app
+    assert "DEFAULT_INTERVAL_MODEL_LIMIT" in streamlit_app
     assert "Models with interval bands" in streamlit_app
     assert "interval_bearing_models" in streamlit_app
     assert "interval_focus_models_frame" in streamlit_app
@@ -1338,7 +1532,8 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert "Focused rolling-origin window" in streamlit_app
     assert "best_model_for_scope" in streamlit_app
     assert "model_family" in streamlit_app
-    assert 'key=f"models_to_investigate_{uid}"' in streamlit_app
+    assert 'focus_key = f"models_to_investigate_{uid}"' in streamlit_app
+    assert "key=focus_key" in streamlit_app
     assert 'key="forecast_context_chart"' in streamlit_app
     assert 'key="investigation_forecast_chart"' in streamlit_app
     assert 'key="investigation_backtest_chart"' in streamlit_app

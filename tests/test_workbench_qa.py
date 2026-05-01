@@ -22,10 +22,26 @@ def test_workbench_qa_generates_golden_runs_and_summary(tmp_path) -> None:
     assert summary["passed"] == 4
     assert summary["min_usability_score"] >= 90
     assert summary["app_test_timeout_seconds"] == 17
+    assert summary["max_streamlit_app_bytes"] > 0
+    assert summary["max_csv_artifact_rows"] > 0
+    assert summary["performance_status_counts"]["not_measured"] == 4
     summary_frame = pd.read_csv(tmp_path / "qa" / "workbench_qa_summary.csv")
-    assert {"scenario", "status", "usability_score", "streamlit_compile_status", "app_test_timeout_seconds"}.issubset(summary_frame.columns)
+    assert {
+        "scenario",
+        "status",
+        "usability_score",
+        "streamlit_compile_status",
+        "streamlit_compile_seconds",
+        "app_test_timeout_seconds",
+        "streamlit_app_bytes",
+        "csv_artifact_rows",
+        "performance_status",
+    }.issubset(summary_frame.columns)
     assert set(summary_frame["app_test_timeout_seconds"]) == {17}
     assert set(summary_frame["scenario"]) == {"monthly_basic", "hierarchy_reconciled", "normalized_target_forecast", "custom_model_challenger"}
+    perf_frame = pd.read_csv(tmp_path / "qa" / "workbench_perf_summary.csv")
+    assert {"scenario", "performance_status", "streamlit_app_bytes", "csv_artifact_rows"}.issubset(perf_frame.columns)
+    assert (tmp_path / "qa" / "workbench_perf_summary.json").exists()
     assert (tmp_path / "qa" / "hierarchy_reconciled" / "hierarchy_reconciliation.csv").exists()
     assert (tmp_path / "qa" / "normalized_target_forecast" / "audit" / "target_transform_audit.csv").exists()
     assert (tmp_path / "qa" / "custom_model_challenger" / "custom_model_contracts.csv").exists()
@@ -47,6 +63,8 @@ def test_workbench_qa_runs_streamlit_app_test_when_requested(tmp_path) -> None:
     assert result["status"] == "passed"
     assert result["streamlit_compile_status"] == "passed"
     assert result["app_test_status"] == "passed"
+    assert result["performance_status"] == "passed"
+    assert result["app_test_seconds"] > 0
 
 
 def test_workbench_qa_cli_writes_summary(tmp_path, capsys) -> None:
@@ -73,6 +91,7 @@ def test_workbench_qa_cli_writes_summary(tmp_path, capsys) -> None:
     assert payload["summary"]["scenarios"] == ["short_history"]
     assert (tmp_path / "qa" / "short_history" / "forecast.csv").exists()
     assert (tmp_path / "qa" / "workbench_qa_summary.json").exists()
+    assert (tmp_path / "qa" / "workbench_perf_summary.json").exists()
 
 
 def test_workbench_qa_defaults_use_clear_canonical_scenario_names() -> None:

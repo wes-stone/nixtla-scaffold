@@ -424,13 +424,15 @@ Every forecast run produces these artifacts:
 | `audit\hierarchy_coherence_post.csv` | Parent/child coherence gaps after reconciliation |
 | `interpretation.json` / `.md` | Backtest windows, seasonality, naive comparison |
 | `diagnostics.md` | Human-readable diagnostics markdown with the same executive headline and next steps |
-| `report.html` | Visual report with decision summary, charts, and fixed-axis rolling-origin backtest filmstrip |
+| `report.html` | Visual report with decision summary, charts, fixed-axis rolling-origin backtest filmstrip, and a static forecast-ledger preview when `ledger_context.json` exists |
 | `report_base64.txt` | Same report, base64 for embedding |
-| `streamlit_app.py` | Interactive dashboard with top-level trust/action decision summary, champion lens controls for best overall vs best StatsForecast/classical vs best MLForecast, active champion horizon/interval banners, winner-metric selector with guidance for RMSE/MAE/WAPE/MASE/RMSSE/bias/weight tradeoffs, first-glance forecast charts that include interval bands for every displayed interval-bearing candidate model, a dedicated Model investigation tab with manual model picking whose menus show `#rank | model | engine`, a model-picker guide with rank, engine, model type, and role so StatsForecast/classical, MLForecast, baseline, ensemble, and custom candidates are readable, focused forecast/CV comparison charts whose interval ribbons use the same color as the owning model line, are named in the legend, and use the same `forecast_long.csv` model feed for point forecasts plus interval bounds, fixed-axis CV window player, dedicated Prediction intervals tab with all interval-bearing candidate model bands selected by default plus the same rank/engine picker guide, interval-width summary, calibration evidence, and row-level interval review, benchmark win-rate chart, residual horizon/time/histogram/ACF diagnostics with white-noise heuristic and outlier dates, Seasonality tab with cycle-count credibility, configurable seasonal-year overlay that defaults to the active/best model forecast and lets users choose any candidate model while retaining actual-year context, and additive decomposition evidence, MLForecast interpretability, hierarchy roll-up/down diagnostics, an Assumptions & Drivers tab for scenario/regressor audits, consolidated output previews with `yhat` and interval bound columns kept adjacent, and pre/post reconciliation gap review when enabled |
+| `streamlit_app.py` | Interactive dashboard with cached local artifact loading, polished sidebar **Workbench section** button tabs that keep every section visible while rendering only the active heavy section on rerun. Forecast review owns the styled executive headline card, copy-safe code block, decision/action cards for watchouts and current model next actions, and a forecast operating loop for connecting refreshes end to end, adding drivers/regressors, and tracking forecast performance over time. When `ledger_context.json` exists, a lazy Forecast ledger section opens with one clean line chart: latest actuals/history, official locks emphasized, and recent non-lock forecast versions as lighter lines before collapsing the raw ledger audit tables for deeper review. It also includes champion lens controls for best overall vs best StatsForecast/classical vs best MLForecast, active champion horizon/interval banners, winner-metric guidance, first-glance forecast charts, dedicated Model investigation, fixed-axis CV window player, Prediction intervals, Model audit, Seasonality, Hierarchy, Assumptions & Drivers, Feeder outputs, and pre/post reconciliation review when enabled. Set `NIXTLA_SCAFFOLD_STREAMLIT_PERF=1` before launching to show artifact-load diagnostics in the sidebar. |
+| `ledger_context.json` | Optional pointer written when a run is registered in a forecast ledger; lets `report.html` and the Streamlit workbench discover ledger exports. |
+| `runs\forecast_ledger\exports\*.csv` | Power BI-ready forecast ledger mirrors: versions, snapshots, official locks, actual revisions, forecast-vs-actuals, performance, selected-lock deltas, adjustments, corrected actuals, and regime changes. |
 | `forecast.xlsx` | Excel workbook with all sheets |
 | `best_practice_receipts.csv` | FPPy compliance audit trail |
 
-Use `--unit-label` when the user cares about currency or business units in the executive headline. The generated headline includes signed absolute deltas and YoY comparisons only when a prior-year same-period actual exists; it should not invent YoY context. The generated Streamlit app includes a "Copy headline" text box so agents can paste the deterministic headline verbatim. The public `ExecutiveHeadline` object supports stable direct attribute access in the 0.1.x package line; its serialized dictionary may append optional fields, so ignore unknown keys.
+Use `--unit-label` when the user cares about currency or business units in the executive headline. The generated headline includes signed absolute deltas and YoY comparisons only when a prior-year same-period actual exists; it should not invent YoY context. The generated Streamlit app includes a copy-safe headline code block with a copy icon so agents can paste the deterministic headline verbatim. The public `ExecutiveHeadline` object supports stable direct attribute access in the 0.1.x package line; its serialized dictionary may append optional fields, so ignore unknown keys.
 
 ### Step 4: Explain and Iterate
 
@@ -634,6 +636,15 @@ The backtest adapts per series instead of using fixed windows:
 | `statsforecast` | `--model-policy statsforecast` | StatsForecast only |
 | `mlforecast` | `--model-policy mlforecast` | MLForecast only |
 | `baseline` | `--model-policy baseline` | Naive/Drift/Average only |
+
+Favorite-model allowlist:
+
+```powershell
+uv run nixtla-scaffold forecast --input data.csv --preset finance --horizon 6 --model arima --model "arima mstl" --output runs\arima_favorites
+uv run nixtla-scaffold forecast --input data.csv --preset finance --horizon 6 --model-allowlist arima "arima mstl" --no-weighted-ensemble --output runs\literal_arima_favorites
+```
+
+Aliases are canonicalized, so `arima` becomes `AutoARIMA` and `arima mstl` / `mstl arima` becomes `MSTL_AutoARIMA`. This is a real model tournament allowlist, not just a UI preference: non-allowlisted StatsForecast/MLForecast/baseline candidates are skipped and `manifest.json -> model_policy_resolution.model_allowlist` records the canonical set. If `--weighted-ensemble` remains enabled, `WeightedEnsemble` is derived only from the allowlisted candidates; use `--no-weighted-ensemble` when the user wants literal model outputs only.
 
 Strict evaluation option:
 
@@ -843,7 +854,7 @@ uv run nixtla-scaffold workbench-qa --scenarios hierarchy_reconciled transform_n
 uv run nixtla-scaffold workbench-qa --output runs\workbench_qa --app-test-timeout 120
 ```
 
-The harness generates representative runs for monthly, short-history, hierarchy reconciliation, and finance-normalization cases. It checks required artifacts, compiles each generated `streamlit_app.py`, runs Streamlit AppTest unless disabled, and writes `workbench_qa_summary.csv` plus `workbench_qa_summary.json` with the AppTest timeout seconds used for diagnostics.
+The harness generates representative runs for monthly, short-history, hierarchy reconciliation, and finance-normalization cases. It checks required artifacts, compiles each generated `streamlit_app.py`, runs Streamlit AppTest unless disabled, and writes `workbench_qa_summary.csv` plus `workbench_qa_summary.json` with the AppTest timeout seconds used for diagnostics. It also writes `workbench_perf_summary.csv` and `workbench_perf_summary.json` with compile/AppTest seconds, generated app size, CSV artifact row counts, and a performance status for dashboard snappiness regression tracking.
 
 Rule: no dashboard/workbench feature is done until the relevant golden run passes this harness, and high-risk changes should still get a live HTTP smoke.
 

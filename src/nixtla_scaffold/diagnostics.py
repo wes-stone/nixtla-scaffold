@@ -293,6 +293,8 @@ def format_run_diagnostics_markdown(run: Any) -> str:
         "",
     ]
     resolution = diagnostics.get("model_policy_resolution", {})
+    if isinstance(resolution, dict) and resolution.get("model_allowlist"):
+        lines.append(f"- Model allowlist: {', '.join(str(model) for model in resolution.get('model_allowlist') or [])}")
     families = resolution.get("families", []) if isinstance(resolution, dict) else []
     if families:
         for family in families:

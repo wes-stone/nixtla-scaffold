@@ -16,6 +16,16 @@ from nixtla_scaffold.external_scoring import write_external_forecast_scores
 from nixtla_scaffold.forecast import run_forecast
 from nixtla_scaffold.hierarchy import aggregate_hierarchy_frame, hierarchy_summary
 from nixtla_scaffold.knowledge import format_knowledge, load_agent_skill, search_knowledge
+from nixtla_scaffold.ledger import (
+    DEFAULT_LEDGER_PATH,
+    compare_versions,
+    export_ledger,
+    ingest_actuals,
+    ingest_adjustments,
+    init_ledger,
+    lock_version,
+    register_run,
+)
 from nixtla_scaffold.presets import PRESET_NAMES, forecast_spec_preset, preset_catalog
 from nixtla_scaffold.profile import profile_dataset
 from nixtla_scaffold.release_gates import OPTIONAL_EXTRAS, format_release_gate_console_summary, run_release_gates
@@ -86,6 +96,7 @@ def main(argv: list[str] | None = None) -> int:
     forecast_cmd.add_argument("--unit-label", default=None, help="Optional unit/currency label for headline values, e.g. $, USD, seats, ARR")
     forecast_cmd.add_argument("--fill-method", choices=["ffill", "zero", "interpolate", "drop"], default="ffill")
     forecast_cmd.add_argument("--model-policy", choices=MODEL_POLICY_CHOICES, default="auto", help=MODEL_POLICY_HELP)
+    _add_model_allowlist_args(forecast_cmd)
     forecast_cmd.add_argument("--target-transform", choices=["none", "log", "log1p"], default="none", help="Optional target transform for modeling; outputs are inverse-transformed for reporting")
     forecast_cmd.add_argument("--normalization-factor-col", default=None, help="Positive factor column used to normalize y before modeling, e.g. price_factor, fx_rate, inflation_index")
     forecast_cmd.add_argument("--normalization-label", default="", help="Readable label for the normalization assumption")
@@ -144,6 +155,7 @@ def main(argv: list[str] | None = None) -> int:
     forecast_cmd.add_argument("--custom-timeout-seconds", type=int, default=120, help="Timeout for each custom script invocation")
     forecast_cmd.add_argument("--custom-arg", action="append", default=[], help="Extra argument passed through to --custom-script; repeat as needed")
     forecast_cmd.add_argument("--output", default="runs/latest")
+    _add_ledger_registration_args(forecast_cmd)
 
     ingest_cmd = sub.add_parser("ingest", help="Convert a Kusto/DAX/MCP query result export into canonical forecast input")
     ingest_cmd.add_argument("--input", required=True, help="Query result file: CSV, XLSX/XLSM, JSON, JSONL, or MCP columnar JSON")
@@ -165,6 +177,7 @@ def main(argv: list[str] | None = None) -> int:
     ingest_cmd.add_argument("--unit-label", default=None, help="Optional unit/currency label for headline values when forecasting after ingest")
     ingest_cmd.add_argument("--fill-method", choices=["ffill", "zero", "interpolate", "drop"], default="ffill")
     ingest_cmd.add_argument("--model-policy", choices=MODEL_POLICY_CHOICES, default="auto", help=MODEL_POLICY_HELP)
+    _add_model_allowlist_args(ingest_cmd)
     ingest_cmd.add_argument("--target-transform", choices=["none", "log", "log1p"], default="none")
     ingest_cmd.add_argument("--normalization-factor-col", default=None)
     ingest_cmd.add_argument("--normalization-label", default="")
@@ -182,6 +195,7 @@ def main(argv: list[str] | None = None) -> int:
     ingest_cmd.add_argument("--custom-model-name", default=None, help="Readable custom model name when forecasting after ingest")
     ingest_cmd.add_argument("--custom-timeout-seconds", type=int, default=120)
     ingest_cmd.add_argument("--custom-arg", action="append", default=[])
+    _add_ledger_registration_args(ingest_cmd)
 
     hierarchy_cmd = sub.add_parser("hierarchy", help="Aggregate hierarchy columns into canonical forecast nodes")
     hierarchy_cmd.add_argument("--input", required=True, help="CSV, XLSX, or XLSM file")
@@ -274,6 +288,67 @@ def main(argv: list[str] | None = None) -> int:
     )
     release_cmd.add_argument("--json", action="store_true", help="Print the full machine-readable release-gate payload instead of the compact summary")
 
+    ledger_cmd = sub.add_parser("ledger", help="Manage a refreshable forecast ledger with versions, official locks, actuals, adjustments, and Power BI exports")
+    ledger_sub = ledger_cmd.add_subparsers(dest="ledger_command", required=True)
+
+    ledger_init = ledger_sub.add_parser("init", help="Create or migrate a forecast ledger")
+    ledger_init.add_argument("--ledger", default=str(DEFAULT_LEDGER_PATH), help="Ledger folder; defaults to runs\\forecast_ledger")
+
+    ledger_register = ledger_sub.add_parser("register", help="Register an existing forecast run directory as a ledger version")
+    ledger_register.add_argument("--ledger", default=str(DEFAULT_LEDGER_PATH))
+    ledger_register.add_argument("--run", required=True, help="Run directory produced by forecast")
+    ledger_register.add_argument("--forecast-key", required=True, help="Business forecast key, e.g. Actions ARR")
+    ledger_register.add_argument("--version-label", default="", help="Human label such as March refresh")
+    ledger_register.add_argument("--created-by", default="")
+    ledger_register.add_argument("--notes", default="")
+    ledger_register.add_argument("--source-metadata", default=None, help="Optional *.source.json from ingest/query refresh")
+    ledger_register.add_argument("--source-kind", default="", help="Optional source kind when no source metadata file exists")
+
+    ledger_lock = ledger_sub.add_parser("lock", help="Mark a registered version as an official submitted forecast")
+    ledger_lock.add_argument("--ledger", default=str(DEFAULT_LEDGER_PATH))
+    ledger_lock.add_argument("--version-id", required=True)
+    ledger_lock.add_argument("--lock-label", required=True, help="Submitted view label, e.g. March lock")
+    ledger_lock.add_argument("--audience", default="leadership")
+    ledger_lock.add_argument("--planning-cycle", default="")
+    ledger_lock.add_argument("--communication-date", default="")
+    ledger_lock.add_argument("--submitted-to", default="")
+    ledger_lock.add_argument("--reason", default="")
+    ledger_lock.add_argument("--locked-by", default="")
+    ledger_lock.add_argument("--notes", default="")
+
+    ledger_actuals = ledger_sub.add_parser("actuals", help="Append a revised actuals refresh and rescore registered forecast versions")
+    ledger_actuals.add_argument("--ledger", default=str(DEFAULT_LEDGER_PATH))
+    ledger_actuals.add_argument("--input", required=True)
+    ledger_actuals.add_argument("--sheet", default=None)
+    ledger_actuals.add_argument("--forecast-key", required=True)
+    ledger_actuals.add_argument("--id-col", default="unique_id")
+    ledger_actuals.add_argument("--time-col", default="ds")
+    ledger_actuals.add_argument("--target-col", default="y")
+    ledger_actuals.add_argument("--source-kind", default="")
+    ledger_actuals.add_argument("--source-id", default="")
+    ledger_actuals.add_argument("--revision-label", default="")
+    ledger_actuals.add_argument("--known-as-of", default="")
+
+    ledger_adjustments = ledger_sub.add_parser("adjustments", help="Append anomaly/business-model/regime-change adjustment contracts")
+    ledger_adjustments.add_argument("--ledger", default=str(DEFAULT_LEDGER_PATH))
+    ledger_adjustments.add_argument("--input", required=True)
+    ledger_adjustments.add_argument("--sheet", default=None)
+    ledger_adjustments.add_argument("--forecast-key", required=True)
+
+    ledger_compare = ledger_sub.add_parser("compare", help="Compare a selected official lock/version against the latest or chosen version")
+    ledger_compare.add_argument("--ledger", default=str(DEFAULT_LEDGER_PATH))
+    ledger_compare.add_argument("--forecast-key", required=True)
+    ledger_compare.add_argument("--against-lock", default=None, help="Official lock label to compare against, e.g. March lock")
+    ledger_compare.add_argument("--against-version-id", default=None)
+    ledger_compare.add_argument("--latest-version-id", default=None)
+    ledger_compare.add_argument("--watch-pct", type=float, default=None, help="Optional watch threshold as decimal, e.g. 0.05")
+    ledger_compare.add_argument("--call-up-pct", type=float, default=None, help="Optional call-up threshold as decimal, e.g. 0.10")
+    ledger_compare.add_argument("--call-down-pct", type=float, default=None, help="Optional call-down threshold as decimal, e.g. 0.10")
+
+    ledger_export = ledger_sub.add_parser("export", help="Export stable CSV mirrors for Power BI / semantic model ingestion")
+    ledger_export.add_argument("--ledger", default=str(DEFAULT_LEDGER_PATH))
+    ledger_export.add_argument("--output", default=None)
+
     guide_cmd = sub.add_parser("guide", help="Search Nixtla/FPPy best-practice guidance")
     guide_cmd.add_argument("query", nargs="?", default=None, help="Optional search term, e.g. intervals or hierarchy")
 
@@ -319,7 +394,10 @@ def _run(args: argparse.Namespace) -> int:
         spec = _spec_from_args(args)
         run = run_forecast(args.input, spec, sheet=_coerce_sheet(args.sheet))
         output_dir = run.to_directory(args.output)
+        ledger_result = _maybe_register_ledger(args, output_dir)
         print(f"Forecast written to {output_dir}")
+        if ledger_result:
+            print(f"Ledger version registered: {ledger_result['forecast_version_id']}")
         print()
         print(run.explanation())
         return 0
@@ -344,6 +422,9 @@ def _run(args: argparse.Namespace) -> int:
             run = run_forecast(args.output, replace(spec, id_col="unique_id", time_col="ds", target_col="y"))
             output_dir = run.to_directory(args.forecast_output)
             metadata["forecast_output"] = str(output_dir)
+            ledger_result = _maybe_register_ledger(args, output_dir, source_metadata_path=metadata.get("metadata_file"))
+            if ledger_result:
+                metadata["ledger"] = ledger_result
         print(json.dumps(metadata, indent=2, default=str))
         return 0
 
@@ -452,6 +533,11 @@ def _run(args: argparse.Namespace) -> int:
             print(format_release_gate_console_summary(payload), end="")
         return 0 if payload["summary"]["status"] == "passed" else 1
 
+    if args.command == "ledger":
+        result = _run_ledger(args)
+        print(json.dumps(result, indent=2, default=str))
+        return 0
+
     if args.command == "guide":
         if args.query in {"skill", "agent-skill", "nixtla-forecast"}:
             print(load_agent_skill())
@@ -473,10 +559,162 @@ def _add_input_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--target-col", default="y", help="Numeric value to forecast, e.g. Revenue or ARR")
 
 
+def _add_model_allowlist_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--model",
+        dest="model_allowlist",
+        action="append",
+        default=[],
+        help='Favorite model to include in the tournament; repeat for multiple models, e.g. --model arima --model "arima mstl"',
+    )
+    parser.add_argument(
+        "--model-allowlist",
+        dest="model_allowlist_grouped",
+        nargs="+",
+        action="append",
+        default=[],
+        help='Space-separated favorite model allowlist, e.g. --model-allowlist arima "arima mstl"',
+    )
+
+
+def _add_ledger_registration_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--ledger", default=None, help="Optional ledger folder; use runs\\forecast_ledger for the standard Power BI-friendly tracker")
+    parser.add_argument("--forecast-key", default=None, help="Business key used when registering the run in a forecast ledger")
+    parser.add_argument("--version-label", default="", help="Version label used when registering the run, e.g. March refresh")
+    parser.add_argument("--ledger-created-by", default="", help="Optional owner/user recorded on the ledger version")
+    parser.add_argument("--ledger-notes", default="", help="Optional notes recorded on the ledger version")
+    parser.add_argument("--lock-official", action="store_true", help="After registering, also create an official lock/submitted forecast label")
+    parser.add_argument("--lock-label", default="", help="Official lock label, e.g. March lock")
+    parser.add_argument("--lock-audience", default="leadership")
+    parser.add_argument("--planning-cycle", default="")
+    parser.add_argument("--communication-date", default="")
+    parser.add_argument("--submitted-to", default="")
+    parser.add_argument("--lock-reason", default="")
+    parser.add_argument("--locked-by", default="")
+
+
 def _configure_stdout() -> None:
     reconfigure = getattr(sys.stdout, "reconfigure", None)
     if callable(reconfigure):
         reconfigure(encoding="utf-8", errors="replace")
+
+
+def _run_ledger(args: argparse.Namespace) -> dict[str, Any]:
+    if args.ledger_command == "init":
+        return init_ledger(args.ledger).to_dict()
+    if args.ledger_command == "register":
+        result = register_run(
+            args.ledger,
+            args.run,
+            forecast_key=args.forecast_key,
+            version_label=args.version_label,
+            created_by=args.created_by,
+            notes=args.notes,
+            source_metadata_path=args.source_metadata,
+            source_kind=args.source_kind,
+        ).to_dict()
+        _refresh_report_after_ledger_update(result)
+        return result
+    if args.ledger_command == "lock":
+        result = lock_version(
+            args.ledger,
+            version_id=args.version_id,
+            lock_label=args.lock_label,
+            audience=args.audience,
+            planning_cycle=args.planning_cycle,
+            communication_date=args.communication_date,
+            submitted_to=args.submitted_to,
+            reason=args.reason,
+            locked_by=args.locked_by,
+            notes=args.notes,
+        ).to_dict()
+        _refresh_report_after_ledger_update(result)
+        return result
+    if args.ledger_command == "actuals":
+        return ingest_actuals(
+            args.ledger,
+            args.input,
+            forecast_key=args.forecast_key,
+            id_col=args.id_col,
+            time_col=args.time_col,
+            target_col=args.target_col,
+            sheet=_coerce_sheet(args.sheet),
+            source_kind=args.source_kind,
+            source_id=args.source_id,
+            revision_label=args.revision_label,
+            known_as_of=args.known_as_of,
+        ).to_dict()
+    if args.ledger_command == "adjustments":
+        return ingest_adjustments(
+            args.ledger,
+            args.input,
+            forecast_key=args.forecast_key,
+            sheet=_coerce_sheet(args.sheet),
+        ).to_dict()
+    if args.ledger_command == "compare":
+        return compare_versions(
+            args.ledger,
+            forecast_key=args.forecast_key,
+            against_lock=args.against_lock,
+            against_version_id=args.against_version_id,
+            latest_version_id=args.latest_version_id,
+            watch_pct=args.watch_pct,
+            call_up_pct=args.call_up_pct,
+            call_down_pct=args.call_down_pct,
+        ).to_dict()
+    if args.ledger_command == "export":
+        return export_ledger(args.ledger, output=args.output).to_dict()
+    raise ValueError(f"unknown ledger command: {args.ledger_command}")
+
+
+def _maybe_register_ledger(
+    args: argparse.Namespace,
+    output_dir: str | Path,
+    *,
+    source_metadata_path: str | Path | None = None,
+) -> dict[str, Any] | None:
+    ledger_path = getattr(args, "ledger", None)
+    if not ledger_path:
+        return None
+    forecast_key = getattr(args, "forecast_key", None)
+    if not forecast_key:
+        raise ValueError("--ledger requires --forecast-key so versions are grouped by business forecast")
+    result = register_run(
+        ledger_path,
+        output_dir,
+        forecast_key=forecast_key,
+        version_label=getattr(args, "version_label", ""),
+        created_by=getattr(args, "ledger_created_by", ""),
+        notes=getattr(args, "ledger_notes", ""),
+        source_metadata_path=source_metadata_path,
+    ).to_dict()
+    if getattr(args, "lock_official", False):
+        lock_label = getattr(args, "lock_label", "") or getattr(args, "version_label", "") or "official"
+        lock = lock_version(
+            ledger_path,
+            version_id=result["forecast_version_id"],
+            lock_label=lock_label,
+            audience=getattr(args, "lock_audience", "leadership"),
+            planning_cycle=getattr(args, "planning_cycle", ""),
+            communication_date=getattr(args, "communication_date", ""),
+            submitted_to=getattr(args, "submitted_to", ""),
+            reason=getattr(args, "lock_reason", ""),
+            locked_by=getattr(args, "locked_by", ""),
+        ).to_dict()
+        result["official_lock"] = lock
+    _refresh_report_after_ledger_update(result)
+    return result
+
+
+def _refresh_report_after_ledger_update(result: dict[str, Any] | None) -> None:
+    if not result:
+        return
+    run_dir = result.get("run_dir")
+    if not run_dir:
+        return
+    run_path = Path(str(run_dir))
+    if (run_path / "manifest.json").exists():
+        write_report_artifacts_from_directory(run_path)
 
 
 def _provided_flags(argv: list[str]) -> set[str]:
@@ -538,6 +776,7 @@ def _spec_from_args(args: argparse.Namespace) -> ForecastSpec:
         levels=levels,
         fill_method=fill_method,
         model_policy=model_policy,
+        model_allowlist=_parse_model_allowlist(args),
         id_col=getattr(args, "id_col", "unique_id"),
         time_col=getattr(args, "time_col", "ds"),
         target_col=getattr(args, "target_col", "y"),
@@ -556,6 +795,13 @@ def _spec_from_args(args: argparse.Namespace) -> ForecastSpec:
         weighted_ensemble=weighted_ensemble,
         verbose=verbose,
     )
+
+
+def _parse_model_allowlist(args: argparse.Namespace) -> tuple[str, ...]:
+    models = list(getattr(args, "model_allowlist", []) or [])
+    for group in getattr(args, "model_allowlist_grouped", []) or []:
+        models.extend(group)
+    return tuple(models)
 
 
 def _parse_custom_models(args: argparse.Namespace) -> tuple[CustomModelSpec, ...]:
