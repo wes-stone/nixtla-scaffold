@@ -1973,13 +1973,20 @@ def build_streamlit_app() -> str:
             return fig
 
 
-        def seasonality_year_profile_frame(uid: str, start_month: int) -> pd.DataFrame:
-            frame = history[history["unique_id"].astype(str) == uid].copy()
-            if frame.empty or "ds" not in frame.columns or "y" not in frame.columns:
+        def seasonality_year_profile_source_frame(
+            frame: pd.DataFrame,
+            *,
+            start_month: int,
+            value_col: str,
+            source: str,
+            model: str | None = None,
+        ) -> pd.DataFrame:
+            if frame.empty or "ds" not in frame.columns or value_col not in frame.columns:
                 return pd.DataFrame()
+            frame = frame.copy()
             frame["ds"] = pd.to_datetime(frame["ds"], errors="coerce")
-            frame["y"] = pd.to_numeric(frame["y"], errors="coerce")
-            frame = frame.dropna(subset=["ds", "y"]).sort_values("ds")
+            frame["value"] = pd.to_numeric(frame[value_col], errors="coerce")
+            frame = frame.dropna(subset=["ds", "value"]).sort_values("ds")
             if frame.empty:
                 return pd.DataFrame()
             start_month = int(start_month)
@@ -1998,28 +2005,108 @@ def build_streamlit_app() -> str:
                 frame["season_position"] = (frame["ds"] - anchors).dt.days + 1
                 frame["season_label"] = frame["season_position"].astype(int).astype(str)
                 frame["season_axis_title"] = "day in configured year"
-            return frame[["unique_id", "ds", "y", "season_year_start", "season_year_label", "season_position", "season_label", "season_axis_title"]]
+            frame["source"] = source
+            frame["model"] = model or ""
+            frame["value_kind"] = "forecast yhat" if source == "forecast" else "actual"
+            if source == "forecast":
+                label_model = model or "selected model"
+                frame["line_label"] = frame["season_year_label"].map(lambda label: f"{label_model} forecast {label}")
+            else:
+                frame["line_label"] = frame["season_year_label"].astype(str)
+            return frame[
+                [
+                    "unique_id",
+                    "ds",
+                    "value",
+                    "source",
+                    "model",
+                    "value_kind",
+                    "season_year_start",
+                    "season_year_label",
+                    "line_label",
+                    "season_position",
+                    "season_label",
+                    "season_axis_title",
+                ]
+            ]
 
 
-        def seasonality_year_profile_chart(uid: str, start_month: int) -> go.Figure:
+        def seasonality_year_profile_frame(
+            uid: str,
+            start_month: int,
+            *,
+            model: str | None = None,
+            include_history: bool = True,
+        ) -> pd.DataFrame:
+            frames: list[pd.DataFrame] = []
+            if include_history:
+                history_frame = history[history["unique_id"].astype(str) == uid].copy()
+                frames.append(
+                    seasonality_year_profile_source_frame(
+                        history_frame,
+                        start_month=start_month,
+                        value_col="y",
+                        source="actual",
+                    )
+                )
+            if model:
+                forecast_frame = future_model_frame(uid, model)
+                frames.append(
+                    seasonality_year_profile_source_frame(
+                        forecast_frame,
+                        start_month=start_month,
+                        value_col="yhat",
+                        source="forecast",
+                        model=model,
+                    )
+                )
+            frames = [frame for frame in frames if not frame.empty]
+            if not frames:
+                return pd.DataFrame()
+            return pd.concat(frames, ignore_index=True).sort_values(["source", "season_year_start", "season_position"])
+
+
+        def seasonality_year_profile_chart(
+            uid: str,
+            start_month: int,
+            *,
+            model: str | None = None,
+            include_history: bool = True,
+        ) -> go.Figure:
             fig = go.Figure()
-            frame = seasonality_year_profile_frame(uid, start_month)
+            frame = seasonality_year_profile_frame(uid, start_month, model=model, include_history=include_history)
             if frame.empty:
                 return fig
             palette = [C["hist"], C["champ"], C["alt1"], C["alt2"], C["alt3"], "#3f7f93", "#8a5f2a", "#7a7f87"]
-            for idx, (year_label, group) in enumerate(frame.groupby("season_year_label", sort=True)):
+            actual_idx = 0
+            forecast_idx = 0
+            for line_label, group in frame.groupby("line_label", sort=False):
                 group = group.sort_values("season_position")
+                is_forecast = str(group["source"].iloc[0]) == "forecast"
+                if is_forecast:
+                    color = [C["champ"], C["alt1"], C["alt2"], C["alt3"]][forecast_idx % 4]
+                    forecast_idx += 1
+                    line = dict(color=color, width=3.2, dash="dash")
+                    marker = dict(size=7, symbol="diamond")
+                    opacity = 0.98
+                else:
+                    color = palette[actual_idx % len(palette)]
+                    actual_idx += 1
+                    line = dict(color=color, width=1.8)
+                    marker = dict(size=5)
+                    opacity = 0.58 if model else 0.78
                 fig.add_trace(
                     go.Scatter(
                         x=group["season_position"],
-                        y=group["y"],
+                        y=group["value"],
                         mode="lines+markers",
-                        name=str(year_label),
-                        line=dict(color=palette[idx % len(palette)], width=2),
-                        marker=dict(size=5),
-                        opacity=0.78,
+                        name=str(line_label),
+                        line=line,
+                        marker=marker,
+                        opacity=opacity,
                         text=group["ds"].dt.strftime("%Y-%m-%d"),
-                        hovertemplate="date=%{text}<br>period=%{x}<br>actual=%{y:,.3f}<extra></extra>",
+                        customdata=group[["value_kind", "model"]].to_numpy(),
+                        hovertemplate="date=%{text}<br>period=%{x}<br>%{customdata[0]}=%{y:,.3f}<extra></extra>",
                     )
                 )
             axis_title = str(frame["season_axis_title"].iloc[0])
@@ -2027,9 +2114,9 @@ def build_streamlit_app() -> str:
                 height=430,
                 margin=dict(l=45, r=180, t=25, b=45),
                 xaxis_title=axis_title,
-                yaxis_title="actual value",
+                yaxis_title="actual / forecast value",
                 hovermode="closest",
-                legend_title="seasonal year",
+                legend_title="seasonal year / forecast model",
             )
             if axis_title.startswith("month"):
                 tickvals = list(range(1, 13))
@@ -2805,22 +2892,66 @@ def build_streamlit_app() -> str:
             else:
                 st.info("No seasonality diagnostics are available.")
             st.subheader("Seasonal year overlay")
-            st.caption("Each legend line is one observed year aligned onto a normal configured year. Change the beginning month to review fiscal or planning-year seasonality.")
-            year_start_label = st.selectbox(
-                "Beginning of year month",
-                MONTH_LABELS,
-                index=0,
-                key=f"seasonality_year_start_month_{uid}",
-                help="Use January for calendar year, or choose a fiscal/planning-year start month.",
-            )
+            st.caption("Forecast overlay uses the active/best model by default, and each observed or forecast line is aligned onto a normal configured year. Choose any candidate model to compare its forecast seasonality against historical actual years.")
+            seasonal_model_options = model_menu_options(uid, candidate_models(uid))
+            seasonal_default_model = active_champion if active_champion in seasonal_model_options else selected_model(uid)
+            seasonal_default_index = seasonal_model_options.index(seasonal_default_model) if seasonal_default_model in seasonal_model_options else 0
+            overlay_controls = st.columns([1, 2, 1])
+            with overlay_controls[0]:
+                year_start_label = st.selectbox(
+                    "Beginning of year month",
+                    MONTH_LABELS,
+                    index=0,
+                    key=f"seasonality_year_start_month_{uid}",
+                    help="Use January for calendar year, or choose a fiscal/planning-year start month.",
+                )
+            seasonal_overlay_model = None
+            with overlay_controls[1]:
+                if seasonal_model_options:
+                    seasonal_overlay_model = st.selectbox(
+                        "Forecast model overlay",
+                        seasonal_model_options,
+                        index=seasonal_default_index,
+                        format_func=lambda model: model_menu_label(uid, model, winner_metric),
+                        key=f"seasonality_overlay_model_{uid}",
+                        help="Defaults to the active champion/best model. Pick any candidate model to overlay its future yhat seasonal shape.",
+                    )
+                else:
+                    st.info("No candidate model forecast is available for the seasonal overlay.")
+            with overlay_controls[2]:
+                include_seasonal_history = st.toggle(
+                    "Include actual years",
+                    value=True,
+                    key=f"seasonality_include_actual_years_{uid}",
+                    help="Keep historical actual seasonal years as context behind the selected model forecast overlay.",
+                )
             year_start_month = MONTH_LABELS.index(year_start_label) + 1
-            seasonal_profile = seasonality_year_profile_frame(uid, year_start_month)
+            seasonal_profile = seasonality_year_profile_frame(
+                uid,
+                year_start_month,
+                model=seasonal_overlay_model,
+                include_history=include_seasonal_history,
+            )
             if not seasonal_profile.empty:
-                st.plotly_chart(seasonality_year_profile_chart(uid, year_start_month), width="stretch", key="seasonality_year_profile_chart")
+                has_forecast_overlay = "source" in seasonal_profile.columns and (seasonal_profile["source"].astype(str) == "forecast").any()
+                if seasonal_overlay_model and has_forecast_overlay:
+                    st.caption(f"Model overlay: {model_menu_label(uid, seasonal_overlay_model, winner_metric)}. Forecast rows use `forecast_long.csv` yhat when available, with `all_models.csv` only as a fallback.")
+                elif seasonal_overlay_model:
+                    st.warning("The selected model has no future forecast rows available for this seasonal overlay, so only actual-year context is shown.")
+                st.plotly_chart(
+                    seasonality_year_profile_chart(
+                        uid,
+                        year_start_month,
+                        model=seasonal_overlay_model,
+                        include_history=include_seasonal_history,
+                    ),
+                    width="stretch",
+                    key="seasonality_year_profile_chart",
+                )
                 with st.expander("Seasonal year overlay data"):
                     st.dataframe(seasonal_profile.head(2000), width="stretch", hide_index=True)
             else:
-                st.info("No history rows are available for a seasonal year overlay.")
+                st.info("No actual or selected-model forecast rows are available for a seasonal year overlay.")
             st.subheader("Additive decomposition evidence")
             if not seasonality_decomposition.empty:
                 st.plotly_chart(seasonality_decomposition_chart(uid), width="stretch", key="seasonality_decomposition_plot")

@@ -339,6 +339,8 @@ def _missing_required_streamlit_text(app_path: Path, scenario: str) -> list[str]
         "Models with interval bands",
         "Seasonality",
         "Seasonal year overlay",
+        "Forecast model overlay",
+        "Forecast overlay uses the active/best model by default",
         "Feeder outputs",
     ]
     if scenario == "hierarchy_reconciled":

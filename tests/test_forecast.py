@@ -1287,6 +1287,13 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert "Seasonality credibility" in streamlit_app
     assert "Seasonal year overlay" in streamlit_app
     assert "Beginning of year month" in streamlit_app
+    assert "Forecast overlay uses the active/best model by default" in streamlit_app
+    assert "Forecast model overlay" in streamlit_app
+    assert "Include actual years" in streamlit_app
+    assert "seasonality_overlay_model" in streamlit_app
+    assert "seasonality_year_profile_source_frame" in streamlit_app
+    assert "forecast_long.csv` yhat" in streamlit_app
+    assert "The selected model has no future forecast rows available for this seasonal overlay" in streamlit_app
     assert "seasonality_year_profile_chart" in streamlit_app
     assert "seasonality_decomposition_chart" in streamlit_app
     assert 'read_csv("seasonality_diagnostics.csv")' in streamlit_app
