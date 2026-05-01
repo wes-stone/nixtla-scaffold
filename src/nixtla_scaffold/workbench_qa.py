@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import py_compile
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -47,8 +48,13 @@ class WorkbenchQAResult:
     selected_models: str
     artifacts_status: str
     streamlit_compile_status: str
+    streamlit_compile_seconds: float
     app_test_status: str
+    app_test_seconds: float
     app_test_timeout_seconds: int
+    streamlit_app_bytes: int
+    csv_artifact_rows: int
+    performance_status: str
     required_text_missing: str
     notes: str
 
@@ -91,6 +97,36 @@ def run_workbench_qa(
         app_test_timeout_seconds=app_test_timeout_seconds,
     )
     frame.to_csv(out / "workbench_qa_summary.csv", index=False)
+    perf_cols = [
+        "scenario",
+        "status",
+        "performance_status",
+        "streamlit_compile_seconds",
+        "app_test_seconds",
+        "app_test_timeout_seconds",
+        "streamlit_app_bytes",
+        "csv_artifact_rows",
+        "run_dir",
+    ]
+    frame[[col for col in perf_cols if col in frame.columns]].to_csv(out / "workbench_perf_summary.csv", index=False)
+    (out / "workbench_perf_summary.json").write_text(
+        json.dumps(
+            {
+                "summary": {
+                    "max_streamlit_compile_seconds": summary.get("max_streamlit_compile_seconds", 0.0),
+                    "max_app_test_seconds": summary.get("max_app_test_seconds", 0.0),
+                    "max_streamlit_app_bytes": summary.get("max_streamlit_app_bytes", 0),
+                    "max_csv_artifact_rows": summary.get("max_csv_artifact_rows", 0),
+                    "performance_status_counts": summary.get("performance_status_counts", {}),
+                },
+                "results": frame[[col for col in perf_cols if col in frame.columns]].to_dict("records"),
+            },
+            indent=2,
+            default=str,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     (out / "workbench_qa_summary.json").write_text(json.dumps(summary, indent=2, default=str) + "\n", encoding="utf-8")
     return {"summary": summary, "results": frame.to_dict("records"), "output_dir": str(out)}
 
@@ -109,11 +145,12 @@ def _run_one_workbench_scenario(
         run = run_forecast(data, spec)
         run_dir = run.to_directory(output_dir)
         artifacts_status, missing_artifacts = _check_required_artifacts(run_dir, canonical_scenario)
-        compile_status = _compile_streamlit(run_dir / "streamlit_app.py")
-        app_test_status = (
+        app_path = run_dir / "streamlit_app.py"
+        compile_status, compile_seconds = _compile_streamlit(app_path)
+        app_test_status, app_test_seconds = (
             _app_test_streamlit(run_dir / "streamlit_app.py", timeout_seconds=app_test_timeout_seconds)
             if app_test
-            else "skipped"
+            else ("skipped", 0.0)
         )
         missing_text = _missing_required_streamlit_text(run_dir / "streamlit_app.py", canonical_scenario)
         score = _usability_score(
@@ -123,6 +160,14 @@ def _run_one_workbench_scenario(
             missing_text=missing_text,
         )
         status = "passed" if score >= 90 else "failed"
+        app_bytes = app_path.stat().st_size if app_path.exists() else 0
+        csv_rows = _csv_artifact_rows(run_dir)
+        performance_status = _performance_status(
+            app_test_status=app_test_status,
+            app_test_seconds=app_test_seconds,
+            app_test_timeout_seconds=app_test_timeout_seconds,
+            app_test=app_test,
+        )
         notes = _notes(missing_artifacts=missing_artifacts, missing_text=missing_text)
         selected_models = "; ".join(sorted(run.model_selection["selected_model"].dropna().astype(str).unique()))
         return WorkbenchQAResult(
@@ -135,8 +180,13 @@ def _run_one_workbench_scenario(
             selected_models=selected_models,
             artifacts_status=artifacts_status,
             streamlit_compile_status=compile_status,
+            streamlit_compile_seconds=round(compile_seconds, 3),
             app_test_status=app_test_status,
+            app_test_seconds=round(app_test_seconds, 3),
             app_test_timeout_seconds=app_test_timeout_seconds,
+            streamlit_app_bytes=app_bytes,
+            csv_artifact_rows=csv_rows,
+            performance_status=performance_status,
             required_text_missing="; ".join(missing_text),
             notes=notes,
         )
@@ -151,8 +201,13 @@ def _run_one_workbench_scenario(
             selected_models="",
             artifacts_status="failed",
             streamlit_compile_status="not_run",
+            streamlit_compile_seconds=0.0,
             app_test_status="not_run",
+            app_test_seconds=0.0,
             app_test_timeout_seconds=app_test_timeout_seconds,
+            streamlit_app_bytes=0,
+            csv_artifact_rows=0,
+            performance_status="not_run",
             required_text_missing="",
             notes=f"{type(exc).__name__}: {exc}",
         )
@@ -294,26 +349,57 @@ def _check_required_artifacts(run_dir: Path, scenario: str) -> tuple[str, list[s
     return ("passed" if not missing else "failed", missing)
 
 
-def _compile_streamlit(app_path: Path) -> str:
+def _compile_streamlit(app_path: Path) -> tuple[str, float]:
+    started = time.perf_counter()
     try:
         py_compile.compile(str(app_path), doraise=True)
     except Exception as exc:
-        return f"failed: {type(exc).__name__}: {exc}"
-    return "passed"
+        return f"failed: {type(exc).__name__}: {exc}", time.perf_counter() - started
+    return "passed", time.perf_counter() - started
 
 
-def _app_test_streamlit(app_path: Path, *, timeout_seconds: int = APP_TEST_TIMEOUT_SECONDS) -> str:
+def _app_test_streamlit(app_path: Path, *, timeout_seconds: int = APP_TEST_TIMEOUT_SECONDS) -> tuple[str, float]:
+    started = time.perf_counter()
     try:
         from streamlit.testing.v1 import AppTest
     except ImportError:
-        return "skipped_missing_streamlit"
+        return "skipped_missing_streamlit", time.perf_counter() - started
     try:
         app = AppTest.from_file(str(app_path), default_timeout=timeout_seconds)
         app.run()
         if app.exception:
-            return f"failed: {app.exception}"
+            return f"failed: {app.exception}", time.perf_counter() - started
     except Exception as exc:
-        return f"failed: {type(exc).__name__}: {exc}"
+        return f"failed: {type(exc).__name__}: {exc}", time.perf_counter() - started
+    return "passed", time.perf_counter() - started
+
+
+def _csv_artifact_rows(run_dir: Path) -> int:
+    total = 0
+    for path in run_dir.rglob("*.csv"):
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                total += max(0, sum(1 for _ in handle) - 1)
+        except OSError:
+            continue
+    return int(total)
+
+
+def _performance_status(
+    *,
+    app_test_status: str,
+    app_test_seconds: float,
+    app_test_timeout_seconds: int,
+    app_test: bool,
+) -> str:
+    if not app_test:
+        return "not_measured"
+    if app_test_status.startswith("failed"):
+        return "failed"
+    if app_test_status.startswith("skipped"):
+        return "skipped"
+    if app_test_seconds >= app_test_timeout_seconds * 0.8:
+        return "warn_near_timeout"
     return "passed"
 
 
@@ -326,7 +412,20 @@ def _missing_required_streamlit_text(app_path: Path, scenario: str) -> list[str]
         "Unvalidated steps",
         "Horizon score cap",
         "planning_eligible is a horizon-validation flag only",
+        "Copy-safe headline",
+        "Forecast operating loop",
+        "Track performance over time",
+        "Forecast review owns the executive headline",
+        "Forecast ledger",
+        "ledger_context.json",
+        "official forecast locks",
         "Model investigation",
+        "Workbench section",
+        "Sidebar tabs stay visible",
+        "Only the selected workbench section renders on each rerun",
+        "fast tabs instead of hidden pages",
+        "render_workbench_section_nav",
+        "cached_read_csv",
         "Menu labels use `#rank | model | engine`",
         "Model picker guide: rank, engine, and role",
         "Interval model picker guide: rank and engine",
@@ -336,6 +435,7 @@ def _missing_required_streamlit_text(app_path: Path, scenario: str) -> list[str]
         "First-glance chart includes interval bands",
         "CV window player",
         "Prediction intervals",
+        "The top interval-bearing candidate models are selected by default",
         "Models with interval bands",
         "Seasonality",
         "Seasonal year overlay",
@@ -398,6 +498,11 @@ def _summary_payload(
         "model_policy": model_policy,
         "app_test": bool(app_test),
         "app_test_timeout_seconds": int(app_test_timeout_seconds),
+        "max_streamlit_compile_seconds": round(float(frame["streamlit_compile_seconds"].max()), 3) if "streamlit_compile_seconds" in frame and not frame.empty else 0.0,
+        "max_app_test_seconds": round(float(frame["app_test_seconds"].max()), 3) if "app_test_seconds" in frame and not frame.empty else 0.0,
+        "max_streamlit_app_bytes": int(frame["streamlit_app_bytes"].max()) if "streamlit_app_bytes" in frame and not frame.empty else 0,
+        "max_csv_artifact_rows": int(frame["csv_artifact_rows"].max()) if "csv_artifact_rows" in frame and not frame.empty else 0,
+        "performance_status_counts": frame["performance_status"].value_counts().to_dict() if "performance_status" in frame else {},
         "output_dir": str(output_dir),
         "scenarios": frame["scenario"].tolist(),
     }

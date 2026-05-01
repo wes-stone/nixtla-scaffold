@@ -68,6 +68,20 @@ HORIZON_GATE_LABELS = {
     "fail_less_than_half_horizon_validated": "Less than half of requested horizon validated",
     "fail_no_rolling_origin_validation": "No rolling-origin validation",
 }
+LEDGER_EXPORT_FILES = {
+    "forecast_versions": "forecast_versions.csv",
+    "forecast_snapshot": "forecast_snapshot.csv",
+    "forecast_version_metrics": "forecast_version_metrics.csv",
+    "source_refreshes": "source_refreshes.csv",
+    "official_forecast_locks": "official_forecast_locks.csv",
+    "actual_revisions": "forecast_actual_revisions.csv",
+    "forecast_actuals": "forecast_actuals.csv",
+    "forecast_performance": "forecast_performance.csv",
+    "forecast_adjustments": "forecast_adjustments.csv",
+    "corrected_actuals": "corrected_actuals.csv",
+    "regime_changes": "regime_changes.csv",
+    "forecast_version_deltas": "forecast_version_deltas.csv",
+}
 INTERVAL_GLOSSARY_TEXT = (
     "Interval states distinguish calibrated CV evidence, future-only bands, adjusted-not-recalibrated bands, "
     "unavailable intervals, and point-only ensembles. WeightedEnsemble does not inherit component intervals; "
@@ -138,6 +152,7 @@ def build_html_report(payload: dict[str, Any]) -> str:
     model_weights = payload["model_weights"]
     warnings = payload["warnings"]
     model_policy_resolution = payload.get("model_policy_resolution", {})
+    ledger = payload.get("ledger", {})
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -265,6 +280,7 @@ def build_html_report(payload: dict[str, Any]) -> str:
     {_model_policy_resolution_section(model_policy_resolution)}
     {_target_transform_section(target_transform_audit)}
     {_driver_assumptions_section(scenario_assumptions, scenario_forecast, known_future_regressors, driver_availability_audit, driver_experiment_summary)}
+    {_ledger_section(ledger)}
 
     <section class="panel">
       <h2>Forecast model review</h2>
@@ -335,6 +351,7 @@ def build_html_report(payload: dict[str, Any]) -> str:
           {_output_item("hierarchy_contribution.csv", "Parent/child contribution and gap attribution table for hierarchy storytelling; allocation heuristic, not reconciliation output.")}
           {_output_item("audit/hierarchy_backtest_comparison.csv", "Selected hierarchy backtests before and after reconciliation for node-level accuracy/coherence tradeoff review.")}
           {_output_item("llm_context.json", "Single LLM feeder packet with executive headline, trust, horizon, interval, residual, seasonality, hierarchy, driver, and artifact-index context.")}
+          {_output_item("ledger_context.json", "Optional pointer to forecast-ledger exports; when present, the report includes version, lock, actuals, delta, and adjustment previews.")}
           {_output_item("forecast.xlsx", "Curated workbook for analysts who want one file with all major sheets.")}
           {_output_item("streamlit_app.py", "Interactive local dashboard: run with uv run streamlit run streamlit_app.py.")}
         </div>
@@ -358,7 +375,9 @@ def build_streamlit_app() -> str:
         from __future__ import annotations
 
         from pathlib import Path
+        import html
         import json
+        import os
         import time
 
         import numpy as np
@@ -383,6 +402,44 @@ def build_streamlit_app() -> str:
         }
         ALT_COLORS = [C["alt1"], C["alt2"], C["alt3"]]
         MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        BASE_DASHBOARD_SECTIONS = [
+            "Forecast review",
+            "Model investigation",
+            "CV window player",
+            "Prediction intervals",
+            "Model audit",
+            "Seasonality",
+            "Hierarchy",
+            "Assumptions & Drivers",
+            "Feeder outputs",
+        ]
+        DASHBOARD_SECTIONS = list(BASE_DASHBOARD_SECTIONS)
+        SECTION_LABELS = {
+            "Forecast review": "01 Forecast review",
+            "Model investigation": "02 Model investigation",
+            "CV window player": "03 CV window player",
+            "Prediction intervals": "04 Prediction intervals",
+            "Model audit": "05 Model audit",
+            "Seasonality": "06 Seasonality",
+            "Hierarchy": "07 Hierarchy",
+            "Assumptions & Drivers": "08 Assumptions & Drivers",
+            "Forecast ledger": "09 Forecast ledger",
+            "Feeder outputs": "10 Feeder outputs",
+        }
+        SECTION_DESCRIPTIONS = {
+            "Forecast review": "Fast default view: champion, trust, and selected forecast context.",
+            "Model investigation": "Drill into the models selected in the sidebar.",
+            "CV window player": "Step through rolling-origin windows without rendering other sections.",
+            "Prediction intervals": "Review uncertainty bands and calibration evidence.",
+            "Model audit": "Inspect leaderboard, weights, residuals, and interval diagnostics.",
+            "Seasonality": "Check seasonal credibility and model-aware seasonal overlay.",
+            "Hierarchy": "Review parent/child coherence and reconciliation tradeoffs.",
+            "Assumptions & Drivers": "Review events, scenarios, and known-future driver audits.",
+            "Forecast ledger": "Review registered versions, official locks, landed actuals, and adjustment audits.",
+            "Feeder outputs": "Preview exported CSVs; use files for full-row review.",
+        }
+        DEFAULT_INTERVAL_MODEL_LIMIT = 8
+        PERF_DIAGNOSTICS = os.environ.get("NIXTLA_SCAFFOLD_STREAMLIT_PERF", "").lower() in {"1", "true", "yes"}
 
 
         def color_to_rgba(color: str, alpha: float) -> str:
@@ -395,20 +452,48 @@ def build_streamlit_app() -> str:
             return text
 
 
-        def read_csv(name: str) -> pd.DataFrame:
+        def artifact_path(name: str) -> Path | None:
             for path in (RUN_DIR / name, RUN_DIR / "audit" / name):
                 if path.exists():
-                    return pd.read_csv(path)
+                    return path
+            return None
+
+
+        @st.cache_data(show_spinner=False)
+        def cached_read_csv(path_text: str, modified_ns: int, size_bytes: int) -> pd.DataFrame:
+            return pd.read_csv(path_text)
+
+
+        def read_csv(name: str) -> pd.DataFrame:
+            path = artifact_path(name)
+            if path is not None:
+                stat = path.stat()
+                return cached_read_csv(str(path), stat.st_mtime_ns, stat.st_size)
             return pd.DataFrame()
 
 
+        def read_csv_path(path: Path | str) -> pd.DataFrame:
+            target = Path(path)
+            if target.exists():
+                stat = target.stat()
+                return cached_read_csv(str(target), stat.st_mtime_ns, stat.st_size)
+            return pd.DataFrame()
+
+
+        @st.cache_data(show_spinner=False)
+        def cached_read_json(path_text: str, modified_ns: int, size_bytes: int) -> dict:
+            return json.loads(Path(path_text).read_text(encoding="utf-8"))
+
+
         def read_json(name: str) -> dict:
-            path = RUN_DIR / name
-            if not path.exists():
+            path = artifact_path(name)
+            if path is None:
                 return {}
-            return json.loads(path.read_text(encoding="utf-8"))
+            stat = path.stat()
+            return cached_read_json(str(path), stat.st_mtime_ns, stat.st_size)
 
 
+        @st.cache_data(show_spinner=False)
         def prep_dates(frame: pd.DataFrame) -> pd.DataFrame:
             if frame.empty:
                 return frame
@@ -418,6 +503,111 @@ def build_streamlit_app() -> str:
             if "cutoff" in out.columns:
                 out["cutoff"] = pd.to_datetime(out["cutoff"], errors="coerce")
             return out
+
+
+        def display_value(value, default: str = "None") -> str:
+            if value is None:
+                return default
+            try:
+                if pd.isna(value):
+                    return default
+            except (TypeError, ValueError):
+                pass
+            text = str(value).strip()
+            if not text or text.lower() in {"nan", "none", "nat"}:
+                return default
+            return text
+
+
+        def compact_text(value: str, max_chars: int = 28) -> str:
+            text = display_value(value, default="N/A")
+            if len(text) <= max_chars:
+                return text
+            return text[: max_chars - 3].rstrip() + "..."
+
+
+        def split_action_items(text: str, *, fallback: str) -> list[str]:
+            normalized = display_value(text, default=fallback).replace("\\n", ";")
+            items = [item.strip(" .") for item in normalized.split(";") if item.strip(" .")]
+            return items or [fallback]
+
+
+        def html_list(items: list[str]) -> str:
+            return "<ul>" + "".join(f"<li>{html.escape(item)}</li>" for item in items) + "</ul>"
+
+
+        def decision_card(label: str, value: str, detail: str = "") -> str:
+            detail_html = f'<div class="decision-detail">{html.escape(detail)}</div>' if detail else ""
+            return (
+                '<div class="decision-card">'
+                f'<div class="decision-label">{html.escape(label)}</div>'
+                f'<div class="decision-value">{html.escape(value)}</div>'
+                f"{detail_html}"
+                "</div>"
+            )
+
+
+        def operating_loop_cards() -> str:
+            cards = [
+                (
+                    "1. Connect end to end",
+                    "Refresh pipeline",
+                    "Wire source data -> forecast run -> stakeholder review -> published outputs so the same forecast can be rerun without rebuilding context.",
+                ),
+                (
+                    "2. Add drivers/regressors",
+                    "Find better signals",
+                    "Use Excel, DAX, Kusto, SQL, CRM, or planning files to test known-future drivers, events, benchmarks, and normalization factors.",
+                ),
+                (
+                    "3. Track performance over time",
+                    "Forecast ledger",
+                    "Save each forecast snapshot, append landed actuals, compare last month's yhat versus actuals, rerun, and judge whether the run rate changes the full-year call.",
+                ),
+            ]
+            return '<div class="ops-grid">' + "".join(
+                '<div class="ops-card">'
+                f'<div class="ops-step">{html.escape(step)}</div>'
+                f'<div class="ops-title">{html.escape(title)}</div>'
+                f'<div class="ops-copy">{html.escape(copy)}</div>'
+                "</div>"
+                for step, title, copy in cards
+            ) + "</div>"
+
+
+        def section_key(section: str) -> str:
+            return "".join(ch.lower() if ch.isalnum() else "_" for ch in section).strip("_")
+
+
+        def render_workbench_section_nav() -> str:
+            current = st.session_state.get("active_workbench_section", DASHBOARD_SECTIONS[0])
+            if current not in DASHBOARD_SECTIONS:
+                current = DASHBOARD_SECTIONS[0]
+                st.session_state["active_workbench_section"] = current
+            st.markdown(
+                """
+                <div class="workbench-nav-shell">
+                    <div class="workbench-nav-eyebrow">Workbench sections</div>
+                    <div class="workbench-nav-title">Sidebar tabs stay visible. Only the selected workbench section renders on each rerun.</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.caption("Bold fast tabs instead of hidden pages; switch sections without rendering every heavy diagnostic.")
+            for section in DASHBOARD_SECTIONS:
+                clicked = st.button(
+                    SECTION_LABELS.get(section, section),
+                    key=f"workbench_tab_{section_key(section)}",
+                    type="primary" if section == current else "secondary",
+                    use_container_width=True,
+                    help=SECTION_DESCRIPTIONS.get(section, ""),
+                )
+                if clicked and section != current:
+                    st.session_state["active_workbench_section"] = section
+                    st.rerun()
+            current = st.session_state.get("active_workbench_section", current)
+            st.caption(f"{SECTION_DESCRIPTIONS.get(current, '')} Only this section renders on rerun.")
+            return current
 
 
         def model_columns(frame: pd.DataFrame, *, backtest: bool = False) -> list[str]:
@@ -2336,41 +2526,388 @@ def build_streamlit_app() -> str:
             return pd.DataFrame(rows)
 
 
+        def truthy_series(values: pd.Series | None, *, default: bool = False) -> pd.Series:
+            if values is None:
+                return pd.Series(dtype=bool)
+            normalized = values.astype(str).str.lower()
+            truthy = normalized.isin({"1", "true", "yes", "y"})
+            falsy = normalized.isin({"0", "false", "no", "n"})
+            return truthy | (~truthy & ~falsy & default)
+
+
+        def ledger_selected_snapshot(frame: pd.DataFrame) -> pd.DataFrame:
+            if frame.empty:
+                return frame
+            out = frame.copy()
+            if "ds" in out.columns:
+                out["ds"] = pd.to_datetime(out["ds"], errors="coerce")
+            if "forecast_origin" in out.columns:
+                out["forecast_origin"] = pd.to_datetime(out["forecast_origin"], errors="coerce")
+            if "yhat" in out.columns:
+                out["yhat"] = pd.to_numeric(out["yhat"], errors="coerce")
+            if "is_selected_model" in out.columns:
+                selected = out[truthy_series(out["is_selected_model"], default=False)].copy()
+                if not selected.empty:
+                    out = selected
+            required_subset = [col for col in ["ds", "yhat"] if col in out.columns]
+            sort_cols = [col for col in ["unique_id", "forecast_origin", "version_label", "ds"] if col in out.columns]
+            out = out.dropna(subset=required_subset) if required_subset else out
+            return out.sort_values(sort_cols) if sort_cols else out
+
+
+        def ledger_available_series(*frames: pd.DataFrame) -> list[str]:
+            values: list[str] = []
+            for frame in frames:
+                if frame.empty or "unique_id" not in frame.columns:
+                    continue
+                values.extend(frame["unique_id"].astype(str).dropna().tolist())
+            return sorted({value for value in values if value and value != "nan"})
+
+
+        def ledger_version_options(snapshot: pd.DataFrame, locks: pd.DataFrame) -> tuple[list[str], list[str]]:
+            if snapshot.empty or "version_label" not in snapshot.columns:
+                return [], []
+            option_cols = [col for col in ["forecast_version_id", "version_label", "forecast_origin"] if col in snapshot.columns]
+            ordered = snapshot[option_cols].drop_duplicates().copy()
+            if "forecast_origin" in ordered.columns:
+                ordered["forecast_origin"] = pd.to_datetime(ordered["forecast_origin"], errors="coerce")
+            sort_cols = [col for col in ["forecast_origin", "version_label"] if col in ordered.columns]
+            if sort_cols:
+                ordered = ordered.sort_values(sort_cols, na_position="first")
+            labels = ordered["version_label"].fillna("").astype(str).replace("", "unlabeled version").tolist()
+            lock_ids = set(locks.get("forecast_version_id", pd.Series(dtype=str)).astype(str).tolist()) if not locks.empty else set()
+            default_labels = (
+                ordered[ordered["forecast_version_id"].astype(str).isin(lock_ids)]["version_label"].fillna("").astype(str).replace("", "unlabeled version").tolist()
+                if "forecast_version_id" in ordered.columns
+                else []
+            )
+            if labels:
+                default_labels = list(dict.fromkeys([*default_labels, *labels[-8:]]))
+            return labels, default_labels or labels[-4:]
+
+
+        def ledger_latest_history_frame(revisions: pd.DataFrame, corrected: pd.DataFrame) -> pd.DataFrame:
+            if not corrected.empty and {"unique_id", "ds"}.issubset(corrected.columns):
+                value_col = next((col for col in ["corrected_y", "raw_y", "y"] if col in corrected.columns), None)
+                if value_col:
+                    out = corrected[["unique_id", "ds", value_col]].copy()
+                    out = out.rename(columns={value_col: "y_history"})
+                    out["history_source"] = value_col
+                    out["ds"] = pd.to_datetime(out["ds"], errors="coerce")
+                    out["y_history"] = pd.to_numeric(out["y_history"], errors="coerce")
+                    return out.dropna(subset=["ds", "y_history"]).sort_values(["unique_id", "ds"])
+            if revisions.empty or not {"unique_id", "ds", "y"}.issubset(revisions.columns):
+                return pd.DataFrame()
+            out = revisions.copy()
+            if "is_latest" in out.columns:
+                latest = out[truthy_series(out["is_latest"], default=False)].copy()
+                if not latest.empty:
+                    out = latest
+            out = out[["unique_id", "ds", "y"]].rename(columns={"y": "y_history"})
+            out["history_source"] = "latest actual revision"
+            out["ds"] = pd.to_datetime(out["ds"], errors="coerce")
+            out["y_history"] = pd.to_numeric(out["y_history"], errors="coerce")
+            return out.dropna(subset=["ds", "y_history"]).sort_values(["unique_id", "ds"])
+
+
+        def ledger_forecast_evolution_chart(snapshot: pd.DataFrame, actuals: pd.DataFrame, history: pd.DataFrame, locks: pd.DataFrame, uid: str, version_labels: list[str]) -> go.Figure:
+            fig = go.Figure()
+            view = snapshot[snapshot["unique_id"].astype(str) == str(uid)].copy() if "unique_id" in snapshot.columns else snapshot.copy()
+            if version_labels and "version_label" in view.columns:
+                view = view[view["version_label"].fillna("").astype(str).replace("", "unlabeled version").isin(version_labels)]
+            actual_line = history[history["unique_id"].astype(str) == str(uid)].copy() if not history.empty and "unique_id" in history.columns else pd.DataFrame()
+            if actual_line.empty:
+                actual_line = actuals[actuals["unique_id"].astype(str) == str(uid)].copy() if not actuals.empty and "unique_id" in actuals.columns else pd.DataFrame()
+                if not actual_line.empty and "y_actual" in actual_line.columns:
+                    actual_line = actual_line.rename(columns={"y_actual": "y_history"})
+            if not actual_line.empty and {"ds", "y_history"}.issubset(actual_line.columns):
+                actual_line["y_history"] = pd.to_numeric(actual_line["y_history"], errors="coerce")
+                actual_line = actual_line.dropna(subset=["ds", "y_history"]).sort_values("ds").drop_duplicates(subset=["ds"], keep="last")
+                fig.add_trace(
+                    go.Scatter(
+                        x=actual_line["ds"],
+                        y=actual_line["y_history"],
+                        name="Latest actuals",
+                        mode="lines",
+                        line=dict(color=C["hist"], width=3.0),
+                        hovertemplate="date=%{x|%Y-%m-%d}<br>actual=%{y:,.2f}<extra></extra>",
+                    )
+                )
+            if view.empty:
+                return fig
+            if not {"ds", "yhat"}.issubset(view.columns):
+                return fig
+            if "forecast_version_id" not in view.columns:
+                view = view.copy()
+                view["forecast_version_id"] = view["version_label"] if "version_label" in view.columns else "Forecast version"
+            lock_lookup = {}
+            if not locks.empty and {"forecast_version_id", "lock_label"}.issubset(locks.columns):
+                lock_lookup = locks.dropna(subset=["forecast_version_id"]).set_index(locks["forecast_version_id"].astype(str))["lock_label"].astype(str).to_dict()
+            palette = [C["champ"], C["alt1"], C["alt2"], C["alt3"], C["gold"], "#3f7f93", "#7a7f87"]
+            for idx, (version_id, group) in enumerate(view.groupby("forecast_version_id", sort=False)):
+                group = group.sort_values("ds") if "ds" in group.columns else group
+                version_label = display_value(group["version_label"].iloc[0] if "version_label" in group.columns else version_id, default="unlabeled version")
+                lock_label = lock_lookup.get(str(version_id), "")
+                name = f"{version_label} [lock: {lock_label}]" if lock_label else version_label
+                base_color = C["champ"] if lock_label else palette[idx % len(palette)]
+                color = base_color if lock_label else color_to_rgba(base_color, 0.42)
+                fig.add_trace(
+                    go.Scatter(
+                        x=group["ds"],
+                        y=pd.to_numeric(group["yhat"], errors="coerce"),
+                        name=name,
+                        mode="lines",
+                        line=dict(color=color, width=3.1 if lock_label else 2.0, dash="solid"),
+                        customdata=group[["model", "forecast_origin"]].to_numpy() if {"model", "forecast_origin"}.issubset(group.columns) else None,
+                        hovertemplate="date=%{x|%Y-%m-%d}<br>yhat=%{y:,.2f}<extra></extra>",
+                    )
+                )
+            fig.update_layout(
+                height=480,
+                margin=dict(l=45, r=180, t=25, b=45),
+                hovermode="x unified",
+                yaxis_title="forecast / actual value",
+                xaxis_title="forecast period",
+                legend_title="Forecast version",
+            )
+            return fig
+
+
+        def ledger_lock_vs_refresh_chart(deltas: pd.DataFrame, uid: str) -> go.Figure:
+            fig = go.Figure()
+            if deltas.empty:
+                return fig
+            view = deltas[deltas["unique_id"].astype(str) == str(uid)].copy() if "unique_id" in deltas.columns else deltas.copy()
+            if view.empty:
+                return fig
+            if "ds" not in view.columns:
+                return fig
+            view = view.sort_values("ds")
+            for col in ["base_yhat", "comparison_yhat", "actual_y"]:
+                if col in view.columns:
+                    view[col] = pd.to_numeric(view[col], errors="coerce")
+            lock_label = display_value(view["base_lock_label"].iloc[0] if "base_lock_label" in view.columns else "Official lock", default="Official lock")
+            if "base_yhat" in view.columns:
+                fig.add_trace(go.Scatter(x=view["ds"], y=view["base_yhat"], name=f"{lock_label} forecast", mode="lines", line=dict(color=C["champ"], width=3.0)))
+            if "comparison_yhat" in view.columns:
+                fig.add_trace(go.Scatter(x=view["ds"], y=view["comparison_yhat"], name="Latest refresh forecast", mode="lines", line=dict(color=color_to_rgba(C["alt1"], 0.55), width=2.5)))
+            fig.update_layout(height=420, margin=dict(l=45, r=80, t=25, b=45), hovermode="x unified", yaxis_title="value", xaxis_title="period")
+            return fig
+
+
+        def ledger_delta_bar_chart(deltas: pd.DataFrame, uid: str) -> go.Figure:
+            fig = go.Figure()
+            if deltas.empty:
+                return fig
+            view = deltas[deltas["unique_id"].astype(str) == str(uid)].copy() if "unique_id" in deltas.columns else deltas.copy()
+            if view.empty or "comparison_minus_base_pct" not in view.columns:
+                return fig
+            if "ds" not in view.columns:
+                return fig
+            view = view.sort_values("ds")
+            view["comparison_minus_base_pct"] = pd.to_numeric(view["comparison_minus_base_pct"], errors="coerce")
+            status = view.get("status_label", pd.Series(["threshold_not_configured"] * len(view))).fillna("unknown").astype(str)
+            colors = {
+                "call_up": C["alt1"],
+                "call_down": C["champ"],
+                "watch": C["gold"],
+                "on_track": C["hist"],
+                "threshold_not_configured": C["dim"],
+                "unknown": C["dim"],
+            }
+            fig.add_trace(
+                go.Bar(
+                    x=view["ds"],
+                    y=view["comparison_minus_base_pct"],
+                    name="Refresh minus lock",
+                    marker_color=[colors.get(label, C["dim"]) for label in status],
+                    text=status,
+                    hovertemplate="period=%{x|%Y-%m-%d}<br>delta=%{y:.1%}<br>status=%{text}<extra></extra>",
+                )
+            )
+            fig.add_hline(y=0, line=dict(color="#7a7f87", width=1))
+            fig.update_layout(height=340, margin=dict(l=45, r=40, t=25, b=45), yaxis_tickformat=".0%", yaxis_title="latest refresh vs lock", xaxis_title="period")
+            return fig
+
+
+        def ledger_performance_chart(performance: pd.DataFrame) -> go.Figure:
+            fig = go.Figure()
+            if performance.empty or "version_label" not in performance.columns:
+                return fig
+            frame = performance.copy()
+            metric = "wape" if "wape" in frame.columns and pd.to_numeric(frame["wape"], errors="coerce").notna().any() else "mae"
+            frame[metric] = pd.to_numeric(frame[metric], errors="coerce")
+            frame = frame.dropna(subset=[metric])
+            if frame.empty:
+                return fig
+            frame = frame.sort_values(metric)
+            fig.add_trace(
+                go.Bar(
+                    x=frame["version_label"],
+                    y=frame[metric],
+                    marker_color=[C["alt1"] if idx == 0 else C["dim"] for idx in range(len(frame))],
+                    text=[f"{value:.1%}" if metric == "wape" else f"{value:,.1f}" for value in frame[metric]],
+                    hovertext=(
+                        "model=" + frame.get("model", pd.Series([""] * len(frame))).astype(str)
+                        + "<br>observed=" + frame.get("observed_periods", pd.Series([""] * len(frame))).astype(str)
+                        + "<br>rmse=" + frame.get("rmse", pd.Series([""] * len(frame))).astype(str)
+                    ),
+                    hovertemplate="%{x}<br>" + metric.upper() + "=%{y:.2%}<br>%{hovertext}<extra></extra>" if metric == "wape" else "%{x}<br>" + metric.upper() + "=%{y:,.2f}<br>%{hovertext}<extra></extra>",
+                )
+            )
+            fig.update_layout(height=330, margin=dict(l=45, r=30, t=25, b=80), yaxis_title=metric.upper(), yaxis_tickformat=".0%" if metric == "wape" else None)
+            return fig
+
+
         st.set_page_config(page_title="Forecast review workbench", layout="wide")
         st.markdown(
             """
             <style>
-            div[data-testid="stTabs"] [data-baseweb="tab-list"] {
-                gap: 0.45rem;
-                border-bottom: 1px solid #d9dee5;
-                margin-top: 0.4rem;
-                margin-bottom: 0.8rem;
+            .headline-card {
+                border: 1px solid #d8e2f3;
+                background: linear-gradient(135deg, #f4f8ff 0%, #e9f2ff 100%);
+                border-radius: 18px;
+                padding: 1.15rem 1.25rem;
+                box-shadow: 0 8px 24px rgba(23, 50, 77, 0.06);
+                margin-bottom: 0.75rem;
             }
-            div[data-testid="stTabs"] [data-baseweb="tab"] {
-                background: #f6f8fb;
-                border: 1px solid #d9dee5;
-                border-bottom: 0;
-                border-radius: 0.85rem 0.85rem 0 0;
-                padding: 0.85rem 1.05rem;
+            .headline-kicker {
+                color: #516246;
+                font-size: 0.78rem;
+                font-weight: 800;
+                letter-spacing: 0.08em;
+                margin-bottom: 0.45rem;
+                text-transform: uppercase;
+            }
+            .headline-text {
+                color: #12304a;
+                font-size: 1.02rem;
+                font-weight: 650;
+                line-height: 1.55;
+            }
+            .decision-grid {
+                display: grid;
+                gap: 0.75rem;
+                grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+                margin: 0.2rem 0 0.95rem 0;
+            }
+            .decision-card {
+                border: 1px solid #e2e8f0;
+                border-radius: 16px;
+                background: #ffffff;
+                padding: 0.9rem 1rem;
+                box-shadow: 0 6px 18px rgba(15, 23, 42, 0.05);
+            }
+            .decision-label {
+                color: #64748b;
+                font-size: 0.76rem;
+                font-weight: 800;
+                letter-spacing: 0.04em;
+                text-transform: uppercase;
+            }
+            .decision-value {
+                color: #0f172a;
+                font-size: 1.45rem;
+                font-weight: 800;
+                line-height: 1.2;
+                margin-top: 0.28rem;
+            }
+            .decision-detail {
+                color: #64748b;
+                font-size: 0.84rem;
+                line-height: 1.35;
+                margin-top: 0.3rem;
+            }
+            .insight-panel {
+                border: 1px solid #e2e8f0;
+                border-radius: 16px;
+                background: #fbfdff;
+                padding: 1rem 1.1rem;
+                margin-bottom: 0.85rem;
+            }
+            .insight-panel h4 {
+                margin: 0 0 0.45rem 0;
+                color: #12304a;
+            }
+            .insight-panel ul {
+                margin: 0.25rem 0 0 1.15rem;
+                padding: 0;
+            }
+            .ops-grid {
+                display: grid;
+                gap: 0.75rem;
+                grid-template-columns: repeat(auto-fit, minmax(235px, 1fr));
+                margin: 0.35rem 0 0.9rem 0;
+            }
+            .ops-card {
+                border: 1px solid #dbe4ef;
+                border-radius: 16px;
+                padding: 1rem;
+                background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+                min-height: 140px;
+            }
+            .ops-step {
+                color: #b65f32;
+                font-size: 0.78rem;
+                font-weight: 900;
+                letter-spacing: 0.06em;
+                text-transform: uppercase;
+            }
+            .ops-title {
+                color: #0f172a;
+                font-size: 1.02rem;
+                font-weight: 850;
+                margin: 0.32rem 0;
+            }
+            .ops-copy {
+                color: #475569;
+                font-size: 0.9rem;
+                line-height: 1.42;
+            }
+            .workbench-nav-shell {
+                border: 1px solid #dbe4ef;
+                border-radius: 18px;
+                background: linear-gradient(135deg, #fffaf6 0%, #f6f9ff 100%);
+                padding: 1rem 1.15rem;
+                margin: 1rem 0 0.55rem 0;
+                box-shadow: 0 10px 28px rgba(15, 23, 42, 0.06);
+            }
+            .workbench-nav-eyebrow {
+                color: #b65f32;
+                font-size: 0.78rem;
+                font-weight: 900;
+                letter-spacing: 0.08em;
+                text-transform: uppercase;
+            }
+            .workbench-nav-title {
+                color: #12304a;
+                font-size: 1.03rem;
+                font-weight: 800;
+                line-height: 1.35;
+                margin-top: 0.25rem;
+            }
+            section[data-testid="stSidebar"] div[data-testid="stButton"] > button {
+                border-radius: 14px;
                 min-height: 3rem;
+                font-weight: 850;
+                letter-spacing: -0.01em;
+                box-shadow: 0 5px 14px rgba(15, 23, 42, 0.06);
             }
-            div[data-testid="stTabs"] [data-baseweb="tab"] p {
-                font-size: 1.04rem;
+            section[data-testid="stSidebar"] div[data-testid="stSelectbox"] label p {
                 font-weight: 800;
                 letter-spacing: -0.01em;
-            }
-            div[data-testid="stTabs"] [aria-selected="true"] {
-                background: #fff8f4;
-                color: #9a4622;
-                box-shadow: inset 0 -3px 0 #b65f32;
             }
             </style>
             """,
             unsafe_allow_html=True,
         )
 
+        artifact_load_started = time.perf_counter()
         manifest = read_json("manifest.json")
         diagnostics = read_json("diagnostics.json")
+        ledger_context = read_json("ledger_context.json")
+        if ledger_context and "Forecast ledger" not in DASHBOARD_SECTIONS:
+            DASHBOARD_SECTIONS.insert(DASHBOARD_SECTIONS.index("Feeder outputs"), "Forecast ledger")
         executive_headline = diagnostics.get("executive_headline", {})
         model_policy_resolution = manifest.get("model_policy_resolution", {})
         history = prep_dates(read_csv("history.csv"))
@@ -2405,6 +2942,44 @@ def build_streamlit_app() -> str:
         known_future_regressors = read_csv("known_future_regressors.csv")
         driver_availability_audit = read_csv("driver_availability_audit.csv")
         driver_experiment_summary = read_csv("driver_experiment_summary.csv")
+        artifact_load_seconds = time.perf_counter() - artifact_load_started
+        artifact_row_count = sum(
+            len(frame)
+            for frame in [
+                history,
+                forecast,
+                all_models,
+                selection,
+                metrics,
+                weights,
+                backtest,
+                forecast_long,
+                backtest_long,
+                series_summary,
+                model_audit,
+                model_win_rates,
+                model_window_metrics,
+                residual_diagnostics,
+                residual_tests,
+                interval_diagnostics,
+                trust_summary,
+                target_transform_audit,
+                seasonality_diagnostics,
+                seasonality_decomposition,
+                model_explainability,
+                hierarchy_coherence,
+                hierarchy_reconciliation,
+                hierarchy_coherence_pre,
+                hierarchy_coherence_post,
+                hierarchy_contribution,
+                hierarchy_backtest_comparison,
+                scenario_assumptions,
+                scenario_forecast,
+                known_future_regressors,
+                driver_availability_audit,
+                driver_experiment_summary,
+            ]
+        )
 
         if forecast.empty:
             st.error("forecast.csv was not found in this run directory.")
@@ -2425,6 +3000,8 @@ def build_streamlit_app() -> str:
 
         with st.sidebar:
             st.header("Controls")
+            active_section = render_workbench_section_nav()
+            st.divider()
             uid = st.selectbox("Series", uids)
             champion_scope = st.radio(
                 "Champion lens",
@@ -2456,11 +3033,32 @@ def build_streamlit_app() -> str:
             st.caption(f"Active champion: {model_menu_label(uid, active_champion, winner_metric) if active_champion else 'not available'} (by {metric_label(winner_metric)})")
             weighted_labels = [model_menu_label(uid, model, winner_metric) for model in top_weighted(uid, champion=active_champion)]
             st.caption("Top weighted alternatives: " + (", ".join(weighted_labels) or "not available"))
+            model_options = model_menu_options(uid, candidate_models(uid))
+            default_models = dedupe_models([active_champion, *top_weighted(uid, champion=active_champion)])
+            default_models = [model for model in default_models if model in model_options][:4]
+            focus_key = f"models_to_investigate_{uid}"
+            stored_focus_models = st.session_state.get(focus_key, default_models)
+            sidebar_focus_default = [model for model in dedupe_models(stored_focus_models) if model in model_options] or default_models
+            focus_models = st.multiselect(
+                "Models to investigate",
+                model_options,
+                default=sidebar_focus_default,
+                format_func=lambda model: model_menu_label(uid, model, winner_metric),
+                help="These models are highlighted in forecast, CV, residual, interval, and audit sections. Clear the list to only use the active champion.",
+                key=focus_key,
+            )
+            if active_champion and active_champion not in focus_models:
+                focus_models = [active_champion, *focus_models]
             show_context_models = st.toggle(
                 "Show all other models as faint context",
-                value=True,
-                help="Turn this off when the chart is too crowded; models chosen in the Model investigation tab remain highlighted.",
+                value=False,
+                help="Turn this on for full all-candidate context. Keeping it off makes the first-glance chart faster and highlights only the champion plus investigated models.",
             )
+            if PERF_DIAGNOSTICS:
+                with st.expander("Performance diagnostics", expanded=False):
+                    st.metric("Artifact load/prep seconds", f"{artifact_load_seconds:.2f}")
+                    st.metric("Loaded artifact rows", f"{artifact_row_count:,}")
+                    st.caption("Set NIXTLA_SCAFFOLD_STREAMLIT_PERF=1 to show this panel. CSV/JSON reads are cached by file path, modified time, and size.")
 
         headline_series = {
             str(row.get("unique_id")): row.get("paragraph")
@@ -2468,31 +3066,65 @@ def build_streamlit_app() -> str:
             if row.get("unique_id") and row.get("paragraph")
         } if isinstance(executive_headline.get("series"), list) else {}
         headline_text = headline_series.get(str(uid)) or executive_headline.get("paragraph")
-        if headline_text:
-            st.subheader("Forecast headline")
-            st.info(headline_text)
-            st.text_area("Copy headline", value=headline_text, height=120, key=f"copy_headline_{str(uid)}")
-            st.caption("This deterministic headline reuses trust_summary.csv, forecast.csv, interval_status, and horizon validation gates. Copy this text or Quote diagnostics.json executive_headline.paragraph verbatim for run-level summaries.")
 
         active_interval_status = "unavailable"
-        if not trust_summary.empty:
+        if active_section == "Forecast review" and headline_text:
+            st.subheader("Forecast headline")
+            st.markdown(
+                f"""
+                <div class="headline-card">
+                    <div class="headline-kicker">Deterministic executive headline</div>
+                    <div class="headline-text">{html.escape(str(headline_text))}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            with st.expander("Copy-safe headline", expanded=False):
+                st.caption("Use the copy icon in this code block. Quote diagnostics.json executive_headline.paragraph verbatim for run-level summaries.")
+                st.code(str(headline_text), language="text")
+
+        if active_section == "Forecast review" and not trust_summary.empty:
             st.subheader("Decision summary")
             trust_row = trust_summary[trust_summary["unique_id"].astype(str) == uid]
             if not trust_row.empty:
                 trust = trust_row.iloc[0]
                 active_interval_status = str(trust.get("interval_status", "unavailable"))
-                trust_cols = st.columns(6)
-                trust_cols[0].metric("Trust level", str(trust.get("trust_level", "N/A")))
-                trust_cols[1].metric("Trust score", str(trust.get("trust_score_0_100", "N/A")))
-                trust_cols[2].metric("History", str(trust.get("history_readiness", "N/A")))
-                trust_cols[3].metric("Unvalidated steps", str(trust.get("unvalidated_steps", "N/A")))
-                trust_cols[4].metric("Horizon score cap", str(trust.get("horizon_trust_score_cap", "None")))
-                trust_cols[5].metric("Intervals", interval_status_label(trust.get("interval_status", "N/A")))
-                caveats = str(trust.get("caveats") or "No major caveats.")
-                actions = str(trust.get("next_actions") or "No next actions recorded.")
+                trust_level = display_value(trust.get("trust_level"), default="N/A")
+                trust_score = display_value(trust.get("trust_score_0_100"), default="N/A")
+                history_readiness = display_value(trust.get("history_readiness"), default="N/A")
+                unvalidated_steps = display_value(trust.get("unvalidated_steps"), default="0")
+                horizon_cap = display_value(trust.get("horizon_trust_score_cap"), default="None")
+                interval_label = interval_status_label(trust.get("interval_status", "N/A"))
+                st.markdown(
+                    '<div class="decision-grid">'
+                    + decision_card("Trust level", trust_level, f"Score {trust_score}/100")
+                    + decision_card("History", history_readiness, "Data depth behind this run")
+                    + decision_card("Unvalidated steps", unvalidated_steps, f"Horizon score cap: {horizon_cap}")
+                    + decision_card("Intervals", compact_text(interval_label), interval_label)
+                    + "</div>",
+                    unsafe_allow_html=True,
+                )
+                caveats = display_value(trust.get("caveats"), default="No major caveats.")
+                actions = display_value(trust.get("next_actions"), default="No next actions recorded.")
+                caveat_items = split_action_items(caveats, fallback="No major caveats.")
+                action_items = split_action_items(actions, fallback="No next actions recorded.")
                 st.caption("planning_eligible is a horizon-validation flag only; still review trust, intervals, residuals, hierarchy, and data-quality caveats before stakeholder use.")
-                st.markdown(f"**Caveats:** {caveats}")
-                st.markdown(f"**Next actions:** {actions}")
+                st.markdown(
+                    f"""
+                    <div class="insight-panel">
+                        <h4>Watchouts from this run</h4>
+                        {html_list(caveat_items)}
+                    </div>
+                    <div class="insight-panel">
+                        <h4>Current model next actions</h4>
+                        {html_list(action_items)}
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                st.subheader("Forecast operating loop")
+                st.caption("Turn a good one-time forecast into a refreshable finance workflow.")
+                st.markdown(operating_loop_cards(), unsafe_allow_html=True)
                 st.caption(f"Trust rubric: {TRUST_RUBRIC_TEXT}")
                 st.caption(f"Interval glossary: {INTERVAL_GLOSSARY_TEXT}")
             with st.expander("All series trust summary"):
@@ -2505,6 +3137,8 @@ def build_streamlit_app() -> str:
             st.warning(horizon_message)
         else:
             st.caption(horizon_message)
+        if active_section != "Forecast review":
+            st.caption("Forecast review owns the executive headline, decision summary, watchouts, and operating loop; this section stays focused on the diagnostic you selected.")
         if not target_transform_audit.empty:
             with st.expander("Target transformation audit", expanded=False):
                 st.caption("Raw, normalized, and modeled target values. Log/log1p forecasts are inverse-transformed for reporting; factor-normalized forecasts remain in normalized units unless future factors are supplied externally.")
@@ -2512,35 +3146,21 @@ def build_streamlit_app() -> str:
         policy_table = policy_resolution_table()
         if not policy_table.empty:
             with st.expander("Model policy resolution", expanded=False):
-                st.caption(f"model_policy={model_policy_resolution.get('model_policy', 'unknown')}. `all` means all eligible open-source families; skipped or unavailable families are explicit.")
+                allowlist = model_policy_resolution.get("model_allowlist", []) if isinstance(model_policy_resolution, dict) else []
+                allowlist_note = f" model_allowlist={', '.join(str(model) for model in allowlist)}." if allowlist else ""
+                st.caption(f"model_policy={model_policy_resolution.get('model_policy', 'unknown')}.{allowlist_note} `all` means all eligible open-source families; skipped or unavailable families are explicit.")
                 st.dataframe(policy_table, width="stretch", hide_index=True)
 
-        tab_forecast, tab_investigate, tab_backtest, tab_intervals, tab_audit, tab_seasonality, tab_hierarchy, tab_drivers, tab_outputs = st.tabs(
-            ["Forecast review", "Model investigation", "CV window player", "Prediction intervals", "Model audit", "Seasonality", "Hierarchy", "Assumptions & Drivers", "Feeder outputs"]
-        )
+        st.caption(f"Active section: {active_section}. Only this workbench section renders on rerun; switch sections from the sidebar when you need deeper diagnostics.")
 
-        model_options = model_menu_options(uid, candidate_models(uid))
-        default_models = dedupe_models([active_champion, *top_weighted(uid, champion=active_champion)])
-        default_models = [model for model in default_models if model in model_options][:4]
-
-        with tab_investigate:
+        if active_section == "Model investigation":
             st.subheader("Models to investigate")
-            st.caption("Pick specific models here, then compare their future path, rolling-origin windows, errors, intervals, weights, and explainability without crowding the main forecast review. Menu labels use `#rank | model | engine`; the guide below is grouped by engine and alphabetized by model so StatsForecast/classical and MLForecast candidates are easy to distinguish.")
-            picker_guide = model_menu_table(uid, model_options, active_champion=active_champion, focus_models=default_models, metric=winner_metric)
+            st.caption("Pick specific models from the sidebar, then compare their future path, rolling-origin windows, errors, intervals, weights, and explainability without crowding the main forecast review. Menu labels use `#rank | model | engine`; the guide below is grouped by engine and alphabetized by model so StatsForecast/classical and MLForecast candidates are easy to distinguish.")
+            picker_guide = model_menu_table(uid, model_options, active_champion=active_champion, focus_models=focus_models, metric=winner_metric)
             if not picker_guide.empty:
                 with st.expander("Model picker guide: rank, engine, and role", expanded=True):
                     st.caption("Rank comes from the current winner metric. Engine labels distinguish StatsForecast/classical, MLForecast, baseline, ensemble, custom, and other candidates; the native guide table italicizes the Engine column when Streamlit dataframe styling is available.")
                     st.dataframe(model_picker_guide_style(picker_guide), width="stretch", hide_index=True)
-            focus_models = st.multiselect(
-                "Models to investigate",
-                model_options,
-                default=default_models,
-                format_func=lambda model: model_menu_label(uid, model, winner_metric),
-                help="These models are highlighted in forecast, CV, residual, interval, and audit sections. Clear the list to only use the active champion.",
-                key=f"models_to_investigate_{uid}",
-            )
-            if active_champion and active_champion not in focus_models:
-                focus_models = [active_champion, *focus_models]
             investigation = model_investigation_table(uid, dedupe_models(focus_models), active_champion=active_champion, metric=winner_metric)
             inv_cols = st.columns(4)
             inv_cols[0].metric("Active champion", active_champion or "N/A")
@@ -2610,7 +3230,7 @@ def build_streamlit_app() -> str:
             else:
                 st.info("No backtest predictions are available for focused model investigation.")
 
-        with tab_forecast:
+        if active_section == "Forecast review":
             st.subheader("Tournament lens")
             lens_cols = st.columns(4)
             lens_cols[0].metric("Champion lens", champion_scope.replace("Best ", ""))
@@ -2644,7 +3264,7 @@ def build_streamlit_app() -> str:
             if not series_summary.empty:
                 st.dataframe(series_summary[series_summary["unique_id"].astype(str) == uid], width="stretch", hide_index=True)
 
-        with tab_backtest:
+        if active_section == "CV window player":
             if backtest.empty or "cutoff" not in backtest.columns:
                 st.warning("No backtest predictions are available.")
             else:
@@ -2728,21 +3348,31 @@ def build_streamlit_app() -> str:
                         st.session_state[state_key] = (st.session_state[state_key] + 1) % len(cutoffs)
                         st.rerun()
 
-        with tab_intervals:
+        if active_section == "Prediction intervals":
             st.subheader("Prediction interval focus")
-            st.caption("Prediction intervals are the uncertainty ranges around each model's point forecast. All interval-bearing candidate models are selected by default so you can compare ranges directly; model spread itself is still not a prediction interval.")
+            st.caption("Prediction intervals are the uncertainty ranges around each model's point forecast. The top interval-bearing candidate models are selected by default for a faster first render; use the picker to opt into every interval-bearing model when you need the full uncertainty review. Model spread itself is still not a prediction interval.")
             interval_options = model_menu_options(uid, interval_bearing_models(uid))
             interval_guide = model_menu_table(uid, interval_options, active_champion=active_champion, focus_models=interval_options, metric=winner_metric)
             if not interval_guide.empty:
                 with st.expander("Interval model picker guide: rank and engine", expanded=False):
                     st.caption("Interval model menus also use `#rank | model | engine`; use the rank and Engine columns to separate StatsForecast/classical intervals from MLForecast intervals.")
                     st.dataframe(model_picker_guide_style(interval_guide), width="stretch", hide_index=True)
+            rank_lookup = model_rank_map(uid, winner_metric)
+            preferred_interval_models = dedupe_models(
+                [
+                    active_champion,
+                    selected_model(uid),
+                    *top_weighted(uid, champion=active_champion),
+                    *sorted(interval_options, key=lambda model: rank_lookup.get(str(model), 9999)),
+                ]
+            )
+            interval_default_models = [model for model in preferred_interval_models if model in interval_options][:DEFAULT_INTERVAL_MODEL_LIMIT]
             interval_models = st.multiselect(
                 "Models with interval bands",
                 interval_options,
-                default=interval_options,
+                default=interval_default_models,
                 format_func=lambda model: model_menu_label(uid, model, winner_metric),
-                help="These are candidate models that wrote future lower/upper interval bounds. Keep all selected for a full uncertainty review, or narrow the list if the chart gets crowded.",
+                help=f"These are candidate models that wrote future lower/upper interval bounds. The default is capped at {DEFAULT_INTERVAL_MODEL_LIMIT} models for responsiveness; add more models when a full uncertainty review is needed.",
                 key=f"interval_models_{uid}",
             )
             interval_models = coerce_interval_models(uid, interval_models)
@@ -2783,7 +3413,7 @@ def build_streamlit_app() -> str:
             else:
                 st.info("No interval-bearing forecast rows were found for the selected interval models.")
 
-        with tab_audit:
+        if active_section == "Model audit":
             left, right = st.columns([1.25, 0.75])
             with left:
                 st.subheader("Model leaderboard")
@@ -2872,7 +3502,7 @@ def build_streamlit_app() -> str:
             else:
                 st.info("No MLForecast feature importance available. Use model policy auto/all with enough history and installed MLForecast/LightGBM dependencies.")
 
-        with tab_seasonality:
+        if active_section == "Seasonality":
             st.subheader("Seasonality credibility")
             st.caption("This view separates pattern strength from evidence quality. A seasonal chart that looks plausible is not planning-ready unless enough full cycles exist.")
             if not seasonality_diagnostics.empty:
@@ -2963,7 +3593,7 @@ def build_streamlit_app() -> str:
             else:
                 st.info("No decomposition table is available. This usually means the series has fewer than two full seasonal cycles or no repeating seasonal period was inferred.")
 
-        with tab_hierarchy:
+        if active_section == "Hierarchy":
             if "hierarchy_depth" not in forecast.columns:
                 st.info("Hierarchy metadata is not present in this run. Use the `hierarchy` command before forecasting to enable roll-up/down diagnostics.")
             else:
@@ -3023,7 +3653,7 @@ def build_streamlit_app() -> str:
                 else:
                     st.warning("Hierarchy metadata exists, but hierarchy_coherence.csv is empty.")
 
-        with tab_drivers:
+        if active_section == "Assumptions & Drivers":
             st.subheader("Assumptions & Drivers")
             st.caption("Scenario/event overlays are post-model assumptions: baseline `yhat` stays separate from `yhat_scenario`. Known-future regressors are audited for leakage and future availability; this release does not automatically train arbitrary external regressors.")
             if (
@@ -3064,7 +3694,173 @@ def build_streamlit_app() -> str:
                 st.subheader("Driver experiment summary")
                 st.dataframe(driver_experiment_summary, width="stretch", hide_index=True)
 
-        with tab_outputs:
+        if active_section == "Forecast ledger":
+            st.subheader("Forecast ledger")
+            st.caption("Version tracker for official forecast locks, landed actual revisions, selected-lock deltas, and anomaly/business-model adjustment audits. The visuals come first; raw ledger tables are collapsed below for audit review.")
+            if not ledger_context:
+                st.info("No ledger_context.json was found for this run. Register the run with `nixtla-scaffold ledger register` or pass `--ledger --forecast-key` when forecasting.")
+            else:
+                ledger_key = str(ledger_context.get("forecast_key", ""))
+                ledger_exports = Path(str(ledger_context.get("exports_path", "")))
+                ledger_versions = read_csv_path(ledger_exports / "forecast_versions.csv")
+                ledger_snapshot = ledger_selected_snapshot(prep_dates(read_csv_path(ledger_exports / "forecast_snapshot.csv")))
+                ledger_locks = read_csv_path(ledger_exports / "official_forecast_locks.csv")
+                ledger_revisions = prep_dates(read_csv_path(ledger_exports / "forecast_actual_revisions.csv"))
+                ledger_actuals = prep_dates(read_csv_path(ledger_exports / "forecast_actuals.csv"))
+                ledger_performance = read_csv_path(ledger_exports / "forecast_performance.csv")
+                ledger_deltas = prep_dates(read_csv_path(ledger_exports / "forecast_version_deltas.csv"))
+                ledger_adjustments = prep_dates(read_csv_path(ledger_exports / "forecast_adjustments.csv"))
+                ledger_corrected = prep_dates(read_csv_path(ledger_exports / "corrected_actuals.csv"))
+                ledger_regimes = prep_dates(read_csv_path(ledger_exports / "regime_changes.csv"))
+
+                def ledger_filter(frame: pd.DataFrame) -> pd.DataFrame:
+                    if frame.empty or "forecast_key" not in frame.columns or not ledger_key:
+                        return frame
+                    return frame[frame["forecast_key"].astype(str) == ledger_key].copy()
+
+                ledger_versions = ledger_filter(ledger_versions)
+                ledger_snapshot = ledger_filter(ledger_snapshot)
+                ledger_locks = ledger_filter(ledger_locks)
+                ledger_revisions = ledger_filter(ledger_revisions)
+                ledger_actuals = ledger_filter(ledger_actuals)
+                ledger_performance = ledger_filter(ledger_performance)
+                ledger_deltas = ledger_filter(ledger_deltas)
+                ledger_adjustments = ledger_filter(ledger_adjustments)
+                ledger_corrected = ledger_filter(ledger_corrected)
+                ledger_regimes = ledger_filter(ledger_regimes)
+                ledger_history = ledger_latest_history_frame(ledger_revisions, ledger_corrected)
+
+                st.markdown(f"**Forecast key:** `{ledger_key or 'not recorded'}`")
+                if not ledger_versions.empty:
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Registered versions", len(ledger_versions))
+                    c2.metric("Official locks", len(ledger_locks))
+                    c3.metric("Actual revisions", len(ledger_revisions))
+                    c4.metric("Delta rows", len(ledger_deltas))
+                else:
+                    st.warning(f"Ledger exports were not found at `{ledger_exports}` or contain no rows for this forecast key.")
+
+                series_options = ledger_available_series(ledger_snapshot, ledger_history, ledger_actuals, ledger_deltas, ledger_corrected)
+                if series_options:
+                    default_series_index = series_options.index(uid) if uid in series_options else 0
+                    ledger_uid = st.selectbox(
+                        "Series",
+                        series_options,
+                        index=default_series_index,
+                        key=f"ledger_series_{ledger_key}",
+                        help="Choose the series to review across forecast versions, locks, actuals, and adjustments.",
+                    )
+                else:
+                    ledger_uid = uid
+                    st.info("No series-level ledger rows are available yet. Register at least one forecast snapshot and export the ledger.")
+
+                version_labels, default_version_labels = ledger_version_options(ledger_snapshot, ledger_locks)
+                selected_version_labels = default_version_labels
+                if version_labels:
+                    selected_version_labels = st.multiselect(
+                        "Forecast versions to show",
+                        version_labels,
+                        default=default_version_labels,
+                        key=f"ledger_versions_to_show_{ledger_key}_{ledger_uid}",
+                        help="Default shows official locks plus the most recent forecast versions. Non-lock forecasts render as lighter lines.",
+                    )
+
+                st.subheader("Forecasts as they moved over time")
+                st.caption("Latest actuals are a clean line; registered forecast versions are lines too. Official locks are emphasized, and non-lock refreshes use lighter shades so the version history is visible without overpowering the chart.")
+                if not ledger_snapshot.empty:
+                    st.plotly_chart(
+                        ledger_forecast_evolution_chart(ledger_snapshot, ledger_actuals, ledger_history, ledger_locks, ledger_uid, selected_version_labels),
+                        width="stretch",
+                        key="ledger_forecast_evolution",
+                    )
+                else:
+                    st.info("No forecast_snapshot.csv rows are available for this ledger key.")
+
+                status_text = "No selected-lock comparison has been exported yet."
+                if not ledger_deltas.empty and "status_label" in ledger_deltas.columns:
+                    delta_view = ledger_deltas[ledger_deltas["unique_id"].astype(str) == str(ledger_uid)] if "unique_id" in ledger_deltas.columns else ledger_deltas
+                    if not delta_view.empty:
+                        counts = delta_view["status_label"].fillna("unknown").astype(str).value_counts()
+                        status_text = ", ".join(f"{label}: {int(rows)}" for label, rows in counts.items())
+                perf_text = "No landed-actual performance has been scored yet."
+                perf_view = ledger_performance[ledger_performance["unique_id"].astype(str) == str(ledger_uid)].copy() if not ledger_performance.empty and "unique_id" in ledger_performance.columns else ledger_performance.copy()
+                if not perf_view.empty:
+                    metric = "wape" if "wape" in perf_view.columns and pd.to_numeric(perf_view["wape"], errors="coerce").notna().any() else "mae"
+                    perf_view[metric] = pd.to_numeric(perf_view[metric], errors="coerce")
+                    perf_view = perf_view.dropna(subset=[metric]).sort_values(metric)
+                    if not perf_view.empty:
+                        best_row = perf_view.iloc[0]
+                        best_label = display_value(best_row.get("version_label"), default="best version")
+                        best_value = best_row.get(metric)
+                        perf_text = f"{best_label} currently has the best {metric.upper()} ({best_value:.1%})." if metric == "wape" else f"{best_label} currently has the best {metric.upper()} ({best_value:,.2f})."
+                st.markdown(
+                    f"""
+                    <div class="decision-grid">
+                      <div class="decision-card">
+                        <div class="decision-label">Refresh vs lock</div>
+                        <div class="decision-note">{html.escape(status_text)}</div>
+                      </div>
+                      <div class="decision-card">
+                        <div class="decision-label">Landed-actual score</div>
+                        <div class="decision-note">{html.escape(perf_text)}</div>
+                      </div>
+                      <div class="decision-card">
+                        <div class="decision-label">Audit posture</div>
+                        <div class="decision-note">Adjustments and regime changes stay separate from raw actuals unless explicitly applied to a new forecast run.</div>
+                      </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+                st.subheader("Forecast operating loop")
+                st.markdown(
+                    """
+                    <div class="decision-grid">
+                      <div class="decision-card">
+                        <div class="decision-label">1. Connect refreshes</div>
+                        <div class="decision-note">Refresh Kusto, DAX, Excel, or CSV inputs, rerun the pipeline, and register each output as a ledger version.</div>
+                      </div>
+                      <div class="decision-card">
+                        <div class="decision-label">2. Add drivers</div>
+                        <div class="decision-note">Use MCP-connected datasets for feature discovery, known-future regressor audits, and scenario overlays.</div>
+                      </div>
+                      <div class="decision-card">
+                        <div class="decision-label">3. Track performance</div>
+                        <div class="decision-note">Ingest landed actuals, compare against locked forecasts, and decide whether the latest run-rate requires a call-up or call-down.</div>
+                      </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+                st.subheader("Audit tables")
+                st.caption("The ledger remains Power BI-ready: these CSV mirrors are stable feeder tables for folder ingestion, semantic models, and monthly forecast-vs-actual tracking.")
+                with st.expander("Registered versions", expanded=False):
+                    st.dataframe(ledger_versions.head(1000), width="stretch", hide_index=True)
+                with st.expander("Official locks", expanded=False):
+                    st.caption("Multiple locks are allowed: March lock, April lock, leadership submission, and other submitted views remain filterable instead of being overwritten.")
+                    st.dataframe(ledger_locks.head(1000), width="stretch", hide_index=True)
+                with st.expander("Selected-lock vs latest delta rows", expanded=False):
+                    st.dataframe(ledger_deltas.head(1000), width="stretch", hide_index=True)
+                with st.expander("Forecast performance rows", expanded=False):
+                    st.dataframe(ledger_performance.head(1000), width="stretch", hide_index=True)
+                with st.expander("Forecast vs landed actual row detail", expanded=False):
+                    st.dataframe(ledger_actuals.head(1000), width="stretch", hide_index=True)
+                with st.expander("Actual revision history", expanded=False):
+                    st.dataframe(ledger_revisions.head(1000), width="stretch", hide_index=True)
+                with st.expander("Latest historicals used in ledger visuals", expanded=False):
+                    st.caption("The evolution chart uses `corrected_y` from corrected_actuals.csv when available, otherwise the latest actual revision. Normalized history remains in the corrected/normalized actuals audit table so it is not mixed silently with raw-scale forecasts.")
+                    st.dataframe(ledger_history.head(1000), width="stretch", hide_index=True)
+                with st.expander("Adjustment audit", expanded=False):
+                    st.caption("Corrections and business-model normalizations are audited separately from raw actuals. Applying corrected/normalized history to a forecast requires an explicit user action; it is never silent.")
+                    st.dataframe(ledger_adjustments.head(1000), width="stretch", hide_index=True)
+                with st.expander("Forward-looking regime changes", expanded=False):
+                    st.dataframe(ledger_regimes.head(1000), width="stretch", hide_index=True)
+                with st.expander("Corrected / normalized actuals preview", expanded=False):
+                    st.dataframe(ledger_corrected.head(1000), width="stretch", hide_index=True)
+
+        if active_section == "Feeder outputs":
             st.subheader("Consolidated feeder files")
             st.markdown(
                 """
@@ -3085,6 +3881,7 @@ def build_streamlit_app() -> str:
                 - `hierarchy_coherence.csv`: parent forecast versus immediate-child sum when hierarchy metadata exists.
                 - `hierarchy_contribution.csv`: parent/child contribution and gap attribution for hierarchy storytelling; allocation heuristic, not reconciliation output.
                 - `hierarchy_reconciliation.csv`, `audit/hierarchy_backtest_comparison.csv`, `audit/hierarchy_unreconciled_forecast.csv`, `audit/hierarchy_coherence_pre.csv`, `audit/hierarchy_coherence_post.csv`: method summary, selected backtest accuracy comparison, and pre/post coherence audits when reconciliation is enabled. Reconciliation enforces coherence and may worsen node-level accuracy.
+                - `ledger_context.json`: optional pointer to a forecast ledger with version snapshots, official locks, landed actuals, selected-lock deltas, and adjustment-audit exports for Power BI folder ingestion.
                 """
             )
             st.subheader("forecast_long.csv")
@@ -3547,6 +4344,7 @@ def _payload_from_run(run: ForecastRun) -> dict[str, Any]:
         "model_policy_resolution": run.model_policy_resolution,
         "best_practice_receipts": _records(best_practice_receipts_frame(run)),
         "executive_headline": executive_headline,
+        "ledger": {},
         "warnings": run.warnings,
     }
 
@@ -3595,7 +4393,36 @@ def _payload_from_directory(run_dir: Path) -> dict[str, Any]:
         "model_policy_resolution": manifest.get("model_policy_resolution", {}),
         "best_practice_receipts": _read_artifact_records(run_dir, "best_practice_receipts.csv"),
         "executive_headline": diagnostics.get("executive_headline", {}),
+        "ledger": _ledger_payload_from_directory(run_dir),
         "warnings": manifest.get("warnings", []),
+    }
+
+
+def _ledger_payload_from_directory(run_dir: Path) -> dict[str, Any]:
+    context = _read_json(run_dir / "ledger_context.json")
+    if not context:
+        return {}
+    exports_value = context.get("exports_path")
+    exports_path = Path(str(exports_value)) if exports_value else Path()
+    if exports_value and not exports_path.exists() and not exports_path.is_absolute():
+        candidate = run_dir / exports_path
+        if candidate.exists():
+            exports_path = candidate
+    forecast_key = str(context.get("forecast_key", "") or "")
+    tables: dict[str, list[dict[str, Any]]] = {}
+    counts: dict[str, int] = {}
+    if exports_value and exports_path.exists():
+        for table_name, filename in LEDGER_EXPORT_FILES.items():
+            rows = _read_csv_records(exports_path / filename)
+            if forecast_key and rows and any("forecast_key" in row for row in rows):
+                rows = [row for row in rows if str(row.get("forecast_key")) == forecast_key]
+            tables[table_name] = rows
+            counts[table_name] = len(rows)
+    return {
+        "context": context,
+        "exports_path": str(exports_path) if exports_value else "",
+        "tables": tables,
+        "counts": counts,
     }
 
 
@@ -3989,6 +4816,59 @@ def _driver_assumptions_section(
     """
 
 
+def _ledger_section(ledger: dict[str, Any]) -> str:
+    if not isinstance(ledger, dict) or not ledger.get("context"):
+        return ""
+    context = ledger.get("context", {})
+    tables = ledger.get("tables", {}) if isinstance(ledger.get("tables"), dict) else {}
+    counts = ledger.get("counts", {}) if isinstance(ledger.get("counts"), dict) else {}
+    forecast_key = context.get("forecast_key") or "Ledger forecast"
+    exports_path = ledger.get("exports_path") or context.get("exports_path") or ""
+    version_id = context.get("forecast_version_id") or ""
+    version_label = context.get("version_label") or ""
+    cards = "".join(
+        [
+            _metric_card("Ledger key", forecast_key),
+            _metric_card("Versions", counts.get("forecast_versions", 0)),
+            _metric_card("Official locks", counts.get("official_forecast_locks", 0)),
+            _metric_card("Actual revisions", counts.get("actual_revisions", 0)),
+            _metric_card("Delta rows", counts.get("forecast_version_deltas", 0)),
+        ]
+    )
+    return f"""
+    <section class="panel" style="margin-bottom:14px">
+      <h2>Forecast ledger</h2>
+      <p class="footnote">Static ledger preview embedded from <code>ledger_context.json</code> at report generation time. Use the Streamlit <strong>Forecast ledger</strong> section for interactive filtering, and rerun <code>nixtla-scaffold report --run</code> after new actuals, adjustments, comparisons, or exports.</p>
+      <p class="footnote"><strong>Current run:</strong> {_display_value(version_label)} <span class="muted">({_esc(version_id)})</span>. <strong>Exports:</strong> <code>{_esc(exports_path)}</code></p>
+      <div class="cards">{cards}</div>
+      <h3 style="margin-top:16px">Registered versions</h3>
+      {_table(tables.get("forecast_versions", []), ["version_label", "forecast_origin", "horizon", "freq", "model_policy", "created_at", "created_by", "notes"], limit=8)}
+      <h3 style="margin-top:16px">Official forecast locks</h3>
+      {_table(tables.get("official_forecast_locks", []), ["lock_label", "audience", "planning_cycle", "communication_date", "submitted_to", "lock_reason", "locked_at", "locked_by"], limit=8)}
+      <h3 style="margin-top:16px">Selected-lock vs refresh deltas</h3>
+      {_table(tables.get("forecast_version_deltas", []), ["base_lock_label", "unique_id", "ds", "base_yhat", "comparison_yhat", "comparison_minus_base", "comparison_minus_base_pct", "actual_y", "status_label"], limit=16)}
+      <h3 style="margin-top:16px">Forecast performance vs landed actuals</h3>
+      {_table(tables.get("forecast_performance", []), ["version_label", "unique_id", "model", "observed_periods", "mae", "rmse", "bias", "wape", "interval_80_coverage", "interval_95_coverage"], limit=12)}
+      <h3 style="margin-top:16px">Adjustment audit</h3>
+      {_table(tables.get("forecast_adjustments", []), ["unique_id", "start_ds", "end_ds", "adjustment_type", "adjustment_value", "adjusted_y", "factor", "metric_mapping", "reason", "known_as_of", "approval_status"], limit=12)}
+      <h3 style="margin-top:16px">Corrected / normalized actuals preview</h3>
+      {_table(tables.get("corrected_actuals", []), ["unique_id", "ds", "raw_y", "corrected_y", "normalized_y", "is_excluded", "applied_adjustment_ids"], limit=16)}
+      <h3 style="margin-top:16px">Regime-change audit</h3>
+      {_table(tables.get("regime_changes", []), ["unique_id", "start_ds", "end_ds", "metric_mapping", "conversion_factor", "expected_elasticity", "confidence", "reason", "approval_status"], limit=8)}
+      <div class="output-list" style="margin-top:16px">
+        {_output_item("forecast_versions.csv", "Registered refresh versions and source/run lineage.")}
+        {_output_item("official_forecast_locks.csv", "Plural official submitted forecasts such as March lock or April lock.")}
+        {_output_item("forecast_actuals.csv", "Forecast-vs-actual rows using the latest actuals revision.")}
+        {_output_item("forecast_performance.csv", "MAE/RMSE/bias/WAPE and interval coverage by version.")}
+        {_output_item("forecast_version_deltas.csv", "Lock-vs-refresh deltas with optional watch/call-up/call-down labels.")}
+        {_output_item("forecast_adjustments.csv", "Anomaly, correction, normalization, and regime-change contracts.")}
+        {_output_item("corrected_actuals.csv", "Raw, corrected, normalized, and excluded actuals trail.")}
+        {_output_item("regime_changes.csv", "Forward-looking structural-change assumptions for audit.")}
+      </div>
+    </section>
+    """
+
+
 def _hierarchy_depth_section(
     hierarchy_contribution: list[dict[str, Any]],
     hierarchy_backtest_comparison: list[dict[str, Any]],
@@ -4010,10 +4890,14 @@ def _model_policy_resolution_section(resolution: dict[str, Any]) -> str:
     if not rows:
         return ""
     policy = resolution.get("model_policy", "unknown") if isinstance(resolution, dict) else "unknown"
+    allowlist = resolution.get("model_allowlist", []) if isinstance(resolution, dict) else []
+    allowlist_text = ""
+    if allowlist:
+        allowlist_text = f" <code>model_allowlist={_esc(', '.join(str(model) for model in allowlist))}</code>."
     return f"""
     <section class="panel" style="margin-bottom:14px">
       <h2>Model policy resolution</h2>
-      <p class="footnote"><code>model_policy={_esc(policy)}</code>. <code>all</code> means all eligible open-source families; MLForecast requires enough history and installed optional dependencies. Empty or skipped families are explicit instead of silently hidden.</p>
+      <p class="footnote"><code>model_policy={_esc(policy)}</code>.{allowlist_text} <code>all</code> means all eligible open-source families; MLForecast requires enough history and installed optional dependencies. Empty or skipped families are explicit instead of silently hidden.</p>
       {_table(rows, ["family", "requested", "eligible", "ran", "reason_if_not_ran", "contributed_models"], limit=12)}
     </section>
     """

@@ -49,13 +49,23 @@ def forecast_with_policy(
     if spec.model_policy == "mlforecast":
         return _with_policy_resolution(forecast_with_mlforecast(history, profile, spec), profile, spec)
 
+    if spec.model_allowlist and spec.model_policy in ("auto", "all") and not _allowlist_requests_classical(spec):
+        return _run_mlforecast_only_allowlist(history, profile, spec)
+
     # For "auto", "statsforecast", or "all": run statsforecast first
     sf_result = _try_statsforecast(history, profile, spec)
 
     # For "all" or "auto" with enough data, also run MLForecast and merge
     ml_override: dict[str, Any] | None = None
     if spec.model_policy in ("all", "auto"):
-        if profile.min_obs_per_series < MLFORECAST_MIN_OBS:
+        if spec.model_allowlist and not _allowlist_requests_family(spec, "mlforecast"):
+            ml_override = {
+                "eligible": False,
+                "ran": False,
+                "reason_if_not_ran": "skipped_by_model_allowlist",
+                "contributed_models": [],
+            }
+        elif profile.min_obs_per_series < MLFORECAST_MIN_OBS:
             reason = f"min_history_below_threshold: min observations {profile.min_obs_per_series} < {MLFORECAST_MIN_OBS}"
             ml_override = {"eligible": False, "ran": False, "reason_if_not_ran": reason, "contributed_models": []}
             if spec.model_policy == "all":
@@ -115,6 +125,11 @@ def _try_statsforecast(history: pd.DataFrame, profile: DataProfile, spec: Foreca
     except ImportError as exc:
         if spec.model_policy == "statsforecast":
             raise
+        if not _allowlist_requests_family(spec, "baseline"):
+            raise RuntimeError(
+                "StatsForecast unavailable and baseline fallback would violate model_allowlist; "
+                f"requested allowlist: {', '.join(spec.model_allowlist)}"
+            ) from exc
         result = forecast_with_baselines(history, profile, spec)
         return ModelResult(
             forecast=result.forecast,
@@ -128,6 +143,11 @@ def _try_statsforecast(history: pd.DataFrame, profile: DataProfile, spec: Foreca
     except Exception as exc:
         if spec.model_policy == "statsforecast":
             raise
+        if not _allowlist_requests_family(spec, "baseline"):
+            raise RuntimeError(
+                "StatsForecast failed and baseline fallback would violate model_allowlist; "
+                f"requested allowlist: {', '.join(spec.model_allowlist)}"
+            ) from exc
         result = forecast_with_baselines(history, profile, spec)
         return ModelResult(
             forecast=result.forecast,
@@ -220,6 +240,107 @@ def _concat_optional_frames(*frames: pd.DataFrame) -> pd.DataFrame:
     if not available:
         return pd.DataFrame()
     return pd.concat(available, ignore_index=True)
+
+
+def _run_mlforecast_only_allowlist(history: pd.DataFrame, profile: DataProfile, spec: ForecastSpec) -> ModelResult:
+    if profile.min_obs_per_series < MLFORECAST_MIN_OBS:
+        raise ValueError(
+            "model_allowlist requested only MLForecast models, but MLForecast requires "
+            f"at least {MLFORECAST_MIN_OBS} observations per series; min observations={profile.min_obs_per_series}"
+        )
+    try:
+        ml_result = forecast_with_mlforecast(history, profile, spec)
+    except ImportError as exc:
+        raise ImportError(
+            "model_allowlist requested only MLForecast models, but MLForecast is unavailable; "
+            f"requested allowlist: {', '.join(spec.model_allowlist)}"
+        ) from exc
+    except Exception as exc:
+        raise RuntimeError(
+            "model_allowlist requested only MLForecast models, but no allowed MLForecast candidate could run; "
+            f"requested allowlist: {', '.join(spec.model_allowlist)}"
+        ) from exc
+    overrides = {
+        "baseline": {
+            "eligible": False,
+            "ran": False,
+            "reason_if_not_ran": "skipped_by_model_allowlist",
+            "contributed_models": [],
+        },
+        "statsforecast": {
+            "eligible": False,
+            "ran": False,
+            "reason_if_not_ran": "skipped_by_model_allowlist",
+            "contributed_models": [],
+        },
+    }
+    return _with_policy_resolution(ml_result, profile, spec, overrides)
+
+
+def _allowlist_families(spec: ForecastSpec) -> set[str]:
+    return {model_family(model) for model in spec.model_allowlist}
+
+
+def _allowlist_requests_classical(spec: ForecastSpec) -> bool:
+    return not spec.model_allowlist or bool(_allowlist_families(spec) & {"baseline", "statsforecast"})
+
+
+def _allowlist_requests_family(spec: ForecastSpec, family: str) -> bool:
+    return not spec.model_allowlist or family in _allowlist_families(spec)
+
+
+def _allowlist_allows_model(spec: ForecastSpec, model: str) -> bool:
+    return not spec.model_allowlist or model in set(spec.model_allowlist)
+
+
+def _model_allowlist_warning(spec: ForecastSpec) -> str | None:
+    if not spec.model_allowlist:
+        return None
+    return f"model allowlist applied: {', '.join(spec.model_allowlist)}"
+
+
+def _filter_factories_by_allowlist(
+    factories: list[tuple[str, Callable[[], Any]]],
+    spec: ForecastSpec,
+    *,
+    family_label: str,
+) -> list[tuple[str, Callable[[], Any]]]:
+    if not spec.model_allowlist:
+        return factories
+    allowed = set(spec.model_allowlist)
+    filtered = [(alias, factory) for alias, factory in factories if alias in allowed]
+    if filtered:
+        return filtered
+    available = ", ".join(alias for alias, _ in factories) or "none"
+    requested = ", ".join(spec.model_allowlist)
+    raise ValueError(
+        f"model_allowlist requested {requested}, but no {family_label} candidates are eligible for this data. "
+        f"Eligible {family_label} candidates after history/dependency gates: {available}"
+    )
+
+
+def _filter_prediction_frame_by_allowlist(
+    frame: pd.DataFrame,
+    spec: ForecastSpec,
+    *,
+    context: str,
+) -> pd.DataFrame:
+    if not spec.model_allowlist or frame.empty:
+        return frame
+    allowed = set(spec.model_allowlist)
+    model_cols = [col for col in _non_ensemble_model_columns(frame) if col in allowed]
+    if not model_cols:
+        available = ", ".join(_non_ensemble_model_columns(frame)) or "none"
+        requested = ", ".join(spec.model_allowlist)
+        raise ValueError(
+            f"model_allowlist requested {requested}, but no allowed models are present in {context}. "
+            f"Available models: {available}"
+        )
+    metadata_cols = {"unique_id", "ds", "cutoff", "y"}
+    keep = set(model_cols) | {col for col in frame.columns if col in metadata_cols}
+    for model in model_cols:
+        keep.update(col for col in frame.columns if col.startswith(f"{model}-lo-") or col.startswith(f"{model}-hi-"))
+    return frame[[col for col in frame.columns if col in keep]].copy()
 
 
 def rebuild_result_metrics_on_output_scale(
@@ -335,11 +456,13 @@ def _build_model_policy_resolution(
     for family in ["baseline", "statsforecast", "mlforecast"]:
         override = overrides.get(family)
         if override is not None:
+            family_requested = bool(override.get("requested", requested[family]))
             family_eligible = bool(override.get("eligible", eligible[family]))
             ran = bool(override.get("ran", False))
             reason = str(override.get("reason_if_not_ran", ""))
             models = list(override.get("contributed_models", []))
         else:
+            family_requested = bool(requested[family])
             models = contributed.get(family, [])
             family_eligible = eligible[family]
             ran = bool(models)
@@ -354,14 +477,14 @@ def _build_model_policy_resolution(
         families.append(
             {
                 "family": family,
-                "requested": bool(requested[family]),
+                "requested": bool(family_requested),
                 "eligible": bool(family_eligible),
                 "ran": bool(ran),
                 "reason_if_not_ran": "" if ran else reason,
                 "contributed_models": models,
             }
         )
-    return {"model_policy": policy, "families": families}
+    return {"model_policy": policy, "model_allowlist": list(spec.model_allowlist), "families": families}
 
 
 def _contributed_models_by_family(forecast: pd.DataFrame) -> dict[str, list[str]]:
@@ -379,10 +502,14 @@ def forecast_with_baselines(
     spec: ForecastSpec,
 ) -> ModelResult:
     forecast = _baseline_predictions(history, profile.freq, profile.season_length, spec.horizon)
+    forecast = _filter_prediction_frame_by_allowlist(forecast, spec, context="baseline future forecasts")
     metrics, backtest_predictions = _baseline_backtest(history, profile, spec)
     model_weights = _model_weights_from_metrics(metrics) if spec.weighted_ensemble else _empty_model_weights()
     forecast = _add_weighted_ensemble_forecast(forecast, model_weights)
     run_warnings = _weighted_ensemble_warnings(spec, model_weights)
+    allowlist_warning = _model_allowlist_warning(spec)
+    if allowlist_warning:
+        run_warnings.append(allowlist_warning)
     run_warnings.extend(_cv_horizon_warnings(metrics))
     return ModelResult(
         forecast=forecast,
@@ -402,11 +529,18 @@ def forecast_with_statsforecast(
 ) -> ModelResult:
     from statsforecast.utils import ConformalIntervals
 
-    models = _statsforecast_model_factories(history, profile, spec)
+    models = _filter_factories_by_allowlist(
+        _statsforecast_model_factories(history, profile, spec),
+        spec,
+        family_label="StatsForecast/classical",
+    )
 
     interval_kwargs: dict[str, Any] = {}
     interval_windows = _interval_windows(profile.min_obs_per_series, spec.horizon, profile.season_length)
     run_warnings: list[str] = []
+    allowlist_warning = _model_allowlist_warning(spec)
+    if allowlist_warning:
+        run_warnings.append(allowlist_warning)
     run_warnings.append(f"StatsForecast ladder: {len(models)} models ({', '.join(alias for alias, _ in models)})")
     if spec.levels and interval_windows >= 2:
         interval_kwargs["level"] = list(spec.levels)
@@ -423,7 +557,8 @@ def forecast_with_statsforecast(
         interval_kwargs=interval_kwargs,
     )
     run_warnings.extend(forecast_warnings)
-    forecast = _add_zero_forecast_for_intermittent(forecast, history)
+    if _allowlist_allows_model(spec, "ZeroForecast"):
+        forecast = _add_zero_forecast_for_intermittent(forecast, history)
 
     metrics, backtest_warnings, backtest_predictions = _statsforecast_backtest(models, history, profile, spec)
     model_weights = _model_weights_from_metrics(metrics) if spec.weighted_ensemble else _empty_model_weights()
@@ -742,13 +877,20 @@ def forecast_with_mlforecast(
     if interval_plan is not None:
         lags = list(interval_plan.lags)
 
-    model_factories = _mlforecast_model_factories(min_obs=min_obs)
+    model_factories = _filter_factories_by_allowlist(
+        _mlforecast_model_factories(min_obs=min_obs),
+        spec,
+        family_label="MLForecast",
+    )
     if not model_factories:
         raise ImportError("MLForecast requires at least one installed sklearn or LightGBM regressor")
 
     date_features = ["month", "dayofweek"] if profile.freq.upper().startswith("D") or profile.freq.upper().startswith("B") else ["month"]
 
     run_warnings: list[str] = []
+    allowlist_warning = _model_allowlist_warning(spec)
+    if allowlist_warning:
+        run_warnings.append(allowlist_warning)
     run_warnings.append(
         "MLForecast ladder: "
         f"{len(model_factories)} models ({', '.join(alias for alias, _ in model_factories)}) "
@@ -1517,7 +1659,8 @@ def _statsforecast_backtest(
         except Exception as exc:
             all_warnings.append(f"{uid}: StatsForecast backtest failed for all candidate models ({exc})")
             continue
-        cv = _add_zero_forecast_to_cv(cv, grp)
+        if _allowlist_allows_model(spec, "ZeroForecast"):
+            cv = _add_zero_forecast_to_cv(cv, grp)
         if spec.weighted_ensemble:
             cv = _add_weighted_ensemble_to_cv(cv)
         metrics = _attach_cv_metadata(
@@ -1672,6 +1815,7 @@ def _baseline_backtest(
     if not rows:
         return _empty_backtest_metrics(), _empty_backtest_predictions()
     cv = pd.concat(rows, ignore_index=True)
+    cv = _filter_prediction_frame_by_allowlist(cv, spec, context="baseline backtest predictions")
     if spec.weighted_ensemble:
         cv = _add_weighted_ensemble_to_cv(cv)
     metrics = _metrics_from_cv(cv, scales_by_series=_error_scale_map(history, season))
@@ -2122,6 +2266,8 @@ def _weighted_ensemble_warnings(spec: ForecastSpec, model_weights: pd.DataFrame)
         return ["weighted ensemble disabled by ForecastSpec.weighted_ensemble=False"]
     if model_weights.empty:
         return ["weighted ensemble skipped because no finite backtest metrics were available"]
+    if spec.model_allowlist:
+        return ["weighted ensemble derived only from allowlisted model candidates; use --no-weighted-ensemble for literal model-only output"]
     # Ensemble-enabled is informational, not a warning — documented in model_weights.csv
     return []
 

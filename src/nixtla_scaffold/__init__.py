@@ -27,6 +27,18 @@ from nixtla_scaffold.forecast import run_forecast
 from nixtla_scaffold.headline import ExecutiveHeadline, build_executive_headline
 from nixtla_scaffold.hierarchy import aggregate_hierarchy_frame, hierarchy_coherence, hierarchy_summary, reconcile_hierarchy_forecast
 from nixtla_scaffold.knowledge import load_agent_skill
+from nixtla_scaffold.ledger import (
+    DEFAULT_LEDGER_PATH,
+    LEDGER_SCHEMA_VERSION,
+    LedgerResult,
+    compare_versions,
+    export_ledger,
+    ingest_actuals,
+    ingest_adjustments,
+    init_ledger,
+    lock_version,
+    register_run,
+)
 from nixtla_scaffold.presets import PRESET_NAMES, forecast_spec_preset, preset_catalog
 from nixtla_scaffold.profile import profile_dataset
 from nixtla_scaffold.release_gates import OPTIONAL_EXTRAS, ReleaseGateResult, format_release_gate_console_summary, run_release_gates
@@ -52,9 +64,11 @@ __all__ = [
     "EXTERNAL_SCORE_SCHEMA_VERSION",
     "FORECAST_COMPARISON_SCHEMA_VERSION",
     "CUSTOM_MODEL_SCHEMA_VERSION",
+    "LEDGER_SCHEMA_VERSION",
     "CustomModelSpec",
     "ExternalForecastScoreResult",
     "ForecastComparisonResult",
+    "LedgerResult",
     "ReleaseGateResult",
     "DriverEvent",
     "KnownFutureRegressor",
@@ -79,6 +93,9 @@ __all__ = [
     "hierarchy_coherence",
     "hierarchy_summary",
     "ingest_query_result",
+    "ingest_actuals",
+    "ingest_adjustments",
+    "init_ledger",
     "label_anomalies",
     "load_agent_skill",
     "load_forecast_dataset",
@@ -88,6 +105,7 @@ __all__ = [
     "profile_dataset",
     "preset_catalog",
     "reconcile_hierarchy_forecast",
+    "register_run",
     "run_forecast",
     "run_release_gates",
     "run_scenario_lab",
@@ -97,5 +115,9 @@ __all__ = [
     "write_external_forecast_scores",
     "write_report_artifacts",
     "write_forecast_comparison",
+    "lock_version",
+    "compare_versions",
+    "export_ledger",
+    "DEFAULT_LEDGER_PATH",
 ]
 
