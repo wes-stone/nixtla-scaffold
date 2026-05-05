@@ -385,7 +385,14 @@ Every forecast run produces these artifacts:
 
 | File | Purpose |
 |------|---------|
-| `model_card.md` | Human-readable summary whose first paragraph is the deterministic executive forecast headline; quote it verbatim rather than strengthening the claim |
+| `OPEN_ME_FIRST.html` | Curated landing page with the executive headline, clean file map, and links to the compact workbook/report; open this first when the run folder feels noisy |
+| `output/forecast_review.xlsx` | Compact review workbook with Start Here, Forecast, Decision Summary, Model Leaderboard, Watchouts, and File Guide sheets; smaller than the full audit workbook |
+| `output/forecast_for_review.csv` | Selected forecast rows only, stripped down for finance review while retaining horizon and interval guardrails |
+| `output/decision_summary.csv` | Condensed trust/readiness, caveats, and next actions by series |
+| `output/appendix/model_leaderboard.csv` | Supporting top-model appendix table behind the workbook leaderboard |
+| `output/appendix/forecast_brief.csv` | Supporting one-page run brief used by `OPEN_ME_FIRST.html` and the compact workbook |
+| `output/appendix/artifact_guide.csv` | Supporting file guide for curated output, appendix, agent, and audit artifacts |
+| `model_card.md` | Readable summary whose first paragraph is the deterministic executive forecast headline; quote it verbatim rather than strengthening the claim |
 | `diagnostics.json` | Machine-readable run context with `executive_headline.paragraph`, trust/horizon distributions, warnings, next steps, unit labels, absolute deltas, YoY deltas when history supports them, and reproducibility metadata |
 | `forecast_long.csv` | Primary model-feed output: one future row per series/model/date with yhat, intervals, weight, selected-model flag, interval status, and row-level horizon validation |
 | `backtest_long.csv` | Primary validation-feed output: one row per cutoff/series/model/date with actuals, forecasts, errors, interval bounds, and coverage flags |
@@ -423,7 +430,7 @@ Every forecast run produces these artifacts:
 | `audit\hierarchy_coherence_pre.csv` | Parent/child coherence gaps before reconciliation |
 | `audit\hierarchy_coherence_post.csv` | Parent/child coherence gaps after reconciliation |
 | `interpretation.json` / `.md` | Backtest windows, seasonality, naive comparison |
-| `diagnostics.md` | Human-readable diagnostics markdown with the same executive headline and next steps |
+| `diagnostics.md` | Readable diagnostics markdown with the same executive headline and next steps |
 | `report.html` | Visual report with decision summary, charts, fixed-axis rolling-origin backtest filmstrip, and a static forecast-ledger preview when `ledger_context.json` exists |
 | `report_base64.txt` | Same report, base64 for embedding |
 | `streamlit_app.py` | Interactive dashboard with cached local artifact loading, polished sidebar **Workbench section** button tabs that keep every section visible while rendering only the active heavy section on rerun. Forecast review owns the styled executive headline card, copy-safe code block, decision/action cards for watchouts and current model next actions, and a forecast operating loop for connecting refreshes end to end, adding drivers/regressors, and tracking forecast performance over time. When `ledger_context.json` exists, a lazy Forecast ledger section opens with one clean line chart: latest actuals/history, official locks emphasized, and recent non-lock forecast versions as lighter lines before collapsing the raw ledger audit tables for deeper review. It also includes champion lens controls for best overall vs best StatsForecast/classical vs best MLForecast, active champion horizon/interval banners, winner-metric guidance, first-glance forecast charts, dedicated Model investigation, fixed-axis CV window player, Prediction intervals, Model audit, Seasonality, Hierarchy, Assumptions & Drivers, Feeder outputs, and pre/post reconciliation review when enabled. Set `NIXTLA_SCAFFOLD_STREAMLIT_PERF=1` before launching to show artifact-load diagnostics in the sidebar. |

@@ -64,6 +64,14 @@ REQUIRED_RUN_OUTPUTS = (
     "report_base64.txt",
     "streamlit_app.py",
     "forecast.xlsx",
+    "OPEN_ME_FIRST.html",
+    "output/index.html",
+    "output/forecast_review.xlsx",
+    "output/forecast_for_review.csv",
+    "output/decision_summary.csv",
+    "output/appendix/model_leaderboard.csv",
+    "output/appendix/forecast_brief.csv",
+    "output/appendix/artifact_guide.csv",
     "best_practice_receipts.csv",
     "audit/model_selection.csv",
     "audit/backtest_metrics.csv",
@@ -741,7 +749,7 @@ def format_release_gate_console_summary(payload: dict[str, Any]) -> str:
 
 
 def format_release_gate_markdown(payload: dict[str, Any]) -> str:
-    """Return a human-readable release-gate summary artifact."""
+    """Return a readable release-gate summary artifact."""
 
     summary = payload["summary"]
     lines = [
