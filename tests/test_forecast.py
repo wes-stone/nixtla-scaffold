@@ -1220,6 +1220,14 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert (output_dir / "report.html").exists()
     assert (output_dir / "report_base64.txt").exists()
     assert (output_dir / "streamlit_app.py").exists()
+    assert (output_dir / "OPEN_ME_FIRST.html").exists()
+    assert (output_dir / "output" / "index.html").exists()
+    assert (output_dir / "output" / "forecast_review.xlsx").exists()
+    assert (output_dir / "output" / "forecast_for_review.csv").exists()
+    assert (output_dir / "output" / "decision_summary.csv").exists()
+    assert (output_dir / "output" / "appendix" / "model_leaderboard.csv").exists()
+    assert (output_dir / "output" / "appendix" / "forecast_brief.csv").exists()
+    assert (output_dir / "output" / "appendix" / "artifact_guide.csv").exists()
     diagnostics = json.loads((output_dir / "diagnostics.json").read_text(encoding="utf-8"))
     assert diagnostics["status"] == "success"
     executive = diagnostics["executive_headline"]
@@ -1249,6 +1257,10 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert manifest["outputs"]["model_win_rates"] == "model_win_rates.csv"
     assert manifest["outputs"]["trust_summary"] == "trust_summary.csv"
     assert manifest["outputs"]["llm_context"] == "llm_context.json"
+    assert manifest["outputs"]["output_open_first"] == "OPEN_ME_FIRST.html"
+    assert manifest["outputs"]["output_workbook"] == "output/forecast_review.xlsx"
+    assert manifest["outputs"]["output_forecast"] == "output/forecast_for_review.csv"
+    assert manifest["outputs"]["output_decision_summary"] == "output/decision_summary.csv"
     assert manifest["outputs"]["seasonality_diagnostics"] == "audit/seasonality_diagnostics.csv"
     assert manifest["outputs"]["seasonality_decomposition"] == "audit/seasonality_decomposition.csv"
     assert manifest["model_policy_resolution"]["model_policy"] == "baseline"
@@ -1257,6 +1269,7 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert policy_families["baseline"]["ran"]
     assert policy_families["statsforecast"]["reason_if_not_ran"] == "not_requested"
     assert "audit/backtest_windows.csv" in "\n".join(diagnostics["next_diagnostic_steps"])
+    assert "OPEN_ME_FIRST.html" in "\n".join(diagnostics["next_diagnostic_steps"])
     assert "model_win_rates.csv" in "\n".join(diagnostics["next_diagnostic_steps"])
     assert "trust_summary.csv" in "\n".join(diagnostics["next_diagnostic_steps"])
     assert "audit/seasonality_diagnostics.csv" in "\n".join(diagnostics["next_diagnostic_steps"])
@@ -1296,6 +1309,8 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert "Model policy resolution" in decoded_report
     assert "Interval glossary" in decoded_report
     assert "llm_context.json" in decoded_report
+    assert "OPEN_ME_FIRST.html" in decoded_report
+    assert "output/forecast_review.xlsx" in decoded_report
     assert "component-model intervals" in decoded_report
     assert "future-only bands" in decoded_report
     assert "adjusted-not-recalibrated bands" in decoded_report
@@ -1303,6 +1318,18 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert "other candidates shown faint/unlabeled" in decoded_report
     assert "selected intervals" in decoded_report
     assert "(selected)" in decoded_report
+    open_first = (output_dir / "OPEN_ME_FIRST.html").read_text(encoding="utf-8")
+    assert "Open this forecast first" in open_first
+    assert "Forecast review workbook" in open_first
+    assert "llm_context.json" in open_first
+    review_forecast = pd.read_csv(output_dir / "output" / "forecast_for_review.csv")
+    assert {"unique_id", "ds", "yhat", "planning_eligible", "interval_status"}.issubset(review_forecast.columns)
+    review_decision = pd.read_csv(output_dir / "output" / "decision_summary.csv")
+    assert {"unique_id", "trust_level", "selected_model", "caveats", "next_actions"}.issubset(review_decision.columns)
+    review_workbook = pd.ExcelFile(output_dir / "output" / "forecast_review.xlsx")
+    assert {"Start Here", "Forecast", "Decision Summary", "Model Leaderboard", "Watchouts", "File Guide"}.issubset(
+        set(review_workbook.sheet_names)
+    )
     forecast = pd.read_csv(output_dir / "forecast.csv")
     assert _adjacent_columns(forecast, ["yhat", "yhat_lo_80", "yhat_hi_80", "yhat_lo_95", "yhat_hi_95"])
     assert {
@@ -1638,16 +1665,41 @@ def test_report_regeneration_handles_missing_executive_headline_for_old_runs(tmp
     )
     run = run_forecast(df, ForecastSpec(horizon=2, model_policy="baseline"))
     output_dir = run.to_directory(tmp_path / "old_run")
+    for path in [
+        output_dir / "OPEN_ME_FIRST.html",
+        output_dir / "output" / "index.html",
+        output_dir / "output" / "forecast_review.xlsx",
+        output_dir / "output" / "forecast_for_review.csv",
+        output_dir / "output" / "decision_summary.csv",
+        output_dir / "output" / "appendix" / "model_leaderboard.csv",
+        output_dir / "output" / "appendix" / "forecast_brief.csv",
+        output_dir / "output" / "appendix" / "artifact_guide.csv",
+    ]:
+        path.unlink()
     diagnostics_path = output_dir / "diagnostics.json"
     diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
     diagnostics.pop("executive_headline")
     diagnostics_path.write_text(json.dumps(diagnostics), encoding="utf-8")
+    manifest_path = output_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for key in list(manifest["outputs"]):
+        if key.startswith("output_"):
+            manifest["outputs"].pop(key)
+    manifest["outputs"]["human_workbook"] = "human/forecast_review.xlsx"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    write_report_artifacts_from_directory(output_dir)
+    refreshed_paths = write_report_artifacts_from_directory(output_dir)
 
     decoded_report = base64.b64decode((output_dir / "report_base64.txt").read_text(encoding="utf-8")).decode("utf-8")
     assert "Executive forecast headline" in decoded_report
     assert "Executive headline unavailable for this run." in decoded_report
+    assert refreshed_paths["output_open_first"] == output_dir / "OPEN_ME_FIRST.html"
+    assert (output_dir / "OPEN_ME_FIRST.html").exists()
+    assert (output_dir / "output" / "forecast_review.xlsx").exists()
+    assert "Executive headline unavailable for this run." in (output_dir / "OPEN_ME_FIRST.html").read_text(encoding="utf-8")
+    refreshed_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert refreshed_manifest["outputs"]["output_workbook"] == "output/forecast_review.xlsx"
+    assert not any(key.startswith("human_") for key in refreshed_manifest["outputs"])
 
 
 def test_seasonality_diagnostics_warn_when_cycles_are_insufficient() -> None:

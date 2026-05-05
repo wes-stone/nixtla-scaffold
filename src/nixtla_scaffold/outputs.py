@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+from html import escape
 from pathlib import Path
 from typing import Any
 
@@ -99,6 +100,7 @@ def write_run(run: ForecastRun, output_dir: str | Path) -> Path:
     (out / "model_card.md").write_text(run.explanation(), encoding="utf-8")
     write_report_artifacts(run, out)
     write_workbook(run, out / "forecast.xlsx")
+    write_review_outputs(run, out, selected_forecast=selected_forecast, forecast_long=forecast_long)
     return out
 
 
@@ -169,6 +171,600 @@ def write_workbook(run: ForecastRun, output_path: str | Path) -> Path:
             writer, sheet_name="Interpretation", index=False
         )
     return path
+
+
+def write_review_outputs(
+    run: ForecastRun,
+    output_dir: str | Path,
+    *,
+    selected_forecast: pd.DataFrame | None = None,
+    forecast_long: pd.DataFrame | None = None,
+) -> dict[str, Path]:
+    """Write the curated output layer beside the full agent artifacts."""
+
+    out = Path(output_dir)
+    review_dir = out / "output"
+    appendix_dir = review_dir / "appendix"
+    appendix_dir.mkdir(parents=True, exist_ok=True)
+
+    selected = selected_forecast.copy() if selected_forecast is not None else build_selected_forecast(run, forecast_long)
+    trust_summary = build_trust_summary(run)
+    model_audit = build_model_audit(run)
+    forecast_review = build_review_forecast(selected)
+    decision_summary = build_review_decision_summary(trust_summary)
+    model_leaderboard = build_review_model_leaderboard(model_audit)
+    forecast_brief = build_review_forecast_brief(run, selected, trust_summary)
+    artifact_guide = build_review_artifact_guide()
+
+    forecast_path = review_dir / "forecast_for_review.csv"
+    decision_path = review_dir / "decision_summary.csv"
+    leaderboard_path = appendix_dir / "model_leaderboard.csv"
+    brief_path = appendix_dir / "forecast_brief.csv"
+    guide_path = appendix_dir / "artifact_guide.csv"
+    workbook_path = review_dir / "forecast_review.xlsx"
+    index_path = review_dir / "index.html"
+    open_first_path = out / "OPEN_ME_FIRST.html"
+
+    forecast_review.to_csv(forecast_path, index=False)
+    decision_summary.to_csv(decision_path, index=False)
+    model_leaderboard.to_csv(leaderboard_path, index=False)
+    forecast_brief.to_csv(brief_path, index=False)
+    artifact_guide.to_csv(guide_path, index=False)
+    write_review_workbook(
+        workbook_path,
+        forecast_brief=forecast_brief,
+        forecast_review=forecast_review,
+        decision_summary=decision_summary,
+        model_leaderboard=model_leaderboard,
+        artifact_guide=artifact_guide,
+    )
+
+    open_first_path.write_text(
+        _review_index_html(
+            title="Open this forecast first",
+            forecast_brief=forecast_brief,
+            decision_summary=decision_summary,
+            root_prefix="",
+            output_prefix="output/",
+        ),
+        encoding="utf-8",
+    )
+    index_path.write_text(
+        _review_index_html(
+            title="Forecast output review",
+            forecast_brief=forecast_brief,
+            decision_summary=decision_summary,
+            root_prefix="../",
+            output_prefix="",
+        ),
+        encoding="utf-8",
+    )
+    return {
+        "output_open_first": open_first_path,
+        "output_index": index_path,
+        "output_workbook": workbook_path,
+        "output_forecast": forecast_path,
+        "output_decision_summary": decision_path,
+        "output_model_leaderboard": leaderboard_path,
+        "output_forecast_brief": brief_path,
+        "output_artifact_guide": guide_path,
+    }
+
+
+def write_review_outputs_from_directory(run_dir: str | Path) -> dict[str, Path]:
+    """Write curated output artifacts from an existing run directory."""
+
+    out = Path(run_dir)
+    review_dir = out / "output"
+    appendix_dir = review_dir / "appendix"
+    appendix_dir.mkdir(parents=True, exist_ok=True)
+
+    selected = _read_review_frame(out / "forecast.csv")
+    trust_summary = _read_review_frame(out / "trust_summary.csv")
+    model_audit = _read_review_frame(out / "model_audit.csv")
+    manifest = _read_review_json(out / "manifest.json")
+    diagnostics = _read_review_json(out / "diagnostics.json")
+
+    forecast_review = build_review_forecast(selected)
+    decision_summary = build_review_decision_summary(trust_summary)
+    model_leaderboard = build_review_model_leaderboard(model_audit)
+    forecast_brief = build_review_forecast_brief_from_directory(manifest, diagnostics, selected, trust_summary)
+    artifact_guide = build_review_artifact_guide()
+
+    forecast_path = review_dir / "forecast_for_review.csv"
+    decision_path = review_dir / "decision_summary.csv"
+    leaderboard_path = appendix_dir / "model_leaderboard.csv"
+    brief_path = appendix_dir / "forecast_brief.csv"
+    guide_path = appendix_dir / "artifact_guide.csv"
+    workbook_path = review_dir / "forecast_review.xlsx"
+    index_path = review_dir / "index.html"
+    open_first_path = out / "OPEN_ME_FIRST.html"
+
+    forecast_review.to_csv(forecast_path, index=False)
+    decision_summary.to_csv(decision_path, index=False)
+    model_leaderboard.to_csv(leaderboard_path, index=False)
+    forecast_brief.to_csv(brief_path, index=False)
+    artifact_guide.to_csv(guide_path, index=False)
+    write_review_workbook(
+        workbook_path,
+        forecast_brief=forecast_brief,
+        forecast_review=forecast_review,
+        decision_summary=decision_summary,
+        model_leaderboard=model_leaderboard,
+        artifact_guide=artifact_guide,
+    )
+    open_first_path.write_text(
+        _review_index_html(
+            title="Open this forecast first",
+            forecast_brief=forecast_brief,
+            decision_summary=decision_summary,
+            root_prefix="",
+            output_prefix="output/",
+        ),
+        encoding="utf-8",
+    )
+    index_path.write_text(
+        _review_index_html(
+            title="Forecast output review",
+            forecast_brief=forecast_brief,
+            decision_summary=decision_summary,
+            root_prefix="../",
+            output_prefix="",
+        ),
+        encoding="utf-8",
+    )
+    paths = {
+        "output_open_first": open_first_path,
+        "output_index": index_path,
+        "output_workbook": workbook_path,
+        "output_forecast": forecast_path,
+        "output_decision_summary": decision_path,
+        "output_model_leaderboard": leaderboard_path,
+        "output_forecast_brief": brief_path,
+        "output_artifact_guide": guide_path,
+    }
+    _update_manifest_review_outputs(out / "manifest.json")
+    return paths
+
+
+def write_review_workbook(
+    output_path: str | Path,
+    *,
+    forecast_brief: pd.DataFrame,
+    forecast_review: pd.DataFrame,
+    decision_summary: pd.DataFrame,
+    model_leaderboard: pd.DataFrame,
+    artifact_guide: pd.DataFrame,
+) -> Path:
+    """Write a compact workbook intended for standard forecast review, not full audit replay."""
+
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    watchouts = decision_summary[
+        [col for col in ["unique_id", "trust_level", "caveats", "next_actions"] if col in decision_summary.columns]
+    ].copy()
+    with pd.ExcelWriter(path, engine="openpyxl") as writer:
+        forecast_brief.to_excel(writer, sheet_name="Start Here", index=False)
+        forecast_review.to_excel(writer, sheet_name="Forecast", index=False)
+        decision_summary.to_excel(writer, sheet_name="Decision Summary", index=False)
+        model_leaderboard.to_excel(writer, sheet_name="Model Leaderboard", index=False)
+        watchouts.to_excel(writer, sheet_name="Watchouts", index=False)
+        artifact_guide.to_excel(writer, sheet_name="File Guide", index=False)
+    return path
+
+
+def build_review_forecast(selected_forecast: pd.DataFrame) -> pd.DataFrame:
+    """Selected forecast columns that a finance reader can scan without model-feed noise."""
+
+    columns = [
+        "unique_id",
+        "ds",
+        "model",
+        "selected_model",
+        "horizon_step",
+        "yhat",
+        "yhat_lo_80",
+        "yhat_hi_80",
+        "yhat_lo_95",
+        "yhat_hi_95",
+        "yhat_scenario",
+        "event_adjustment",
+        "event_names",
+        "planning_eligible",
+        "planning_eligibility_reason",
+        "row_horizon_status",
+        "horizon_trust_state",
+        "validated_through_horizon",
+        "interval_status",
+        "interval_method",
+    ]
+    return _select_existing_columns(selected_forecast, columns)
+
+
+def build_review_decision_summary(trust_summary: pd.DataFrame) -> pd.DataFrame:
+    """Condensed decision table; detailed trust evidence remains in trust_summary.csv."""
+
+    columns = [
+        "unique_id",
+        "trust_level",
+        "trust_score_0_100",
+        "selected_model",
+        "primary_metric",
+        "primary_metric_value",
+        "requested_horizon",
+        "selection_horizon",
+        "validated_through_horizon",
+        "full_horizon_claim_allowed",
+        "horizon_trust_state",
+        "interval_status",
+        "seasonality_status",
+        "hierarchy_status",
+        "event_status",
+        "caveats",
+        "next_actions",
+    ]
+    return _select_existing_columns(trust_summary, columns)
+
+
+def build_review_model_leaderboard(model_audit: pd.DataFrame, *, top_n_per_series: int = 8) -> pd.DataFrame:
+    """Small model leaderboard; the full model audit remains in model_audit.csv."""
+
+    columns = [
+        "unique_id",
+        "model",
+        "family",
+        "rmse",
+        "mae",
+        "wape",
+        "mase",
+        "rmsse",
+        "bias",
+        "weight",
+        "is_selected_model",
+        "selection_horizon",
+        "requested_horizon",
+        "cv_windows",
+    ]
+    leaderboard = _select_existing_columns(model_audit, columns)
+    if leaderboard.empty or "unique_id" not in leaderboard.columns:
+        return leaderboard
+    sort_cols = [col for col in ["unique_id", "is_selected_model", "rmse", "mae", "wape", "model"] if col in leaderboard.columns]
+    ascending = [True, False, True, True, True, True][: len(sort_cols)]
+    leaderboard = leaderboard.sort_values(sort_cols, ascending=ascending)
+    return leaderboard.groupby("unique_id", sort=True, group_keys=False).head(top_n_per_series).reset_index(drop=True)
+
+
+def build_review_forecast_brief(run: ForecastRun, selected_forecast: pd.DataFrame, trust_summary: pd.DataFrame) -> pd.DataFrame:
+    """One-page run brief for the review workbook and open-first HTML."""
+
+    from nixtla_scaffold.headline import build_executive_headline
+
+    headline = build_executive_headline(run)
+    forecast = selected_forecast.copy()
+    if not forecast.empty and "ds" in forecast.columns:
+        forecast["ds"] = pd.to_datetime(forecast["ds"], errors="coerce")
+    trust_counts = (
+        trust_summary["trust_level"].fillna("Unknown").astype(str).value_counts().to_dict()
+        if not trust_summary.empty and "trust_level" in trust_summary.columns
+        else {}
+    )
+    rows = [
+        ("Start here", "Executive headline", headline.paragraph),
+        ("Start here", "Output workbook", "output/forecast_review.xlsx"),
+        ("Start here", "Static report", "report.html"),
+        ("Start here", "Interactive app", "streamlit_app.py"),
+        ("Run context", "Series count", _series_count(selected_forecast)),
+        ("Run context", "Forecast horizon", run.spec.horizon),
+        ("Run context", "Frequency", run.spec.freq or run.profile.freq),
+        ("Run context", "Season length", run.profile.season_length),
+        ("Run context", "Model policy", run.spec.model_policy),
+        ("Run context", "Engine", run.engine),
+        ("Run context", "Forecast start", _date_min(forecast.get("ds"))),
+        ("Run context", "Forecast end", _date_max(forecast.get("ds"))),
+        ("Readiness", "Trust distribution", "; ".join(f"{key}: {value}" for key, value in sorted(trust_counts.items()))),
+        ("Readiness", "Full-horizon claim allowed series", headline.full_horizon_claim_allowed_count),
+        ("Readiness", "Top caveat", headline.top_caveat),
+        ("Readiness", "Next action", headline.next_action),
+        ("Guardrail", "Baseline vs scenario", "Keep statistical yhat, scenario yhat, and plan/target separate."),
+        ("Guardrail", "Planning eligibility", "planning_eligible is a horizon-validation flag only, not global approval."),
+        ("Guardrail", "LLM handoff", "Attach llm_context.json when asking an agent to inspect the full run."),
+    ]
+    if run.warnings:
+        rows.append(("Warnings", "Warning count", len(run.warnings)))
+        rows.extend(("Warnings", f"Warning {idx}", warning) for idx, warning in enumerate(run.warnings[:5], start=1))
+    return pd.DataFrame(rows, columns=["section", "item", "value"])
+
+
+def build_review_forecast_brief_from_directory(
+    manifest: dict[str, Any],
+    diagnostics: dict[str, Any],
+    selected_forecast: pd.DataFrame,
+    trust_summary: pd.DataFrame,
+) -> pd.DataFrame:
+    """Build the review run brief when only persisted run artifacts are available."""
+
+    forecast = selected_forecast.copy()
+    if not forecast.empty and "ds" in forecast.columns:
+        forecast["ds"] = pd.to_datetime(forecast["ds"], errors="coerce")
+    spec = manifest.get("spec", {})
+    profile = manifest.get("profile", {})
+    executive = diagnostics.get("executive_headline", {})
+    trust_counts = (
+        trust_summary["trust_level"].fillna("Unknown").astype(str).value_counts().to_dict()
+        if not trust_summary.empty and "trust_level" in trust_summary.columns
+        else {}
+    )
+    rows = [
+        ("Start here", "Executive headline", executive.get("paragraph") or "Executive headline unavailable for this run."),
+        ("Start here", "Output workbook", "output/forecast_review.xlsx"),
+        ("Start here", "Static report", "report.html"),
+        ("Start here", "Interactive app", "streamlit_app.py"),
+        ("Run context", "Series count", _series_count(selected_forecast) or profile.get("series_count", "")),
+        ("Run context", "Forecast horizon", spec.get("horizon", "")),
+        ("Run context", "Frequency", spec.get("freq") or profile.get("freq", "")),
+        ("Run context", "Season length", profile.get("season_length", "")),
+        ("Run context", "Model policy", spec.get("model_policy", "")),
+        ("Run context", "Engine", manifest.get("engine", "")),
+        ("Run context", "Forecast start", _date_min(forecast.get("ds"))),
+        ("Run context", "Forecast end", _date_max(forecast.get("ds"))),
+        ("Readiness", "Trust distribution", "; ".join(f"{key}: {value}" for key, value in sorted(trust_counts.items()))),
+        ("Readiness", "Full-horizon claim allowed series", executive.get("full_horizon_claim_allowed_count", "")),
+        ("Readiness", "Top caveat", executive.get("top_caveat", "")),
+        ("Readiness", "Next action", executive.get("next_action", "")),
+        ("Guardrail", "Baseline vs scenario", "Keep statistical yhat, scenario yhat, and plan/target separate."),
+        ("Guardrail", "Planning eligibility", "planning_eligible is a horizon-validation flag only, not global approval."),
+        ("Guardrail", "LLM handoff", "Attach llm_context.json when asking an agent to inspect the full run."),
+    ]
+    warnings = manifest.get("warnings", [])
+    if warnings:
+        rows.append(("Warnings", "Warning count", len(warnings)))
+        rows.extend(("Warnings", f"Warning {idx}", warning) for idx, warning in enumerate(warnings[:5], start=1))
+    return pd.DataFrame(rows, columns=["section", "item", "value"])
+
+
+def build_review_artifact_guide() -> pd.DataFrame:
+    """Opinionated file map for curated output, appendix, agent, and audit artifacts."""
+
+    rows = [
+        ("output", 1, "OPEN_ME_FIRST.html", "Start here. Simple file map and forecast headline."),
+        ("output", 2, "output/forecast_review.xlsx", "Compact workbook with the forecast, decision summary, leaderboard, watchouts, and file guide."),
+        ("output", 3, "report.html", "Portable static review with charts, decision evidence, and ledger preview when available."),
+        ("output", 4, "streamlit_app.py", "Interactive local workbench for deeper visual review."),
+        ("output", 5, "output/forecast_for_review.csv", "Selected forecast rows only, stripped down for finance review."),
+        ("output", 6, "output/decision_summary.csv", "Condensed trust/readiness table with caveats and next actions."),
+        ("appendix", 1, "output/appendix/model_leaderboard.csv", "Small top-model view behind the workbook leaderboard."),
+        ("appendix", 2, "output/appendix/forecast_brief.csv", "One-page run brief used by OPEN_ME_FIRST.html and the workbook."),
+        ("appendix", 3, "output/appendix/artifact_guide.csv", "This file map."),
+        ("agent", 1, "llm_context.json", "Full LLM handoff packet with guardrails and all major context."),
+        ("agent", 2, "forecast_long.csv", "All future model/date rows for agents, dashboards, and model feeds."),
+        ("agent", 3, "backtest_long.csv", "All rolling-origin validation rows for programmatic inspection."),
+        ("audit", 1, "audit/all_models.csv", "Every candidate model forecast for transparency."),
+        ("audit", 2, "audit/backtest_metrics.csv", "Raw model CV metrics behind selection."),
+        ("audit", 3, "audit/seasonality_diagnostics.csv", "Cycle-count and seasonality credibility checks."),
+        ("audit", 4, "manifest.json", "Reproducibility, model policy resolution, and complete output index."),
+    ]
+    return pd.DataFrame(rows, columns=["audience", "priority", "artifact", "purpose"])
+
+
+def _select_existing_columns(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    if frame is None or frame.empty:
+        existing = [col for col in columns if frame is not None and col in frame.columns]
+        return pd.DataFrame(columns=existing or columns)
+    return frame[[col for col in columns if col in frame.columns]].copy()
+
+
+def _read_review_frame(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame()
+    return pd.read_csv(path)
+
+
+def _read_review_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _update_manifest_review_outputs(path: Path) -> None:
+    if not path.exists():
+        return
+    manifest = _read_review_json(path)
+    outputs = manifest.setdefault("outputs", {})
+    for key in list(outputs):
+        if key.startswith("human_"):
+            outputs.pop(key)
+    outputs.update(
+        {
+            "output_open_first": "OPEN_ME_FIRST.html",
+            "output_index": "output/index.html",
+            "output_workbook": "output/forecast_review.xlsx",
+            "output_forecast": "output/forecast_for_review.csv",
+            "output_decision_summary": "output/decision_summary.csv",
+            "output_model_leaderboard": "output/appendix/model_leaderboard.csv",
+            "output_forecast_brief": "output/appendix/forecast_brief.csv",
+            "output_artifact_guide": "output/appendix/artifact_guide.csv",
+        }
+    )
+    path.write_text(_json(manifest), encoding="utf-8")
+
+
+def _series_count(frame: pd.DataFrame) -> int:
+    if frame.empty:
+        return 0
+    if "unique_id" in frame.columns:
+        return int(frame["unique_id"].astype(str).nunique())
+    return 1
+
+
+def _date_min(series: pd.Series | None) -> str:
+    if series is None:
+        return ""
+    values = pd.to_datetime(series, errors="coerce").dropna()
+    return values.min().date().isoformat() if not values.empty else ""
+
+
+def _date_max(series: pd.Series | None) -> str:
+    if series is None:
+        return ""
+    values = pd.to_datetime(series, errors="coerce").dropna()
+    return values.max().date().isoformat() if not values.empty else ""
+
+
+def _review_index_html(
+    *,
+    title: str,
+    forecast_brief: pd.DataFrame,
+    decision_summary: pd.DataFrame,
+    root_prefix: str,
+    output_prefix: str,
+) -> str:
+    headline = _brief_value(forecast_brief, "Executive headline")
+    cards = [
+        (
+            f"{output_prefix}forecast_review.xlsx",
+            "Forecast review workbook",
+            "The clean output workbook: start here for the forecast, decision summary, leaderboard, watchouts, and file guide.",
+        ),
+        (
+            f"{root_prefix}report.html",
+            "Static report",
+            "The polished visual review with charts, model evidence, intervals, seasonality, and ledger preview when present.",
+        ),
+        (
+            f"{output_prefix}forecast_for_review.csv",
+            "Forecast for review",
+            "Selected forecast rows only, with scenario columns and horizon/interval guardrails.",
+        ),
+        (
+            f"{output_prefix}decision_summary.csv",
+            "Decision summary",
+            "Condensed trust, caveats, and next actions by series.",
+        ),
+        (
+            f"{root_prefix}streamlit_app.py",
+            "Interactive app",
+            "Run locally with `uv run streamlit run streamlit_app.py` when you need interactive drilldown.",
+        ),
+        (
+            f"{root_prefix}llm_context.json",
+            "LLM context",
+            "Attach this to an agent when you want the full machine-readable run context.",
+        ),
+        (
+            f"{output_prefix}appendix/artifact_guide.csv",
+            "Appendix file guide",
+            "Supporting output map for appendix, agent, and audit artifacts.",
+        ),
+    ]
+    card_html = "\n".join(_review_link_card(*card) for card in cards)
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{escape(title)}</title>
+  <style>
+    :root {{
+      color-scheme: light;
+      font-family: Inter, Segoe UI, Arial, sans-serif;
+      background: #f6f8fb;
+      color: #172033;
+    }}
+    body {{ margin: 0; padding: 28px; }}
+    main {{ max-width: 1120px; margin: 0 auto; }}
+    .hero, .panel, .card {{
+      background: #fff;
+      border: 1px solid #dde5f0;
+      border-radius: 18px;
+      box-shadow: 0 12px 30px rgba(23, 32, 51, 0.06);
+    }}
+    .hero {{ padding: 28px; margin-bottom: 18px; }}
+    h1 {{ margin: 0 0 10px; font-size: 32px; }}
+    h2 {{ margin: 0 0 12px; font-size: 20px; }}
+    p {{ line-height: 1.55; }}
+    .headline {{
+      margin-top: 16px;
+      padding: 16px;
+      border-left: 4px solid #3867d6;
+      background: #f3f6ff;
+      border-radius: 12px;
+      font-size: 16px;
+    }}
+    .grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 14px;
+      margin: 18px 0;
+    }}
+    .card {{ display: block; padding: 18px; color: inherit; text-decoration: none; }}
+    .card:hover {{ border-color: #3867d6; transform: translateY(-1px); }}
+    .card strong {{ display: block; font-size: 17px; margin-bottom: 8px; }}
+    .card span {{ color: #53627a; }}
+    .panel {{ padding: 22px; margin-top: 18px; overflow-x: auto; }}
+    table {{ border-collapse: collapse; width: 100%; font-size: 13px; }}
+    th, td {{ border-bottom: 1px solid #e8edf5; padding: 9px 10px; text-align: left; vertical-align: top; }}
+    th {{ color: #53627a; font-weight: 700; }}
+    .note {{ color: #53627a; }}
+    code {{ background: #edf2f7; border-radius: 6px; padding: 2px 5px; }}
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <h1>{escape(title)}</h1>
+      <p class="note">This folder keeps a small curated output layer on top of the full audit trail. Use these files for review; the larger CSV/JSON outputs remain for agents, dashboards, and reproducibility.</p>
+      <div class="headline">{escape(headline)}</div>
+    </section>
+    <section class="grid">
+      {card_html}
+    </section>
+    <section class="panel">
+      <h2>Run brief</h2>
+      {_html_table(forecast_brief, ["section", "item", "value"], limit=18)}
+    </section>
+    <section class="panel">
+      <h2>Decision summary preview</h2>
+      {_html_table(decision_summary, ["unique_id", "trust_level", "trust_score_0_100", "selected_model", "horizon_trust_state", "interval_status", "caveats", "next_actions"], limit=10)}
+    </section>
+  </main>
+</body>
+</html>
+"""
+
+
+def _review_link_card(href: str, title: str, description: str) -> str:
+    return f'<a class="card" href="{escape(href)}"><strong>{escape(title)}</strong><span>{escape(description)}</span></a>'
+
+
+def _brief_value(brief: pd.DataFrame, item: str) -> str:
+    if brief.empty or not {"item", "value"}.issubset(brief.columns):
+        return ""
+    matches = brief.loc[brief["item"].astype(str) == item, "value"]
+    return str(matches.iloc[0]) if not matches.empty else ""
+
+
+def _html_table(frame: pd.DataFrame, columns: list[str], *, limit: int) -> str:
+    available = [col for col in columns if col in frame.columns]
+    if frame.empty or not available:
+        return '<p class="note">No rows available.</p>'
+    rows = []
+    for record in frame[available].head(limit).to_dict("records"):
+        cells = "".join(f"<td>{escape(_review_value(record.get(col)))}</td>" for col in available)
+        rows.append(f"<tr>{cells}</tr>")
+    header = "".join(f"<th>{escape(col)}</th>" for col in available)
+    return f"<table><thead><tr>{header}</tr></thead><tbody>{''.join(rows)}</tbody></table>"
+
+
+def _review_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float) and math.isnan(value):
+        return ""
+    if pd.isna(value):
+        return ""
+    if isinstance(value, pd.Timestamp):
+        return value.date().isoformat()
+    return str(value)
 
 
 def _json(data: dict[str, Any]) -> str:

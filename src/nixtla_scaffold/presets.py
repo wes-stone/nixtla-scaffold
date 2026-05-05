@@ -46,7 +46,7 @@ def forecast_spec_preset(name: ForecastPresetName | str, **overrides: Any) -> Fo
 
 
 def preset_catalog() -> list[dict[str, Any]]:
-    """Return human/agent-readable metadata for available forecast presets."""
+    """Return analyst/agent-readable metadata for available forecast presets."""
 
     rows: list[dict[str, Any]] = []
     for name in PRESET_NAMES:

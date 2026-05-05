@@ -101,7 +101,7 @@ def build_run_diagnostics(run: Any) -> dict[str, Any]:
         "outputs": manifest["outputs"],
         "next_diagnostic_steps": [
             "Quote diagnostics.json executive_headline.paragraph verbatim when summarizing this run; do not rewrite it into a stronger claim.",
-            "Open model_card.md first for the human-readable forecast narrative.",
+            "Open OPEN_ME_FIRST.html or output/forecast_review.xlsx first for the curated forecast review.",
             "Open llm_context.json when asking an LLM to walk through the run; it bundles headline, trust, horizon, interval, residual, seasonality, hierarchy, driver, and artifact-index context.",
             "Open diagnostics.json for machine-readable run context and warnings.",
             "Open trust_summary.csv first for per-series High/Medium/Low readiness, caveats, and next actions.",
@@ -121,7 +121,7 @@ def build_run_diagnostics(run: Any) -> dict[str, Any]:
             "Open audit/seasonality_diagnostics.csv and audit/seasonality_decomposition.csv to check cycle counts, credibility labels, trend/seasonal/remainder evidence, and warnings.",
             "If hierarchy metadata exists, open hierarchy_contribution.csv to see which child nodes drive each parent and how each child is allocated to parent-child incoherence.",
             "If hierarchy reconciliation is enabled, open hierarchy_reconciliation.csv plus audit/hierarchy_backtest_comparison.csv, audit/hierarchy_coherence_pre.csv, and audit/hierarchy_coherence_post.csv to compare planning coherence and node-level accuracy before and after reconciliation.",
-            "Open interpretation.md for a human-readable backtesting and seasonality summary.",
+            "Open interpretation.md for a readable backtesting and seasonality summary.",
             "Check audit/model_weights.csv when WeightedEnsemble is selected or present.",
             "Open report.html for the portable fixed-axis filmstrip report, or decode report_base64.txt for text-only handoff.",
             "Run streamlit run streamlit_app.py inside the output folder for the interactive CV window player.",

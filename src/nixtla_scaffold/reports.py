@@ -122,10 +122,14 @@ def write_report_artifacts_from_directory(run_dir: str | Path) -> dict[str, Path
     report_path.write_text(report_html, encoding="utf-8")
     report_base64_path.write_text(base64.b64encode(report_html.encode("utf-8")).decode("ascii") + "\n", encoding="utf-8")
     streamlit_path.write_text(build_streamlit_app(), encoding="utf-8")
+    from nixtla_scaffold.outputs import write_review_outputs_from_directory
+
+    output_paths = write_review_outputs_from_directory(out)
     return {
         "html_report": report_path,
         "html_report_base64": report_base64_path,
         "streamlit_app": streamlit_path,
+        **output_paths,
     }
 
 
@@ -329,8 +333,13 @@ def build_html_report(payload: dict[str, Any]) -> str:
         {_table(residual_tests, ["unique_id", "model", "overall_status", "bias_status", "white_noise_status", "white_noise_residual_scope", "outlier_status", "structural_break_status", "observations", "interpretation"], limit=24)}
       </article>
       <article class="panel">
-        <h2>Core feeder outputs</h2>
+        <h2>Curated output and feeder files</h2>
         <div class="output-list">
+          {_output_item("OPEN_ME_FIRST.html", "Landing page with the headline, file map, and links to the clean workbook/report.")}
+          {_output_item("output/forecast_review.xlsx", "Small review workbook: start-here brief, selected forecast, decision summary, leaderboard, watchouts, and file guide.")}
+          {_output_item("output/forecast_for_review.csv", "Selected forecast rows only, stripped down for finance review.")}
+          {_output_item("output/decision_summary.csv", "Condensed trust/readiness, caveats, and next actions by series.")}
+          {_output_item("output/appendix/artifact_guide.csv", "Appendix file map for curated output, agent feeds, and audit files.")}
           {_output_item("forecast_long.csv", "One row per future series/model/date with yhat, intervals, weight, and selected-model flag.")}
           {_output_item("backtest_long.csv", "One row per backtest cutoff/series/model/date with actuals, errors, interval bounds, and coverage flags.")}
           {_output_item("series_summary.csv", "One row per series with selected model, RMSE/MAE/MASE/RMSSE/WAPE, seasonality, and top alternatives.")}

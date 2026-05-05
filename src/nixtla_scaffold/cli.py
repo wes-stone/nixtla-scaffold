@@ -298,7 +298,7 @@ def main(argv: list[str] | None = None) -> int:
     ledger_register.add_argument("--ledger", default=str(DEFAULT_LEDGER_PATH))
     ledger_register.add_argument("--run", required=True, help="Run directory produced by forecast")
     ledger_register.add_argument("--forecast-key", required=True, help="Business forecast key, e.g. Actions ARR")
-    ledger_register.add_argument("--version-label", default="", help="Human label such as March refresh")
+    ledger_register.add_argument("--version-label", default="", help="Friendly label such as March refresh")
     ledger_register.add_argument("--created-by", default="")
     ledger_register.add_argument("--notes", default="")
     ledger_register.add_argument("--source-metadata", default=None, help="Optional *.source.json from ingest/query refresh")
