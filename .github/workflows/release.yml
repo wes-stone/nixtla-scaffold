@@ -86,7 +86,8 @@ jobs:
       - name: Ensure release tag is new
         run: |
           git fetch --tags --force
-          if (git rev-parse -q --verify "refs/tags/$env:RELEASE_TAG") {
+          $existingTag = git tag --list $env:RELEASE_TAG
+          if ($existingTag) {
             throw "Release tag $env:RELEASE_TAG already exists. Bump [project].version in pyproject.toml before merging to main."
           }
 
