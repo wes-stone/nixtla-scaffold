@@ -8,6 +8,7 @@ import warnings
 import numpy as np
 import pandas as pd
 
+from nixtla_scaffold.drivers import DriverFeatureBundle, prepare_mlforecast_regressor_features
 from nixtla_scaffold.model_families import model_family
 from nixtla_scaffold.schema import DataProfile, ForecastSpec
 
@@ -23,6 +24,8 @@ class ModelResult:
     engine: str
     model_weights: pd.DataFrame
     model_explainability: pd.DataFrame = field(default_factory=pd.DataFrame)
+    driver_model_features: pd.DataFrame = field(default_factory=pd.DataFrame)
+    driver_model_cv_delta: pd.DataFrame = field(default_factory=pd.DataFrame)
     custom_model_contracts: pd.DataFrame = field(default_factory=pd.DataFrame)
     custom_model_invocations: pd.DataFrame = field(default_factory=pd.DataFrame)
     warnings: tuple[str, ...] = ()
@@ -168,6 +171,8 @@ def _append_warnings(result: ModelResult, *messages: str) -> ModelResult:
         engine=result.engine,
         model_weights=result.model_weights,
         model_explainability=result.model_explainability,
+        driver_model_features=result.driver_model_features,
+        driver_model_cv_delta=result.driver_model_cv_delta,
         custom_model_contracts=result.custom_model_contracts,
         custom_model_invocations=result.custom_model_invocations,
         warnings=result.warnings + tuple(message for message in messages if message),
@@ -220,6 +225,8 @@ def _merge_model_results(
     combined_warnings = list(primary.warnings) + list(secondary.warnings) + weight_warnings
     combined_warnings.extend(_weighted_ensemble_warnings(spec, model_weights))
     explainability = pd.concat([primary.model_explainability, secondary.model_explainability], ignore_index=True)
+    driver_model_features = _concat_optional_frames(primary.driver_model_features, secondary.driver_model_features)
+    driver_model_cv_delta = _concat_optional_frames(primary.driver_model_cv_delta, secondary.driver_model_cv_delta)
     custom_contracts = _concat_optional_frames(primary.custom_model_contracts, secondary.custom_model_contracts)
     custom_invocations = _concat_optional_frames(primary.custom_model_invocations, secondary.custom_model_invocations)
     return ModelResult(
@@ -229,6 +236,8 @@ def _merge_model_results(
         engine=f"{primary.engine}+{secondary.engine}",
         model_weights=model_weights,
         model_explainability=explainability,
+        driver_model_features=driver_model_features,
+        driver_model_cv_delta=driver_model_cv_delta,
         custom_model_contracts=custom_contracts,
         custom_model_invocations=custom_invocations,
         warnings=tuple(dict.fromkeys(combined_warnings)),
@@ -384,6 +393,8 @@ def rebuild_result_metrics_on_output_scale(
         engine=result.engine,
         model_weights=model_weights,
         model_explainability=result.model_explainability,
+        driver_model_features=result.driver_model_features,
+        driver_model_cv_delta=result.driver_model_cv_delta,
         custom_model_contracts=result.custom_model_contracts,
         custom_model_invocations=result.custom_model_invocations,
         warnings=tuple(dict.fromkeys(combined_warnings)),
@@ -427,6 +438,8 @@ def _with_policy_resolution(
         engine=result.engine,
         model_weights=result.model_weights,
         model_explainability=result.model_explainability,
+        driver_model_features=result.driver_model_features,
+        driver_model_cv_delta=result.driver_model_cv_delta,
         custom_model_contracts=result.custom_model_contracts,
         custom_model_invocations=result.custom_model_invocations,
         warnings=result.warnings,
@@ -843,7 +856,7 @@ def forecast_with_mlforecast(
     profile: DataProfile,
     spec: ForecastSpec,
 ) -> ModelResult:
-    """MLForecast engine using sklearn/LightGBM regressors with lag/date features."""
+    """MLForecast engine using sklearn/LightGBM regressors with audited feature policies."""
 
     season = profile.season_length
     min_obs = profile.min_obs_per_series
@@ -886,6 +899,21 @@ def forecast_with_mlforecast(
         raise ImportError("MLForecast requires at least one installed sklearn or LightGBM regressor")
 
     date_features = ["month", "dayofweek"] if profile.freq.upper().startswith("D") or profile.freq.upper().startswith("B") else ["month"]
+    lag_transforms, lag_transform_warnings = _mlforecast_lag_transforms(
+        spec,
+        lags=lags,
+        season_length=season,
+        min_obs=min_obs,
+    )
+    feature_bundle = prepare_mlforecast_regressor_features(
+        history,
+        spec,
+        freq=profile.freq,
+        horizon=spec.horizon,
+        season_length=season,
+        min_training_rows=MLFORECAST_MIN_OBS,
+        forecast_origin=profile.end,
+    )
 
     run_warnings: list[str] = []
     allowlist_warning = _model_allowlist_warning(spec)
@@ -896,6 +924,13 @@ def forecast_with_mlforecast(
         f"{len(model_factories)} models ({', '.join(alias for alias, _ in model_factories)}) "
         f"with lags={lags}, date_features={date_features}"
     )
+    run_warnings.extend(lag_transform_warnings)
+    if feature_bundle.feature_columns:
+        run_warnings.append(
+            "MLForecast external regressors enabled: "
+            f"{', '.join(feature_bundle.feature_columns)}"
+        )
+    run_warnings.extend(feature_bundle.warnings)
     if interval_plan is not None:
         run_warnings.append(
             "MLForecast conformal intervals enabled: "
@@ -932,6 +967,8 @@ def forecast_with_mlforecast(
         horizon=spec.horizon,
         levels=spec.levels,
         prediction_intervals_factory=interval_factory,
+        lag_transforms=lag_transforms,
+        exogenous_features=feature_bundle,
     )
     run_warnings.extend(fit_warnings)
 
@@ -942,6 +979,7 @@ def forecast_with_mlforecast(
     # Cross-validation for backtest metrics
     metrics = _empty_backtest_metrics()
     backtest_predictions = _empty_backtest_predictions()
+    cv_used_exogenous_features = False
     cv_interval_factory: Callable[[], Any] | None = None
     cv_interval_windows = 0
     if spec.levels and n_windows >= 1 and h >= 1:
@@ -966,7 +1004,7 @@ def forecast_with_mlforecast(
             )
     if n_windows >= 1 and h >= 1:
         try:
-            cv, cv_warnings = _mlforecast_cross_validation_resilient(
+            cv, cv_warnings, cv_used_exogenous_features = _mlforecast_cross_validation_resilient(
                 model_factories,
                 history=history,
                 freq=profile.freq,
@@ -977,6 +1015,8 @@ def forecast_with_mlforecast(
                 n_windows=n_windows,
                 levels=spec.levels,
                 prediction_intervals_factory=cv_interval_factory,
+                lag_transforms=lag_transforms,
+                exogenous_features=feature_bundle,
             )
             cv = cv.reset_index() if "unique_id" not in cv.columns else cv.copy()
             cv["ds"] = pd.to_datetime(cv["ds"])
@@ -1001,8 +1041,46 @@ def forecast_with_mlforecast(
         engine="mlforecast",
         model_weights=_empty_model_weights(),
         model_explainability=model_explainability,
+        driver_model_features=feature_bundle.audit,
+        driver_model_cv_delta=_driver_model_cv_delta(
+            metrics,
+            feature_bundle,
+            cv_used_exogenous_features=cv_used_exogenous_features,
+        ),
         warnings=tuple(run_warnings),
     )
+
+
+def _mlforecast_lag_transforms(
+    spec: ForecastSpec,
+    *,
+    lags: list[int],
+    season_length: int,
+    min_obs: int,
+) -> tuple[dict[int, list[Any]] | None, list[str]]:
+    if spec.mlforecast_feature_policy == "basic":
+        return None, []
+    if spec.mlforecast_feature_policy != "rolling":
+        return None, [f"unknown MLForecast feature policy {spec.mlforecast_feature_policy!r}; using basic features"]
+    try:
+        from mlforecast.lag_transforms import RollingMean
+    except ImportError as exc:
+        return None, [f"MLForecast rolling feature policy skipped because lag transforms are unavailable ({exc})"]
+
+    transforms: dict[int, list[Any]] = {}
+    warnings_out = ["MLForecast feature policy 'rolling' enabled with a small audited rolling-transform set"]
+    if 1 in lags and min_obs >= 8:
+        window = max(2, min(4, min_obs // 6))
+        transforms[1] = [RollingMean(window_size=window, min_samples=1)]
+    else:
+        warnings_out.append("MLForecast rolling feature policy skipped lag1 rolling mean because history is too short")
+    if season_length > 1 and season_length in lags and min_obs >= season_length * 2:
+        transforms.setdefault(season_length, []).append(RollingMean(window_size=2, min_samples=1))
+    elif season_length > 1:
+        warnings_out.append("MLForecast rolling feature policy skipped seasonal rolling mean because seasonal history is insufficient")
+    if not transforms:
+        return None, warnings_out
+    return transforms, warnings_out
 
 
 def _mlforecast_model_factories(*, min_obs: int) -> list[tuple[str, Callable[[], Any]]]:
@@ -1205,19 +1283,30 @@ def _mlforecast_fit_predict_resilient(
     horizon: int,
     levels: tuple[int, ...],
     prediction_intervals_factory: Callable[[], Any] | None,
+    lag_transforms: dict[int, list[Any]] | None,
+    exogenous_features: DriverFeatureBundle,
 ) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
     from mlforecast import MLForecast
 
     warnings_out: list[str] = []
-    df = history[["unique_id", "ds", "y"]]
+    df = _mlforecast_training_frame(history, exogenous_features)
     predict_kwargs: dict[str, Any] = {}
     if prediction_intervals_factory is not None:
         predict_kwargs["level"] = list(levels)
+    if exogenous_features.feature_columns:
+        predict_kwargs["X_df"] = exogenous_features.future
 
     def fit_kwargs() -> dict[str, Any]:
-        if prediction_intervals_factory is None:
-            return {}
-        return {"prediction_intervals": prediction_intervals_factory()}
+        kwargs: dict[str, Any] = {}
+        if prediction_intervals_factory is not None:
+            kwargs["prediction_intervals"] = prediction_intervals_factory()
+        if exogenous_features.feature_columns:
+            kwargs["static_features"] = []
+        return kwargs
+
+    constructor_kwargs: dict[str, Any] = {}
+    if lag_transforms:
+        constructor_kwargs["lag_transforms"] = lag_transforms
 
     try:
         with warnings.catch_warnings(record=True) as caught:
@@ -1228,6 +1317,7 @@ def _mlforecast_fit_predict_resilient(
                 lags=lags,
                 date_features=date_features,
                 num_threads=1,
+                **constructor_kwargs,
             )
             ml.fit(df, **fit_kwargs())
             explainability = _mlforecast_feature_importance(ml)
@@ -1249,6 +1339,7 @@ def _mlforecast_fit_predict_resilient(
                     lags=lags,
                     date_features=date_features,
                     num_threads=1,
+                    **constructor_kwargs,
                 )
                 ml.fit(df, **fit_kwargs())
                 explainability_frames.append(_mlforecast_feature_importance(ml))
@@ -1268,10 +1359,13 @@ def _mlforecast_fit_predict_resilient(
                         lags=lags,
                         date_features=date_features,
                         num_threads=1,
+                        **constructor_kwargs,
                     )
-                    ml.fit(df)
+                    fallback_fit_kwargs = {"static_features": []} if exogenous_features.feature_columns else {}
+                    ml.fit(df, **fallback_fit_kwargs)
                     explainability_frames.append(_mlforecast_feature_importance(ml))
-                    forecast = ml.predict(h=horizon)
+                    fallback_predict_kwargs = {"X_df": exogenous_features.future} if exogenous_features.feature_columns else {}
+                    forecast = ml.predict(h=horizon, **fallback_predict_kwargs)
                 frames.append(_normalize_statsforecast_output(forecast))
                 warnings_out.extend(_format_caught_warnings(caught, prefix="MLForecast warning"))
                 warnings_out.append(
@@ -1301,16 +1395,33 @@ def _mlforecast_cross_validation_resilient(
     n_windows: int,
     levels: tuple[int, ...],
     prediction_intervals_factory: Callable[[], Any] | None,
-) -> tuple[pd.DataFrame, list[str]]:
+    lag_transforms: dict[int, list[Any]] | None,
+    exogenous_features: DriverFeatureBundle,
+) -> tuple[pd.DataFrame, list[str], bool]:
     from mlforecast import MLForecast
 
     warnings_out: list[str] = []
-    df = history[["unique_id", "ds", "y"]]
+    df = _mlforecast_training_frame(history, exogenous_features)
+    uses_exogenous_features = bool(exogenous_features.feature_columns) and set(exogenous_features.feature_columns).issubset(df.columns)
 
     def cv_kwargs() -> dict[str, Any]:
+        kwargs: dict[str, Any] = {}
         if prediction_intervals_factory is None:
-            return {}
-        return {"prediction_intervals": prediction_intervals_factory(), "level": list(levels)}
+            if exogenous_features.feature_columns:
+                kwargs["static_features"] = []
+            return kwargs
+        kwargs["prediction_intervals"] = prediction_intervals_factory()
+        kwargs["level"] = list(levels)
+        if exogenous_features.feature_columns:
+            kwargs["static_features"] = []
+        return kwargs
+
+    def point_cv_kwargs() -> dict[str, Any]:
+        return {"static_features": []} if exogenous_features.feature_columns else {}
+
+    constructor_kwargs: dict[str, Any] = {}
+    if lag_transforms:
+        constructor_kwargs["lag_transforms"] = lag_transforms
 
     try:
         with warnings.catch_warnings(record=True) as caught:
@@ -1321,6 +1432,7 @@ def _mlforecast_cross_validation_resilient(
                 lags=lags,
                 date_features=date_features,
                 num_threads=1,
+                **constructor_kwargs,
             ).cross_validation(
                 df=df,
                 h=horizon,
@@ -1329,7 +1441,7 @@ def _mlforecast_cross_validation_resilient(
                 **cv_kwargs(),
             )
         warnings_out.extend(_format_caught_warnings(caught, prefix="MLForecast warning"))
-        return _normalize_statsforecast_output(cv), warnings_out
+        return _normalize_statsforecast_output(cv), warnings_out, uses_exogenous_features
     except Exception as exc:
         warnings_out.append(f"MLForecast full-ladder cross-validation failed; retrying candidate-by-candidate ({exc})")
 
@@ -1344,6 +1456,7 @@ def _mlforecast_cross_validation_resilient(
                     lags=lags,
                     date_features=date_features,
                     num_threads=1,
+                    **constructor_kwargs,
                 ).cross_validation(
                     df=df,
                     h=horizon,
@@ -1366,11 +1479,13 @@ def _mlforecast_cross_validation_resilient(
                         lags=lags,
                         date_features=date_features,
                         num_threads=1,
+                        **constructor_kwargs,
                     ).cross_validation(
                         df=df,
                         h=horizon,
                         step_size=step_size,
                         n_windows=n_windows,
+                        **point_cv_kwargs(),
                     )
                 frames.append(_normalize_statsforecast_output(cv))
                 warnings_out.extend(_format_caught_warnings(caught, prefix="MLForecast warning"))
@@ -1381,7 +1496,48 @@ def _mlforecast_cross_validation_resilient(
                 warnings_out.append(f"MLForecast candidate {alias} cross-validation failed and was skipped ({point_exc})")
     if not frames:
         raise RuntimeError("no MLForecast candidate model able to be backtested")
-    return _merge_statsforecast_frames(frames, keys=["unique_id", "ds", "cutoff"]), sorted(set(warnings_out))
+    return _merge_statsforecast_frames(frames, keys=["unique_id", "ds", "cutoff"]), sorted(set(warnings_out)), uses_exogenous_features
+
+
+def _mlforecast_training_frame(history: pd.DataFrame, exogenous_features: DriverFeatureBundle) -> pd.DataFrame:
+    df = history[["unique_id", "ds", "y"]].copy()
+    if not exogenous_features.feature_columns:
+        return df
+    feature_cols = ["unique_id", "ds", *exogenous_features.feature_columns]
+    return df.merge(exogenous_features.historical[feature_cols], on=["unique_id", "ds"], how="left")
+
+
+def _driver_model_cv_delta(
+    metrics: pd.DataFrame,
+    feature_bundle: DriverFeatureBundle,
+    *,
+    cv_used_exogenous_features: bool,
+) -> pd.DataFrame:
+    columns = [
+        "unique_id",
+        "model",
+        "feature_columns",
+        "driver_rmse",
+        "driver_mae",
+        "driver_wape",
+        "comparison_status",
+    ]
+    if not feature_bundle.feature_columns or metrics.empty or not cv_used_exogenous_features:
+        return pd.DataFrame(columns=columns)
+    rows = []
+    for row in metrics.to_dict("records"):
+        rows.append(
+            {
+                "unique_id": row.get("unique_id"),
+                "model": row.get("model"),
+                "feature_columns": "; ".join(feature_bundle.feature_columns),
+                "driver_rmse": row.get("rmse"),
+                "driver_mae": row.get("mae"),
+                "driver_wape": row.get("wape"),
+                "comparison_status": "driver_features_scored_in_mlforecast_cv",
+            }
+        )
+    return pd.DataFrame(rows, columns=columns)
 
 
 def select_champions(
@@ -2247,6 +2403,10 @@ def _estimator_importances(estimator: Any) -> tuple[np.ndarray | None, str]:
 
 
 def _feature_interpretation(feature: str) -> str:
+    if "rolling_mean" in feature:
+        return "rolling mean target-history feature"
+    if "_lag_" in feature:
+        return "historical-only external regressor lag feature"
     if feature.startswith("lag"):
         lag = feature.removeprefix("lag")
         return f"lagged target value {lag} period(s) back"

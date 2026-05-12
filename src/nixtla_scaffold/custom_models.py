@@ -194,6 +194,8 @@ def _merge_custom_challenger(base_result: ModelResult, custom_result: ModelResul
     )
     backtest_metrics = _concat_frames(base_result.backtest_metrics, custom_result.backtest_metrics)
     explainability = _concat_frames(base_result.model_explainability, custom_result.model_explainability)
+    driver_model_features = _concat_frames(base_result.driver_model_features, custom_result.driver_model_features)
+    driver_model_cv_delta = _concat_frames(base_result.driver_model_cv_delta, custom_result.driver_model_cv_delta)
     contracts = _concat_frames(base_result.custom_model_contracts, custom_result.custom_model_contracts)
     invocations = _concat_frames(base_result.custom_model_invocations, custom_result.custom_model_invocations)
     warnings = tuple(dict.fromkeys(list(base_result.warnings) + list(custom_result.warnings)))
@@ -204,6 +206,8 @@ def _merge_custom_challenger(base_result: ModelResult, custom_result: ModelResul
         engine=f"{base_result.engine}+custom",
         model_weights=base_result.model_weights,
         model_explainability=explainability,
+        driver_model_features=driver_model_features,
+        driver_model_cv_delta=driver_model_cv_delta,
         custom_model_contracts=contracts,
         custom_model_invocations=invocations,
         warnings=warnings,

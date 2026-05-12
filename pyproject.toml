@@ -37,7 +37,7 @@ dependencies = [
     "pyyaml>=6.0",
     "statsforecast>=1.7",
     "streamlit>=1.56.0",
-    "utilsforecast>=0.2",
+    "utilsforecast>=0.2.16",
 ]
 
 [project.optional-dependencies]

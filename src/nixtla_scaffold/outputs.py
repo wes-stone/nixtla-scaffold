@@ -4,8 +4,9 @@ import json
 import math
 from html import escape
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
+import numpy as np
 import pandas as pd
 
 from nixtla_scaffold.best_practices import best_practice_receipts_frame
@@ -30,27 +31,101 @@ from nixtla_scaffold.reports import write_report_artifacts
 from nixtla_scaffold.schema import ForecastRun
 
 
+APPENDIX_DIR = "appendix"
+PARETO_REVIEW_METRICS = ("rmse", "mae", "wape", "mase", "rmsse", "abs_bias")
+MODEL_TRADEOFF_SCORE_COLUMNS = [
+    "unique_id",
+    "model",
+    "family",
+    "selected_model",
+    "is_selected_model",
+    "selection_reason",
+    "rmse",
+    "mae",
+    "wape",
+    "mase",
+    "rmsse",
+    "bias",
+    "abs_bias",
+    "observations",
+    "requested_horizon",
+    "selection_horizon",
+    "cv_windows",
+    "cv_step_size",
+    "cv_horizon_matches_requested",
+]
+MODEL_PARETO_FRONTIER_COLUMNS = [
+    "unique_id",
+    "model",
+    "family",
+    "is_pareto_optimal",
+    "pareto_status",
+    "selection_alignment",
+    "selected_model",
+    "is_selected_model",
+    "selection_reason",
+    "dominance_scope",
+    "metrics_considered",
+    "excluded_metrics",
+    "excluded_reason",
+    "candidate_count",
+    "pareto_candidate_count",
+    "rmse",
+    "mae",
+    "wape",
+    "mase",
+    "rmsse",
+    "bias",
+    "abs_bias",
+    "observations",
+    "requested_horizon",
+    "selection_horizon",
+    "cv_windows",
+    "cv_step_size",
+    "cv_horizon_matches_requested",
+]
+FEATURE_SELECTION_RECEIPT_COLUMNS = [
+    "feature",
+    "feature_role",
+    "source",
+    "models_reporting_importance",
+    "importance_type",
+    "max_importance",
+    "mean_importance",
+    "availability_status",
+    "leakage_status",
+    "cv_evidence_status",
+    "final_decision",
+    "notes",
+]
+
+
 def write_run(run: ForecastRun, output_dir: str | Path) -> Path:
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
+    appendix = out / APPENDIX_DIR
+    appendix.mkdir(parents=True, exist_ok=True)
     audit = out / "audit"
     audit.mkdir(parents=True, exist_ok=True)
     forecast_long = build_forecast_long(run)
     selected_forecast = build_selected_forecast(run, forecast_long)
 
-    run.history.to_csv(out / "history.csv", index=False)
+    run.history.to_csv(appendix / "history.csv", index=False)
     selected_forecast.to_csv(out / "forecast.csv", index=False)
-    forecast_long.to_csv(out / "forecast_long.csv", index=False)
-    build_backtest_long(run).to_csv(out / "backtest_long.csv", index=False)
-    build_series_summary(run).to_csv(out / "series_summary.csv", index=False)
-    build_model_audit(run).to_csv(out / "model_audit.csv", index=False)
-    build_model_win_rates(run).to_csv(out / "model_win_rates.csv", index=False)
-    build_model_window_metrics(run).to_csv(out / "model_window_metrics.csv", index=False)
-    build_residual_diagnostics(run).to_csv(out / "residual_diagnostics.csv", index=False)
-    build_residual_test_summary(run).to_csv(out / "residual_tests.csv", index=False)
-    build_interval_diagnostics(run).to_csv(out / "interval_diagnostics.csv", index=False)
-    build_trust_summary(run).to_csv(out / "trust_summary.csv", index=False)
-    run.model_explainability.to_csv(out / "model_explainability.csv", index=False)
+    forecast_long.to_csv(appendix / "forecast_long.csv", index=False)
+    build_backtest_long(run).to_csv(appendix / "backtest_long.csv", index=False)
+    build_series_summary(run).to_csv(appendix / "series_summary.csv", index=False)
+    build_model_audit(run).to_csv(appendix / "model_audit.csv", index=False)
+    build_model_win_rates(run).to_csv(appendix / "model_win_rates.csv", index=False)
+    build_model_tradeoff_scores(run).to_csv(appendix / "model_tradeoff_scores.csv", index=False)
+    build_model_pareto_frontier(run).to_csv(appendix / "model_pareto_frontier.csv", index=False)
+    build_feature_selection_receipts(run).to_csv(appendix / "feature_selection_receipts.csv", index=False)
+    build_model_window_metrics(run).to_csv(appendix / "model_window_metrics.csv", index=False)
+    build_residual_diagnostics(run).to_csv(appendix / "residual_diagnostics.csv", index=False)
+    build_residual_test_summary(run).to_csv(appendix / "residual_tests.csv", index=False)
+    build_interval_diagnostics(run).to_csv(appendix / "interval_diagnostics.csv", index=False)
+    build_trust_summary(run).to_csv(appendix / "trust_summary.csv", index=False)
+    run.model_explainability.to_csv(appendix / "model_explainability.csv", index=False)
     run.all_models.to_csv(audit / "all_models.csv", index=False)
     run.model_selection.to_csv(audit / "model_selection.csv", index=False)
     run.backtest_metrics.to_csv(audit / "backtest_metrics.csv", index=False)
@@ -59,34 +134,43 @@ def write_run(run: ForecastRun, output_dir: str | Path) -> Path:
     run.model_weights.to_csv(audit / "model_weights.csv", index=False)
     run.transformation_audit.to_csv(audit / "target_transform_audit.csv", index=False)
     if run.spec.events:
-        build_scenario_assumptions_frame(run.spec.events).to_csv(out / "scenario_assumptions.csv", index=False)
-        build_scenario_forecast_frame(selected_forecast).to_csv(out / "scenario_forecast.csv", index=False)
+        build_scenario_assumptions_frame(run.spec.events).to_csv(appendix / "scenario_assumptions.csv", index=False)
+        build_scenario_forecast_frame(selected_forecast).to_csv(appendix / "scenario_forecast.csv", index=False)
     if run.spec.regressors or not run.driver_availability_audit.empty:
-        build_known_future_regressors_frame(run.spec.regressors).to_csv(out / "known_future_regressors.csv", index=False)
-        run.driver_availability_audit.to_csv(out / "driver_availability_audit.csv", index=False)
+        build_known_future_regressors_frame(run.spec.regressors).to_csv(appendix / "known_future_regressors.csv", index=False)
+        run.driver_availability_audit.to_csv(appendix / "driver_availability_audit.csv", index=False)
+    if not run.driver_model_features.empty:
+        run.driver_model_features.to_csv(appendix / "driver_model_features.csv", index=False)
+    if not run.driver_model_cv_delta.empty:
+        run.driver_model_cv_delta.to_csv(appendix / "driver_model_cv_delta.csv", index=False)
     if run.spec.events or run.spec.regressors or not run.driver_availability_audit.empty:
-        build_driver_experiment_summary_frame(run).to_csv(out / "driver_experiment_summary.csv", index=False)
+        build_driver_experiment_summary_frame(run).to_csv(appendix / "driver_experiment_summary.csv", index=False)
     if run.spec.custom_models or not run.custom_model_contracts.empty:
-        run.custom_model_contracts.to_csv(out / "custom_model_contracts.csv", index=False)
+        run.custom_model_contracts.to_csv(appendix / "custom_model_contracts.csv", index=False)
     if run.spec.custom_models or not run.custom_model_invocations.empty:
         run.custom_model_invocations.to_csv(audit / "custom_model_invocations.csv", index=False)
     seasonality_profile_frame(run).to_csv(audit / "seasonality_profile.csv", index=False)
     seasonality_summary_frame(run).to_csv(audit / "seasonality_summary.csv", index=False)
     seasonality_diagnostics_frame(run).to_csv(audit / "seasonality_diagnostics.csv", index=False)
     seasonality_decomposition_frame(run).to_csv(audit / "seasonality_decomposition.csv", index=False)
-    best_practice_receipts_frame(run).to_csv(out / "best_practice_receipts.csv", index=False)
+    best_practice_receipts_frame(run).to_csv(appendix / "best_practice_receipts.csv", index=False)
     if not run.unreconciled_forecast.empty:
         run.unreconciled_forecast.to_csv(audit / "hierarchy_unreconciled_forecast.csv", index=False)
         hierarchy_coherence(run.unreconciled_forecast).to_csv(audit / "hierarchy_coherence_pre.csv", index=False)
         hierarchy_coherence(run.forecast).to_csv(audit / "hierarchy_coherence_post.csv", index=False)
     if not run.hierarchy_reconciliation.empty:
-        run.hierarchy_reconciliation.to_csv(out / "hierarchy_reconciliation.csv", index=False)
+        run.hierarchy_reconciliation.to_csv(appendix / "hierarchy_reconciliation.csv", index=False)
+    if not run.hierarchy_reconciliation_comparison.empty:
+        run.hierarchy_reconciliation_comparison.to_csv(appendix / "hierarchy_reconciliation_comparison.csv", index=False)
+    hierarchy_rollup = build_hierarchy_rollup_frame(run)
+    if not hierarchy_rollup.empty:
+        hierarchy_rollup.to_csv(appendix / "hierarchy_rollup.csv", index=False)
     coherence = hierarchy_coherence(run.forecast)
     if not coherence.empty:
-        coherence.to_csv(out / "hierarchy_coherence.csv", index=False)
+        coherence.to_csv(appendix / "hierarchy_coherence.csv", index=False)
     hierarchy_contribution = build_hierarchy_contribution_frame(run)
     if not hierarchy_contribution.empty:
-        hierarchy_contribution.to_csv(out / "hierarchy_contribution.csv", index=False)
+        hierarchy_contribution.to_csv(appendix / "hierarchy_contribution.csv", index=False)
     if "hierarchy_depth" in run.forecast.columns:
         hierarchy_backtest = build_hierarchy_backtest_comparison(run)
         hierarchy_backtest.to_csv(audit / "hierarchy_backtest_comparison.csv", index=False)
@@ -125,6 +209,10 @@ def write_workbook(run: ForecastRun, output_path: str | Path) -> Path:
         if run.spec.regressors or not run.driver_availability_audit.empty:
             build_known_future_regressors_frame(run.spec.regressors).to_excel(writer, sheet_name="Known Future Regressors", index=False)
             run.driver_availability_audit.to_excel(writer, sheet_name="Driver Audit", index=False)
+        if not run.driver_model_features.empty:
+            run.driver_model_features.to_excel(writer, sheet_name="Driver Model Features", index=False)
+        if not run.driver_model_cv_delta.empty:
+            run.driver_model_cv_delta.to_excel(writer, sheet_name="Driver Model CV Delta", index=False)
         if run.spec.events or run.spec.regressors or not run.driver_availability_audit.empty:
             build_driver_experiment_summary_frame(run).to_excel(writer, sheet_name="Driver Experiments", index=False)
         if run.spec.custom_models or not run.custom_model_contracts.empty:
@@ -136,6 +224,11 @@ def write_workbook(run: ForecastRun, output_path: str | Path) -> Path:
         build_series_summary(run).to_excel(writer, sheet_name="Series Summary", index=False)
         build_model_audit(run).to_excel(writer, sheet_name="Model Audit", index=False)
         build_model_win_rates(run).to_excel(writer, sheet_name="Model Win Rates", index=False)
+        build_model_tradeoff_scores(run).to_excel(writer, sheet_name="Model Tradeoffs", index=False)
+        build_model_pareto_frontier(run).to_excel(writer, sheet_name="Pareto Frontier", index=False)
+        feature_receipts = build_feature_selection_receipts(run)
+        if not feature_receipts.empty:
+            feature_receipts.to_excel(writer, sheet_name="Feature Receipts", index=False)
         build_model_window_metrics(run).to_excel(writer, sheet_name="Window Metrics", index=False)
         build_residual_diagnostics(run).to_excel(writer, sheet_name="Residual Diagnostics", index=False)
         build_residual_test_summary(run).to_excel(writer, sheet_name="Residual Tests", index=False)
@@ -152,6 +245,11 @@ def write_workbook(run: ForecastRun, output_path: str | Path) -> Path:
             coherence.to_excel(writer, sheet_name="Hierarchy Coherence", index=False)
         if not run.hierarchy_reconciliation.empty:
             run.hierarchy_reconciliation.to_excel(writer, sheet_name="Hierarchy Reconciliation", index=False)
+        if not run.hierarchy_reconciliation_comparison.empty:
+            run.hierarchy_reconciliation_comparison.to_excel(writer, sheet_name="Hierarchy Reconcile Both", index=False)
+        hierarchy_rollup = build_hierarchy_rollup_frame(run)
+        if not hierarchy_rollup.empty:
+            hierarchy_rollup.to_excel(writer, sheet_name="Hierarchy Rollup", index=False)
         if not run.unreconciled_forecast.empty:
             run.unreconciled_forecast.to_excel(writer, sheet_name="Unreconciled Forecast", index=False)
             hierarchy_coherence(run.unreconciled_forecast).to_excel(writer, sheet_name="Hierarchy Coherence Pre", index=False)
@@ -839,6 +937,26 @@ HIERARCHY_CONTRIBUTION_COLUMNS = [
     "gap_contribution_formula",
 ]
 
+HIERARCHY_ROLLUP_COLUMNS = [
+    "record_type",
+    "value_col",
+    "ds",
+    "parent_unique_id",
+    "parent_hierarchy_level",
+    "parent_hierarchy_depth",
+    "child_hierarchy_depth",
+    "structural_child_count",
+    "observed_child_count",
+    "child_coverage_pct",
+    "coverage_status",
+    "parent_value",
+    "immediate_child_sum",
+    "gap",
+    "gap_pct",
+    "reconciliation_method",
+    "source_artifact",
+]
+
 HIERARCHY_BACKTEST_COMPARISON_COLUMNS = [
     "unique_id",
     "model",
@@ -1256,6 +1374,311 @@ def build_model_win_rates(run: ForecastRun) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values(["win_rate_vs_benchmark", "avg_skill_vs_benchmark", "model"], ascending=[False, False, True]).reset_index(drop=True)
 
 
+def build_feature_selection_receipts(run: ForecastRun) -> pd.DataFrame:
+    """Compact, descriptive feature evidence for MLForecast runs.
+
+    The receipt intentionally does not prune or select features; it explains what
+    entered fitted models and why external driver features were included/excluded.
+    """
+
+    rows: list[dict[str, Any]] = []
+    driver_features = getattr(run, "driver_model_features", pd.DataFrame())
+    driver_by_feature = _driver_feature_receipt_map(driver_features)
+    cv_features = _driver_cv_feature_set(getattr(run, "driver_model_cv_delta", pd.DataFrame()))
+    explainability = getattr(run, "model_explainability", pd.DataFrame())
+    if not explainability.empty and "feature" in explainability.columns:
+        frame = explainability.copy()
+        frame["feature"] = frame["feature"].astype(str)
+        frame["importance"] = pd.to_numeric(frame.get("importance"), errors="coerce")
+        for feature, group in frame.groupby("feature", sort=True):
+            driver_row = driver_by_feature.get(str(feature), {})
+            importance_type = "; ".join(sorted({str(value) for value in group.get("importance_type", pd.Series(dtype=object)).dropna() if str(value)}))
+            rows.append(
+                {
+                    "feature": str(feature),
+                    "feature_role": _feature_receipt_role(str(feature), driver_row),
+                    "source": "model_explainability",
+                    "models_reporting_importance": int(group["model"].nunique()) if "model" in group.columns else int(len(group)),
+                    "importance_type": importance_type,
+                    "max_importance": _safe_float(group["importance"].abs().max()),
+                    "mean_importance": _safe_float(group["importance"].abs().mean()),
+                    "availability_status": str(driver_row.get("status") or "not_external_feature"),
+                    "leakage_status": _feature_leakage_status(driver_row),
+                    "cv_evidence_status": "driver_features_scored_in_mlforecast_cv" if str(feature) in cv_features else "model_importance_only",
+                    "final_decision": _feature_final_decision(driver_row, seen_in_model=True),
+                    "notes": str(driver_row.get("reason") or _feature_receipt_notes(str(feature))),
+                }
+            )
+
+    seen = {row["feature"] for row in rows}
+    for feature, driver_row in driver_by_feature.items():
+        if feature in seen:
+            continue
+        rows.append(
+            {
+                "feature": feature,
+                "feature_role": _feature_receipt_role(feature, driver_row),
+                "source": "driver_feature_gate",
+                "models_reporting_importance": 0,
+                "importance_type": "",
+                "max_importance": np.nan,
+                "mean_importance": np.nan,
+                "availability_status": str(driver_row.get("status") or "unknown"),
+                "leakage_status": _feature_leakage_status(driver_row),
+                "cv_evidence_status": "not_scored_in_model_cv",
+                "final_decision": _feature_final_decision(driver_row, seen_in_model=False),
+                "notes": str(driver_row.get("reason") or ""),
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame(columns=FEATURE_SELECTION_RECEIPT_COLUMNS)
+    out = pd.DataFrame(rows)
+    return _ensure_columns(out.sort_values(["feature_role", "feature"]).reset_index(drop=True), FEATURE_SELECTION_RECEIPT_COLUMNS)
+
+
+def build_model_tradeoff_scores(run: ForecastRun) -> pd.DataFrame:
+    """Per-series/model score table used for multi-objective model review."""
+
+    if run.backtest_metrics.empty:
+        return pd.DataFrame(columns=MODEL_TRADEOFF_SCORE_COLUMNS)
+    scores = _aggregate_tradeoff_metrics(run.backtest_metrics)
+    if scores.empty:
+        return pd.DataFrame(columns=MODEL_TRADEOFF_SCORE_COLUMNS)
+    if "abs_bias" not in scores.columns and "bias" in scores.columns:
+        scores["abs_bias"] = pd.to_numeric(scores["bias"], errors="coerce").abs()
+    scores["unique_id"] = scores["unique_id"].astype(str)
+    scores["model"] = scores["model"].astype(str)
+    scores["family"] = scores["model"].map(model_family)
+    selected = _selected_model_map(run)
+    selection_reason = _selection_reason_map(run)
+    scores["selected_model"] = scores["unique_id"].map(selected).fillna("")
+    scores["is_selected_model"] = scores["model"] == scores["selected_model"]
+    scores["selection_reason"] = scores["unique_id"].map(selection_reason).fillna("")
+    for col in PARETO_REVIEW_METRICS + ("bias", "observations"):
+        if col in scores.columns:
+            scores[col] = pd.to_numeric(scores[col], errors="coerce")
+    sort_cols = [col for col in ["unique_id", "rmse", "mae", "wape", "abs_bias", "model"] if col in scores.columns]
+    if sort_cols:
+        scores = scores.sort_values(sort_cols)
+    return _ensure_columns(scores, MODEL_TRADEOFF_SCORE_COLUMNS)
+
+
+def build_model_pareto_frontier(run: ForecastRun) -> pd.DataFrame:
+    """Mark non-dominated model tradeoffs per series without changing selection."""
+
+    from utilsforecast.model_selection import ParetoFrontier
+
+    scores = build_model_tradeoff_scores(run)
+    if scores.empty:
+        return pd.DataFrame(columns=MODEL_PARETO_FRONTIER_COLUMNS)
+    rows: list[dict[str, Any]] = []
+    for uid, group in scores.groupby("unique_id", sort=True, dropna=False):
+        group = group.copy().reset_index(drop=True)
+        base_candidate_mask = _has_any_finite_pareto_metric(group)
+        metric_cols, excluded_metrics = _complete_pareto_metrics(group[base_candidate_mask])
+        candidate_mask = pd.Series(False, index=group.index)
+        if metric_cols:
+            candidate_mask.loc[base_candidate_mask] = group.loc[base_candidate_mask, list(metric_cols)].apply(
+                pd.to_numeric,
+                errors="coerce",
+            ).notna().all(axis=1)
+        eligible = group[candidate_mask].copy()
+        if metric_cols and not eligible.empty:
+            frontier = ParetoFrontier.find_non_dominated(
+                eligible[["unique_id", "model", *metric_cols]],
+                metrics=list(metric_cols),
+                id_col="unique_id",
+            )
+            pareto_models = set(frontier["model"].astype(str)) if "model" in frontier.columns else set()
+            eligible_models = set(eligible["model"].astype(str))
+            pareto_candidate_count = int(len(eligible))
+            excluded_reason = ""
+        else:
+            pareto_models = set()
+            eligible_models = set()
+            pareto_candidate_count = 0
+            excluded_reason = "insufficient_complete_metrics"
+        for row in group.to_dict("records"):
+            model = str(row.get("model") or "")
+            is_candidate = model in eligible_models
+            is_pareto = bool(is_candidate and model in pareto_models)
+            is_selected = bool(row.get("is_selected_model"))
+            if not metric_cols or not is_candidate:
+                pareto_status = "insufficient_metrics"
+            elif is_pareto:
+                pareto_status = "non_dominated_tradeoff"
+            else:
+                pareto_status = "dominated_tradeoff"
+            row.update(
+                {
+                    "is_pareto_optimal": is_pareto,
+                    "pareto_status": pareto_status,
+                    "selection_alignment": _selection_alignment(is_selected=is_selected, is_pareto=is_pareto, pareto_status=pareto_status),
+                    "dominance_scope": "within_unique_id",
+                    "metrics_considered": "|".join(metric_cols),
+                    "excluded_metrics": "|".join(excluded_metrics),
+                    "excluded_reason": excluded_reason if pareto_status == "insufficient_metrics" else "",
+                    "candidate_count": int(len(group)),
+                    "pareto_candidate_count": pareto_candidate_count,
+                }
+            )
+            rows.append(row)
+    if not rows:
+        return pd.DataFrame(columns=MODEL_PARETO_FRONTIER_COLUMNS)
+    out = pd.DataFrame(rows)
+    out["_pareto_sort"] = (~out["is_pareto_optimal"].astype(bool)).astype(int)
+    out["_selected_sort"] = (~out["is_selected_model"].astype(bool)).astype(int)
+    sort_cols = [col for col in ["unique_id", "_pareto_sort", "_selected_sort", "rmse", "mae", "model"] if col in out.columns]
+    if sort_cols:
+        out = out.sort_values(sort_cols)
+    return _ensure_columns(out.drop(columns=["_pareto_sort", "_selected_sort"], errors="ignore").reset_index(drop=True), MODEL_PARETO_FRONTIER_COLUMNS)
+
+
+def _aggregate_tradeoff_metrics(metrics: pd.DataFrame) -> pd.DataFrame:
+    if metrics.empty or not {"unique_id", "model"}.issubset(metrics.columns):
+        return pd.DataFrame(columns=MODEL_TRADEOFF_SCORE_COLUMNS)
+    frame = metrics.copy()
+    frame["unique_id"] = frame["unique_id"].astype(str)
+    frame["model"] = frame["model"].astype(str)
+    numeric_mean_cols = [
+        col
+        for col in ["rmse", "mae", "wape", "mase", "rmsse", "bias", "abs_bias"]
+        if col in frame.columns
+    ]
+    for col in numeric_mean_cols:
+        frame[col] = pd.to_numeric(frame[col], errors="coerce")
+    agg: dict[str, str] = {col: "mean" for col in numeric_mean_cols}
+    if "observations" in frame.columns:
+        frame["observations"] = pd.to_numeric(frame["observations"], errors="coerce")
+        agg["observations"] = "sum"
+    for col in ["requested_horizon", "selection_horizon", "cv_windows", "cv_step_size", "cv_horizon_matches_requested"]:
+        if col in frame.columns:
+            agg[col] = "first"
+    if not agg:
+        return frame[["unique_id", "model"]].drop_duplicates().reset_index(drop=True)
+    return frame.groupby(["unique_id", "model"], as_index=False, sort=True).agg(agg)
+
+
+def _complete_pareto_metrics(group: pd.DataFrame) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    if group.empty:
+        return (), ()
+    metric_cols: list[str] = []
+    excluded: list[str] = []
+    for metric in PARETO_REVIEW_METRICS:
+        if metric == "bias":
+            continue
+        if metric not in group.columns:
+            continue
+        values = pd.to_numeric(group[metric], errors="coerce")
+        if values.notna().all() and np.isfinite(values.to_numpy(dtype="float64")).all():
+            metric_cols.append(metric)
+        else:
+            excluded.append(metric)
+    return tuple(metric_cols), tuple(excluded)
+
+
+def _has_any_finite_pareto_metric(group: pd.DataFrame) -> pd.Series:
+    available = [metric for metric in PARETO_REVIEW_METRICS if metric in group.columns]
+    if not available:
+        return pd.Series(False, index=group.index)
+    numeric = group[available].apply(pd.to_numeric, errors="coerce")
+    finite = pd.DataFrame(np.isfinite(numeric.to_numpy(dtype="float64")), index=group.index, columns=available)
+    return finite.any(axis=1)
+
+
+def _selection_alignment(*, is_selected: bool, is_pareto: bool, pareto_status: str) -> str:
+    if pareto_status == "insufficient_metrics":
+        return "selected_insufficient_metrics" if is_selected else "insufficient_metrics"
+    if is_selected and is_pareto:
+        return "selected_pareto"
+    if is_selected:
+        return "selected_dominated"
+    if is_pareto:
+        return "pareto_alternative"
+    return "dominated_challenger"
+
+
+def _ensure_columns(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    out = frame.copy()
+    for col in columns:
+        if col not in out.columns:
+            out[col] = pd.NA
+    return out[columns]
+
+
+def _driver_feature_receipt_map(driver_features: pd.DataFrame) -> dict[str, dict[str, Any]]:
+    if driver_features.empty:
+        return {}
+    mapping: dict[str, dict[str, Any]] = {}
+    for row in driver_features.to_dict("records"):
+        raw_features = str(row.get("feature_columns") or row.get("value_col") or "")
+        for feature in [part.strip() for part in raw_features.replace("|", ";").split(";") if part.strip()]:
+            mapping[feature] = row
+    return mapping
+
+
+def _driver_cv_feature_set(driver_cv_delta: pd.DataFrame) -> set[str]:
+    if driver_cv_delta.empty or "feature_columns" not in driver_cv_delta.columns:
+        return set()
+    features: set[str] = set()
+    for value in driver_cv_delta["feature_columns"].dropna().astype(str):
+        features.update(part.strip() for part in value.replace("|", ";").split(";") if part.strip())
+    return features
+
+
+def _feature_receipt_role(feature: str, driver_row: dict[str, Any]) -> str:
+    role = str(driver_row.get("feature_role") or "")
+    if role:
+        return role
+    if feature in {"month", "dayofweek"}:
+        return "calendar_feature"
+    if "rolling_mean" in feature:
+        return "target_lag_transform"
+    if feature.startswith("lag"):
+        return "target_lag_feature"
+    if "_lag_" in feature:
+        return "historical_only_lag_regressor"
+    return "mlforecast_feature"
+
+
+def _feature_leakage_status(driver_row: dict[str, Any]) -> str:
+    if not driver_row:
+        return "not_external_feature"
+    status = str(driver_row.get("status") or "")
+    return "passed_feature_gate" if status == "included" else "excluded_or_not_scored"
+
+
+def _feature_final_decision(driver_row: dict[str, Any], *, seen_in_model: bool) -> str:
+    if not driver_row:
+        return "used_by_fitted_mlforecast_model" if seen_in_model else "not_external_feature"
+    status = str(driver_row.get("status") or "")
+    if status == "included" and seen_in_model:
+        return "included_and_seen_in_model"
+    if status == "included":
+        return "included_but_not_reported_by_model_importance"
+    return "excluded_by_feature_gate"
+
+
+def _feature_receipt_notes(feature: str) -> str:
+    if feature in {"month", "dayofweek"}:
+        return "calendar feature generated by MLForecast"
+    if feature.startswith("lag"):
+        return "target-history lag generated by MLForecast"
+    if "rolling_mean" in feature:
+        return "rolling target-history transform generated by the audited feature policy"
+    return "feature reported by fitted MLForecast model"
+
+
+def _selection_reason_map(run: ForecastRun) -> dict[str, str]:
+    if run.model_selection.empty or "selection_reason" not in run.model_selection.columns:
+        return {}
+    return {
+        str(row["unique_id"]): str(row["selection_reason"])
+        for row in run.model_selection[["unique_id", "selection_reason"]].to_dict("records")
+    }
+
+
 def build_model_window_metrics(run: ForecastRun) -> pd.DataFrame:
     """Error metrics by series, cutoff, and model."""
 
@@ -1469,6 +1892,151 @@ def build_hierarchy_contribution_frame(run: ForecastRun) -> pd.DataFrame:
     return pd.DataFrame(rows)[HIERARCHY_CONTRIBUTION_COLUMNS].sort_values(
         ["value_col", "parent_unique_id", "ds", "child_unique_id"]
     ).reset_index(drop=True)
+
+
+def build_hierarchy_rollup_frame(run: ForecastRun) -> pd.DataFrame:
+    """Parent-level hierarchy roll-up feed for history and selected forecasts.
+
+    This is the CSV equivalent of the Streamlit hierarchy roll-up visuals: parent
+    actuals/forecasts beside immediate-child sums. It is intentionally separate
+    from hierarchy_coherence.csv, which remains the post-reconciliation diagnostic.
+    """
+
+    frames = [
+        _hierarchy_rollup_from_frame(
+            run.history,
+            value_cols=("y",),
+            record_type="history",
+            reconciliation_method="actuals",
+            source_artifact="appendix/history.csv",
+            include_gap=False,
+        ),
+        _hierarchy_rollup_from_frame(
+            run.forecast,
+            value_cols=tuple(col for col in ("yhat", "yhat_scenario") if col in run.forecast.columns),
+            record_type="forecast",
+            reconciliation_method=run.spec.hierarchy_reconciliation,
+            source_artifact="forecast.csv",
+            include_gap=True,
+        ),
+    ]
+    frames = [frame for frame in frames if not frame.empty]
+    if not frames:
+        return pd.DataFrame(columns=HIERARCHY_ROLLUP_COLUMNS)
+    out = pd.concat(frames, ignore_index=True)[HIERARCHY_ROLLUP_COLUMNS]
+    out["_record_type_order"] = out["record_type"].map({"history": 0, "forecast": 1}).fillna(2)
+    return out.sort_values(
+        ["_record_type_order", "value_col", "parent_hierarchy_depth", "parent_unique_id", "ds"]
+    ).drop(columns="_record_type_order").reset_index(drop=True)
+
+
+def _hierarchy_rollup_from_frame(
+    frame: pd.DataFrame,
+    *,
+    value_cols: Sequence[str],
+    record_type: str,
+    reconciliation_method: str,
+    source_artifact: str,
+    include_gap: bool,
+) -> pd.DataFrame:
+    required = {"unique_id", "ds", "hierarchy_depth"}
+    if frame.empty or not required.issubset(frame.columns):
+        return pd.DataFrame(columns=HIERARCHY_ROLLUP_COLUMNS)
+    value_cols = tuple(col for col in value_cols if col in frame.columns)
+    if not value_cols:
+        return pd.DataFrame(columns=HIERARCHY_ROLLUP_COLUMNS)
+
+    work = frame.copy()
+    work["hierarchy_depth"] = pd.to_numeric(work["hierarchy_depth"], errors="coerce")
+    work["ds"] = pd.to_datetime(work["ds"], errors="coerce")
+    work = work.dropna(subset=["unique_id", "ds", "hierarchy_depth"])
+    if work.empty:
+        return pd.DataFrame(columns=HIERARCHY_ROLLUP_COLUMNS)
+    root_ids = work.loc[work["hierarchy_depth"] == 0, "unique_id"].dropna().astype(str).unique()
+    root_id = root_ids[0] if len(root_ids) else "Total"
+    child_meta = work[work["hierarchy_depth"] > 0][["unique_id", "hierarchy_depth"]].drop_duplicates("unique_id").copy()
+    if child_meta.empty:
+        return pd.DataFrame(columns=HIERARCHY_ROLLUP_COLUMNS)
+    child_meta["parent_unique_id"] = child_meta.apply(lambda row: _hierarchy_parent_id(row, root_id), axis=1)
+    structural = (
+        child_meta.groupby("parent_unique_id", as_index=False)
+        .agg(
+            structural_child_count=("unique_id", "nunique"),
+            child_hierarchy_depth=("hierarchy_depth", "max"),
+        )
+        .rename(columns={"parent_unique_id": "unique_id"})
+    )
+    parent_meta_cols = ["unique_id", "hierarchy_depth"]
+    if "hierarchy_level" in work.columns:
+        parent_meta_cols.append("hierarchy_level")
+    parent_meta = work[parent_meta_cols].drop_duplicates("unique_id").copy()
+    parent_meta = parent_meta.merge(structural, on="unique_id", how="inner")
+    if parent_meta.empty:
+        return pd.DataFrame(columns=HIERARCHY_ROLLUP_COLUMNS)
+
+    rows: list[pd.DataFrame] = []
+    for value_col in value_cols:
+        child_values = work[work["hierarchy_depth"] > 0][["unique_id", "ds", value_col]].copy()
+        if child_values.empty:
+            continue
+        child_values = child_values.merge(child_meta[["unique_id", "parent_unique_id"]], on="unique_id", how="left")
+        child_values[value_col] = pd.to_numeric(child_values[value_col], errors="coerce")
+        observed = child_values.dropna(subset=[value_col])
+        child_sum = observed.groupby(["parent_unique_id", "ds"], as_index=False).agg(
+            immediate_child_sum=(value_col, lambda values: values.sum(min_count=1)),
+            observed_child_count=("unique_id", "nunique"),
+        )
+        parent = work[["unique_id", "ds", value_col]].merge(parent_meta, on="unique_id", how="inner")
+        parent = parent.rename(
+            columns={
+                "unique_id": "parent_unique_id",
+                "hierarchy_level": "parent_hierarchy_level",
+                "hierarchy_depth": "parent_hierarchy_depth",
+            }
+        )
+        parent[value_col] = pd.to_numeric(parent[value_col], errors="coerce")
+        merged = parent.merge(child_sum, on=["parent_unique_id", "ds"], how="left")
+        structural_count = pd.to_numeric(merged["structural_child_count"], errors="coerce")
+        observed_count = pd.to_numeric(merged["observed_child_count"], errors="coerce").fillna(0)
+        parent_value = pd.to_numeric(merged[value_col], errors="coerce")
+        child_sum_value = pd.to_numeric(merged["immediate_child_sum"], errors="coerce")
+        coverage_pct = observed_count / structural_count.where(structural_count > 0)
+        gap = parent_value - child_sum_value if include_gap else pd.Series([None] * len(merged), index=merged.index, dtype=object)
+        gap_pct = (
+            gap / parent_value.abs().where(parent_value.abs() > 0)
+            if include_gap
+            else pd.Series([None] * len(merged), index=merged.index, dtype=object)
+        )
+        coverage_status = np.where(
+            observed_count <= 0,
+            "missing_children",
+            np.where(observed_count == structural_count, "complete", "partial"),
+        )
+        out = pd.DataFrame(
+            {
+                "record_type": record_type,
+                "value_col": value_col,
+                "ds": merged["ds"],
+                "parent_unique_id": merged["parent_unique_id"],
+                "parent_hierarchy_level": merged.get("parent_hierarchy_level"),
+                "parent_hierarchy_depth": merged["parent_hierarchy_depth"],
+                "child_hierarchy_depth": merged["child_hierarchy_depth"],
+                "structural_child_count": structural_count,
+                "observed_child_count": observed_count,
+                "child_coverage_pct": coverage_pct,
+                "coverage_status": coverage_status,
+                "parent_value": parent_value,
+                "immediate_child_sum": child_sum_value,
+                "gap": gap,
+                "gap_pct": gap_pct,
+                "reconciliation_method": reconciliation_method,
+                "source_artifact": source_artifact,
+            }
+        )
+        rows.append(out)
+    if not rows:
+        return pd.DataFrame(columns=HIERARCHY_ROLLUP_COLUMNS)
+    return pd.concat(rows, ignore_index=True)[HIERARCHY_ROLLUP_COLUMNS]
 
 
 def build_hierarchy_backtest_comparison(run: ForecastRun) -> pd.DataFrame:

@@ -56,8 +56,8 @@ def test_custom_callable_participates_in_tournament_and_artifacts(tmp_path) -> N
     assert not run.custom_model_contracts.empty
     assert not run.custom_model_invocations.empty
     assert set(run.custom_model_invocations["status"]) == {"succeeded"}
-    assert run.manifest()["outputs"]["custom_model_contracts"] == "custom_model_contracts.csv"
-    assert (out_dir / "custom_model_contracts.csv").exists()
+    assert run.manifest()["outputs"]["custom_model_contracts"] == "appendix/custom_model_contracts.csv"
+    assert (out_dir / "appendix" / "custom_model_contracts.csv").exists()
     assert (out_dir / "audit" / "custom_model_invocations.csv").exists()
     assert spec.to_dict()["custom_models"][0]["callable_object_ref"].endswith("_last_value_callable")
 
@@ -236,7 +236,7 @@ def test_no_custom_run_does_not_emit_custom_artifacts(tmp_path) -> None:
 
     assert run.custom_model_contracts.empty
     assert "custom_model_contracts" not in run.manifest()["outputs"]
-    assert not (out_dir / "custom_model_contracts.csv").exists()
+    assert not (out_dir / "appendix" / "custom_model_contracts.csv").exists()
     assert not (out_dir / "audit" / "custom_model_invocations.csv").exists()
 
 
@@ -294,7 +294,7 @@ grid[["unique_id", "ds", "yhat"]].to_csv(args.output, index=False)
 
     assert exit_code == 0
     invocations = pd.read_csv(output_dir / "audit" / "custom_model_invocations.csv")
-    assert "Custom_Script_Model" in pd.read_csv(output_dir / "forecast_long.csv")["model"].unique()
+    assert "Custom_Script_Model" in pd.read_csv(output_dir / "appendix" / "forecast_long.csv")["model"].unique()
     assert invocations["used_python_executable"].astype(bool).all()
     commands = [json.loads(command) for command in invocations["command_json"] if isinstance(command, str) and command]
     assert commands and all(command[0] == sys.executable for command in commands)

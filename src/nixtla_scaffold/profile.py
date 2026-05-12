@@ -160,7 +160,7 @@ def repair_time_index(
         dates = pd.date_range(grp["ds"].min(), grp["ds"].max(), freq=profile.freq)
         regular = pd.DataFrame({"ds": dates})
         regular["unique_id"] = str(uid)
-        regular = regular.merge(grp[["unique_id", "ds", "y"]], on=["unique_id", "ds"], how="left")
+        regular = regular.merge(grp, on=["unique_id", "ds"], how="left")
         missing_before = int(regular["y"].isna().sum())
         if spec.fill_method == "drop":
             regular = regular.dropna(subset=["y"])
@@ -181,7 +181,9 @@ def repair_time_index(
         frames.append(regular)
 
     out = pd.concat(frames, ignore_index=True).sort_values(["unique_id", "ds"]).reset_index(drop=True)
-    return out[["unique_id", "ds", "y"]], warnings
+    ordered_cols = ["unique_id", "ds", "y"]
+    extra_cols = [col for col in out.columns if col not in ordered_cols]
+    return out[ordered_cols + extra_cols], warnings
 
 
 def _normalize_freq(freq: str, dates: pd.Series) -> str:

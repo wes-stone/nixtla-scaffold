@@ -140,6 +140,9 @@ def build_html_report(payload: dict[str, Any]) -> str:
     model_selection = payload["model_selection"]
     backtest_metrics = payload["backtest_metrics"]
     model_win_rates = payload["model_win_rates"]
+    model_tradeoff_scores = payload.get("model_tradeoff_scores", [])
+    model_pareto_frontier = payload.get("model_pareto_frontier", [])
+    feature_selection_receipts = payload.get("feature_selection_receipts", [])
     residual_tests = payload.get("residual_tests", [])
     trust_summary = payload["trust_summary"]
     trust_summary_display = _trust_summary_display_rows(trust_summary)
@@ -148,9 +151,13 @@ def build_html_report(payload: dict[str, Any]) -> str:
     scenario_forecast = payload.get("scenario_forecast", [])
     known_future_regressors = payload.get("known_future_regressors", [])
     driver_availability_audit = payload.get("driver_availability_audit", [])
+    driver_model_features = payload.get("driver_model_features", [])
+    driver_model_cv_delta = payload.get("driver_model_cv_delta", [])
     driver_experiment_summary = payload.get("driver_experiment_summary", [])
+    hierarchy_rollup = payload.get("hierarchy_rollup", [])
     hierarchy_contribution = payload.get("hierarchy_contribution", [])
     hierarchy_backtest_comparison = payload.get("hierarchy_backtest_comparison", [])
+    hierarchy_reconciliation_comparison = payload.get("hierarchy_reconciliation_comparison", [])
     seasonality = payload["seasonality_summary"]
     seasonality_diagnostics = payload["seasonality_diagnostics"]
     model_weights = payload["model_weights"]
@@ -276,14 +283,14 @@ def build_html_report(payload: dict[str, Any]) -> str:
       <h2>Decision summary</h2>
       <p class="footnote">Start here before reading the model tournament. Trust is a deterministic review score that combines history depth, CV evidence, naive skill, residuals, interval calibration, hierarchy coherence, event coverage, and data-quality caveats.</p>
       <p class="footnote"><strong>Planning eligibility scope:</strong> <code>planning_eligible</code> is a horizon-validation flag only. It does not override Low trust, interval issues, residual warnings, hierarchy tradeoffs, or data-quality caveats.</p>
-      <p class="footnote"><strong>How to read forecast.csv:</strong> Start with <code>row_horizon_status</code> and <code>planning_eligible</code>, then cross-check <code>trust_summary.csv</code>, <code>interval_status</code>, residual warnings, hierarchy tradeoffs, and data-quality caveats before stakeholder sharing.</p>
+      <p class="footnote"><strong>How to read forecast.csv:</strong> Start with <code>row_horizon_status</code> and <code>planning_eligible</code>, then cross-check <code>appendix/trust_summary.csv</code>, <code>interval_status</code>, residual warnings, hierarchy tradeoffs, and data-quality caveats before stakeholder sharing.</p>
       <p class="footnote"><strong>Trust rubric:</strong> {_esc(TRUST_RUBRIC_TEXT)}</p>
       {_trust_summary_cards(trust_summary_display, limit=16)}
       <p class="footnote"><strong>Interval glossary:</strong> {_esc(INTERVAL_GLOSSARY_TEXT)}</p>
     </section>
     {_model_policy_resolution_section(model_policy_resolution)}
     {_target_transform_section(target_transform_audit)}
-    {_driver_assumptions_section(scenario_assumptions, scenario_forecast, known_future_regressors, driver_availability_audit, driver_experiment_summary)}
+    {_driver_assumptions_section(scenario_assumptions, scenario_forecast, known_future_regressors, driver_availability_audit, driver_model_features, driver_model_cv_delta, driver_experiment_summary, feature_selection_receipts)}
     {_ledger_section(ledger)}
 
     <section class="panel">
@@ -319,6 +326,13 @@ def build_html_report(payload: dict[str, Any]) -> str:
     </section>
 
     <section class="panel" style="margin-top:14px">
+      <h2>Model tradeoffs and Pareto frontier</h2>
+      <p class="footnote">Pareto rows show non-dominated alternatives across complete backtest metrics for each series. This is a review lens only: official forecasts still come from the selected model in <code>forecast.csv</code>.</p>
+      {_pareto_tradeoff_chart_html(model_pareto_frontier)}
+      {_table(model_pareto_frontier, ["unique_id", "model", "is_pareto_optimal", "selection_alignment", "metrics_considered", "rmse", "mae", "wape", "mase", "rmsse", "abs_bias"], limit=24)}
+    </section>
+
+    <section class="panel" style="margin-top:14px">
       <h2>Rolling-origin fixed-axis filmstrip</h2>
       <p class="footnote">Each panel holds the date and value axes constant for the series so the cutoff progression is comparable. The full actual history stays visible, the training and holdout regions slide forward, and champion/challenger labels remain attached to forecast endpoints.</p>
       {_backtest_review_charts(payload)}
@@ -340,31 +354,38 @@ def build_html_report(payload: dict[str, Any]) -> str:
           {_output_item("output/forecast_for_review.csv", "Selected forecast rows only, stripped down for finance review.")}
           {_output_item("output/decision_summary.csv", "Condensed trust/readiness, caveats, and next actions by series.")}
           {_output_item("output/appendix/artifact_guide.csv", "Appendix file map for curated output, agent feeds, and audit files.")}
-          {_output_item("forecast_long.csv", "One row per future series/model/date with yhat, intervals, weight, and selected-model flag.")}
-          {_output_item("backtest_long.csv", "One row per backtest cutoff/series/model/date with actuals, errors, interval bounds, and coverage flags.")}
-          {_output_item("series_summary.csv", "One row per series with selected model, RMSE/MAE/MASE/RMSSE/WAPE, seasonality, and top alternatives.")}
-          {_output_item("model_audit.csv", "Model leaderboard enriched with weights and selected/challenger flags.")}
-          {_output_item("model_win_rates.csv", "Model win rates against SeasonalNaive or Naive benchmarks for cross-series review.")}
-          {_output_item("model_window_metrics.csv", "Rolling-origin error metrics by cutoff and model for window-by-window review.")}
-          {_output_item("residual_diagnostics.csv", "Residual/error diagnostics by model and horizon step.")}
-          {_output_item("residual_tests.csv", "Heuristic residual bias, one-step autocorrelation, outlier, and early/late structural-break screening; not formal model adequacy certification.")}
-          {_output_item("interval_diagnostics.csv", "Prediction interval empirical coverage, method, horizon metadata, and calibration state when interval backtests are available.")}
-          {_output_item("trust_summary.csv", "Per-series High/Medium/Low trust rating with score drivers, caveats, and next recommended actions.")}
-          {_output_item("scenario_assumptions.csv", "Post-model event/scenario assumptions when overlays are supplied.")}
-          {_output_item("scenario_forecast.csv", "Baseline yhat beside yhat_scenario, event adjustment, and event names for scenario review.")}
-          {_output_item("known_future_regressors.csv", "Declared known-future regressor contracts for leakage and future-availability audit.")}
-          {_output_item("driver_availability_audit.csv", "Known-future regressor audit status, leakage risk, required future rows, and modeling decision.")}
-          {_output_item("driver_experiment_summary.csv", "One summary table for event overlays and known-future regressor audit outcomes.")}
+          {_output_item("appendix/forecast_long.csv", "One row per future series/model/date with yhat, intervals, weight, and selected-model flag.")}
+          {_output_item("appendix/backtest_long.csv", "One row per backtest cutoff/series/model/date with actuals, errors, interval bounds, and coverage flags.")}
+          {_output_item("appendix/series_summary.csv", "One row per series with selected model, RMSE/MAE/MASE/RMSSE/WAPE, seasonality, and top alternatives.")}
+          {_output_item("appendix/model_audit.csv", "Model leaderboard enriched with weights and selected/challenger flags.")}
+          {_output_item("appendix/model_win_rates.csv", "Model win rates against SeasonalNaive or Naive benchmarks for cross-series review.")}
+          {_output_item("appendix/model_tradeoff_scores.csv", "Per-series/model score table used for RMSE, WAPE, scale-free error, and bias tradeoff review.")}
+          {_output_item("appendix/model_pareto_frontier.csv", "Non-dominated model tradeoff set; review-only and never an automatic champion override.")}
+          {_output_item("appendix/model_window_metrics.csv", "Rolling-origin error metrics by cutoff and model for window-by-window review.")}
+          {_output_item("appendix/residual_diagnostics.csv", "Residual/error diagnostics by model and horizon step.")}
+          {_output_item("appendix/residual_tests.csv", "Heuristic residual bias, one-step autocorrelation, outlier, and early/late structural-break screening; not formal model adequacy certification.")}
+          {_output_item("appendix/interval_diagnostics.csv", "Prediction interval empirical coverage, method, horizon metadata, and calibration state when interval backtests are available.")}
+          {_output_item("appendix/trust_summary.csv", "Per-series High/Medium/Low trust rating with score drivers, caveats, and next recommended actions.")}
+          {_output_item("appendix/scenario_assumptions.csv", "Post-model event/scenario assumptions when overlays are supplied.")}
+          {_output_item("appendix/scenario_forecast.csv", "Baseline yhat beside yhat_scenario, event adjustment, and event names for scenario review.")}
+          {_output_item("appendix/known_future_regressors.csv", "Declared known-future regressor contracts for leakage and future-availability audit.")}
+          {_output_item("appendix/driver_availability_audit.csv", "Known-future regressor audit status, leakage risk, required future rows, and modeling decision.")}
+          {_output_item("appendix/driver_model_features.csv", "Opt-in MLForecast driver feature gate showing which audited regressors were included or excluded.")}
+          {_output_item("appendix/driver_model_cv_delta.csv", "Rolling-origin CV evidence for MLForecast candidates that used approved driver features.")}
+          {_output_item("appendix/feature_selection_receipts.csv", "Descriptive MLForecast feature evidence; it does not auto-prune features or override model selection.")}
+          {_output_item("appendix/driver_experiment_summary.csv", "One summary table for event overlays and known-future regressor audit outcomes.")}
           {_output_item("audit/target_transform_audit.csv", "Raw, adjusted, transformed, and modeled target trail when finance normalization or log/log1p transforms are enabled.")}
-          {_output_item("hierarchy_reconciliation.csv", "Method summary and pre/post coherence gaps when hierarchy reconciliation is enabled; node-level accuracy may decrease.")}
-          {_output_item("hierarchy_contribution.csv", "Parent/child contribution and gap attribution table for hierarchy storytelling; allocation heuristic, not reconciliation output.")}
+          {_output_item("appendix/hierarchy_rollup.csv", "Parent-level hierarchy roll-up table: history and selected forecast beside immediate-child sums and child coverage.")}
+          {_output_item("appendix/hierarchy_reconciliation.csv", "Method summary and pre/post coherence gaps when hierarchy reconciliation is enabled; node-level accuracy may decrease.")}
+          {_output_item("appendix/hierarchy_reconciliation_comparison.csv", "Bottom-up versus top-down reconciled values when `--hierarchy-reconciliation both` is used.")}
+          {_output_item("appendix/hierarchy_contribution.csv", "Parent/child contribution and gap attribution table for hierarchy storytelling; allocation heuristic, not reconciliation output.")}
           {_output_item("audit/hierarchy_backtest_comparison.csv", "Selected hierarchy backtests before and after reconciliation for node-level accuracy/coherence tradeoff review.")}
           {_output_item("llm_context.json", "Single LLM feeder packet with executive headline, trust, horizon, interval, residual, seasonality, hierarchy, driver, and artifact-index context.")}
           {_output_item("ledger_context.json", "Optional pointer to forecast-ledger exports; when present, the report includes version, lock, actuals, delta, and adjustment previews.")}
           {_output_item("forecast.xlsx", "Curated workbook for analysts who want one file with all major sheets.")}
           {_output_item("streamlit_app.py", "Interactive local dashboard: run with uv run streamlit run streamlit_app.py.")}
         </div>
-        {_hierarchy_depth_section(hierarchy_contribution, hierarchy_backtest_comparison)}
+        {_hierarchy_depth_section(hierarchy_rollup, hierarchy_contribution, hierarchy_backtest_comparison, hierarchy_reconciliation_comparison)}
       </article>
     </section>
 
@@ -392,6 +413,7 @@ def build_streamlit_app() -> str:
         import numpy as np
         import pandas as pd
         import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
         import streamlit as st
 
 
@@ -423,21 +445,9 @@ def build_streamlit_app() -> str:
             "Feeder outputs",
         ]
         DASHBOARD_SECTIONS = list(BASE_DASHBOARD_SECTIONS)
-        SECTION_LABELS = {
-            "Forecast review": "01 Forecast review",
-            "Model investigation": "02 Model investigation",
-            "CV window player": "03 CV window player",
-            "Prediction intervals": "04 Prediction intervals",
-            "Model audit": "05 Model audit",
-            "Seasonality": "06 Seasonality",
-            "Hierarchy": "07 Hierarchy",
-            "Assumptions & Drivers": "08 Assumptions & Drivers",
-            "Forecast ledger": "09 Forecast ledger",
-            "Feeder outputs": "10 Feeder outputs",
-        }
         SECTION_DESCRIPTIONS = {
             "Forecast review": "Fast default view: champion, trust, and selected forecast context.",
-            "Model investigation": "Drill into the models selected in the sidebar.",
+            "Model investigation": "Drill into selected models and Pareto tradeoffs.",
             "CV window player": "Step through rolling-origin windows without rendering other sections.",
             "Prediction intervals": "Review uncertainty bands and calibration evidence.",
             "Model audit": "Inspect leaderboard, weights, residuals, and interval diagnostics.",
@@ -462,7 +472,7 @@ def build_streamlit_app() -> str:
 
 
         def artifact_path(name: str) -> Path | None:
-            for path in (RUN_DIR / name, RUN_DIR / "audit" / name):
+            for path in (RUN_DIR / name, RUN_DIR / "appendix" / name, RUN_DIR / "audit" / name):
                 if path.exists():
                     return path
             return None
@@ -588,6 +598,14 @@ def build_streamlit_app() -> str:
             return "".join(ch.lower() if ch.isalnum() else "_" for ch in section).strip("_")
 
 
+        def visible_section_label(section: str) -> str:
+            try:
+                position = DASHBOARD_SECTIONS.index(section) + 1
+            except ValueError:
+                return section
+            return f"{position:02d} {section}"
+
+
         def render_workbench_section_nav() -> str:
             current = st.session_state.get("active_workbench_section", DASHBOARD_SECTIONS[0])
             if current not in DASHBOARD_SECTIONS:
@@ -605,7 +623,7 @@ def build_streamlit_app() -> str:
             st.caption("Bold fast tabs instead of hidden pages; switch sections without rendering every heavy diagnostic.")
             for section in DASHBOARD_SECTIONS:
                 clicked = st.button(
-                    SECTION_LABELS.get(section, section),
+                    visible_section_label(section),
                     key=f"workbench_tab_{section_key(section)}",
                     type="primary" if section == current else "secondary",
                     use_container_width=True,
@@ -1885,38 +1903,277 @@ def build_streamlit_app() -> str:
             return sorted(meta.loc[child_mask, "unique_id"].astype(str).tolist())
 
 
+        def hierarchy_node_frame(frame: pd.DataFrame, node_id: str) -> pd.DataFrame:
+            if frame.empty or "unique_id" not in frame.columns:
+                return pd.DataFrame()
+            out = frame[frame["unique_id"].astype(str) == str(node_id)].copy()
+            if "ds" in out.columns:
+                out["ds"] = pd.to_datetime(out["ds"], errors="coerce")
+            return out.sort_values("ds")
+
+
+        def add_forecast_interval_band(fig: go.Figure, frame: pd.DataFrame, *, row: int, col: int, color: str, legendgroup: str) -> None:
+            for level, alpha in [(95, 0.08), (80, 0.15)]:
+                lo_col, hi_col = f"yhat_lo_{level}", f"yhat_hi_{level}"
+                if lo_col not in frame.columns or hi_col not in frame.columns:
+                    continue
+                bounds = frame[["ds", lo_col, hi_col]].copy()
+                bounds[lo_col] = pd.to_numeric(bounds[lo_col], errors="coerce")
+                bounds[hi_col] = pd.to_numeric(bounds[hi_col], errors="coerce")
+                bounds = bounds.dropna(subset=["ds", lo_col, hi_col])
+                if bounds.empty:
+                    continue
+                fig.add_trace(
+                    go.Scatter(
+                        x=bounds["ds"],
+                        y=bounds[hi_col],
+                        mode="lines",
+                        line=dict(width=0),
+                        showlegend=False,
+                        hoverinfo="skip",
+                        legendgroup=legendgroup,
+                    ),
+                    row=row,
+                    col=col,
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=bounds["ds"],
+                        y=bounds[lo_col],
+                        fill="tonexty",
+                        fillcolor=color_to_rgba(color, alpha),
+                        mode="lines",
+                        line=dict(width=0),
+                        name=f"{level}% interval",
+                        showlegend=False,
+                        hoverinfo="skip",
+                        legendgroup=legendgroup,
+                    ),
+                    row=row,
+                    col=col,
+                )
+
+
         def hierarchy_rollup_chart(parent_id: str) -> go.Figure:
-            fig = go.Figure()
+            fig = make_subplots(
+                rows=2,
+                cols=1,
+                shared_xaxes=True,
+                vertical_spacing=0.12,
+                row_heights=[0.62, 0.38],
+                subplot_titles=(f"{parent_id}: actuals and selected forecast", "Immediate-child rollup check"),
+            )
+            parent_history = hierarchy_node_frame(history, parent_id)
+            parent_forecast = hierarchy_node_frame(forecast, parent_id)
+            if not parent_history.empty:
+                fig.add_trace(
+                    go.Scatter(
+                        x=parent_history["ds"],
+                        y=pd.to_numeric(parent_history["y"], errors="coerce"),
+                        name="Parent history",
+                        line=dict(color=C["hist"], width=2.6),
+                        mode="lines",
+                    ),
+                    row=1,
+                    col=1,
+                )
+            if not parent_forecast.empty:
+                add_forecast_interval_band(fig, parent_forecast, row=1, col=1, color=C["champ"], legendgroup="parent")
+                fig.add_trace(
+                    go.Scatter(
+                        x=parent_forecast["ds"],
+                        y=pd.to_numeric(parent_forecast["yhat"], errors="coerce"),
+                        name="Parent forecast",
+                        line=dict(color=C["champ"], width=3.2),
+                        mode="lines+markers",
+                        marker=dict(size=5),
+                    ),
+                    row=1,
+                    col=1,
+                )
+            if not parent_history.empty and not parent_forecast.empty:
+                cutoff = parent_history["ds"].max()
+                fig.add_shape(
+                    type="line",
+                    x0=cutoff,
+                    x1=cutoff,
+                    y0=0,
+                    y1=1,
+                    xref="x",
+                    yref="paper",
+                    line=dict(color="#808891", width=1, dash="dash"),
+                )
+                fig.add_annotation(x=cutoff, y=1.02, yref="paper", text="forecast starts", showarrow=False, font=dict(size=10, color="#64748b"))
             if not hierarchy_coherence.empty and "parent_unique_id" in hierarchy_coherence.columns:
                 c = hierarchy_coherence[hierarchy_coherence["parent_unique_id"].astype(str) == parent_id].sort_values("ds")
                 if not c.empty:
-                    fig.add_trace(go.Scatter(x=c["ds"], y=pd.to_numeric(c["parent_value"], errors="coerce"), name="Parent selected forecast", line=dict(color=C["champ"], width=3)))
-                    fig.add_trace(go.Scatter(x=c["ds"], y=pd.to_numeric(c["child_sum"], errors="coerce"), name="Immediate child sum", line=dict(color=C["hist"], width=2.5, dash="dash")))
-                    fig.add_trace(go.Bar(x=c["ds"], y=pd.to_numeric(c["gap"], errors="coerce"), name="Parent minus children gap", marker_color="rgba(98,81,143,0.35)", yaxis="y2"))
-                    fig.update_layout(yaxis2=dict(title="gap", overlaying="y", side="right", showgrid=False))
-            fig.update_layout(height=430, margin=dict(l=45, r=70, t=30, b=45), hovermode="x unified", yaxis_title="forecast value")
+                    fig.add_trace(
+                        go.Scatter(
+                            x=c["ds"],
+                            y=pd.to_numeric(c["parent_value"], errors="coerce"),
+                            name="Parent forecast value",
+                            line=dict(color=C["champ"], width=2.4),
+                        ),
+                        row=2,
+                        col=1,
+                    )
+                    fig.add_trace(
+                        go.Scatter(
+                            x=c["ds"],
+                            y=pd.to_numeric(c["child_sum"], errors="coerce"),
+                            name="Immediate child sum",
+                            line=dict(color=C["hist"], width=2.4, dash="dash"),
+                        ),
+                        row=2,
+                        col=1,
+                    )
+                    gap = pd.to_numeric(c["gap"], errors="coerce")
+                    if gap.abs().max(skipna=True) > 1e-9:
+                        fig.add_trace(
+                            go.Bar(
+                                x=c["ds"],
+                                y=gap,
+                                name="Parent minus children gap",
+                                marker_color="rgba(98,81,143,0.28)",
+                            ),
+                            row=2,
+                            col=1,
+                        )
+            fig.update_layout(
+                height=620,
+                margin=dict(l=55, r=35, t=70, b=45),
+                hovermode="x unified",
+                legend=dict(orientation="h", y=-0.16),
+                plot_bgcolor="#fbfdff",
+                paper_bgcolor="#ffffff",
+            )
+            fig.update_yaxes(title_text="parent value", row=1, col=1)
+            fig.update_yaxes(title_text="forecast coherence", row=2, col=1)
             return fig
 
 
         def hierarchy_children_chart(parent_id: str) -> go.Figure:
             fig = go.Figure()
             child_ids = hierarchy_children(parent_id)
-            parent = forecast[forecast["unique_id"].astype(str) == parent_id].sort_values("ds")
-            if not parent.empty:
-                fig.add_trace(go.Scatter(x=parent["ds"], y=pd.to_numeric(parent["yhat"], errors="coerce"), name=f"{parent_id} parent", line=dict(color=C["champ"], width=3)))
+            parent_history = hierarchy_node_frame(history, parent_id)
+            parent_forecast = hierarchy_node_frame(forecast, parent_id)
+            if not parent_history.empty:
+                fig.add_trace(
+                    go.Scatter(
+                        x=parent_history["ds"],
+                        y=pd.to_numeric(parent_history["y"], errors="coerce"),
+                        name=f"{parent_id} history",
+                        line=dict(color=C["hist"], width=2.6),
+                    )
+                )
+            if not parent_forecast.empty:
+                fig.add_trace(
+                    go.Scatter(
+                        x=parent_forecast["ds"],
+                        y=pd.to_numeric(parent_forecast["yhat"], errors="coerce"),
+                        name=f"{parent_id} forecast",
+                        line=dict(color=C["champ"], width=3.2),
+                        mode="lines+markers",
+                    )
+                )
+            palette = [C["alt1"], C["alt2"], C["alt3"], "#3b82f6", "#dc2626", "#0f766e", "#7c3aed", "#ca8a04"]
             for idx, child_id in enumerate(child_ids):
-                child = forecast[forecast["unique_id"].astype(str) == child_id].sort_values("ds")
+                color = palette[idx % len(palette)]
+                child_history = hierarchy_node_frame(history, child_id)
+                child = hierarchy_node_frame(forecast, child_id)
+                if not child_history.empty:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=child_history["ds"],
+                            y=pd.to_numeric(child_history["y"], errors="coerce"),
+                            name=f"{child_id} history",
+                            line=dict(color=color, width=1.8),
+                            opacity=0.72,
+                        )
+                    )
                 if child.empty:
                     continue
                 fig.add_trace(
                     go.Scatter(
                         x=child["ds"],
                         y=pd.to_numeric(child["yhat"], errors="coerce"),
-                        name=child_id,
-                        line=dict(color=ALT_COLORS[idx % len(ALT_COLORS)], width=2, dash="dot"),
+                        name=f"{child_id} forecast",
+                        line=dict(color=color, width=2.4, dash="dash"),
+                        mode="lines+markers",
+                        marker=dict(size=4),
                     )
                 )
-            fig.update_layout(height=430, margin=dict(l=45, r=160, t=30, b=45), hovermode="x unified", yaxis_title="selected forecast")
+            if not parent_history.empty:
+                cutoff = parent_history["ds"].max()
+                fig.add_shape(
+                    type="line",
+                    x0=cutoff,
+                    x1=cutoff,
+                    y0=0,
+                    y1=1,
+                    xref="x",
+                    yref="paper",
+                    line=dict(color="#808891", width=1, dash="dash"),
+                )
+            fig.update_layout(
+                height=max(480, 300 + 38 * len(child_ids)),
+                margin=dict(l=55, r=170, t=35, b=45),
+                hovermode="x unified",
+                legend=dict(orientation="v", x=1.02, y=1),
+                plot_bgcolor="#fbfdff",
+                paper_bgcolor="#ffffff",
+                yaxis_title="historical + forecast value",
+            )
+            return fig
+
+
+        def hierarchy_method_comparison_chart(parent_id: str) -> go.Figure:
+            fig = go.Figure()
+            if hierarchy_reconciliation_comparison.empty or "reconciliation_method" not in hierarchy_reconciliation_comparison.columns:
+                return fig
+            node_ids = [parent_id, *hierarchy_children(parent_id)]
+            frame = hierarchy_reconciliation_comparison[
+                hierarchy_reconciliation_comparison["unique_id"].astype(str).isin(node_ids)
+                & hierarchy_reconciliation_comparison["value_col"].astype(str).eq("yhat")
+            ].copy()
+            if frame.empty:
+                return fig
+            frame["ds"] = pd.to_datetime(frame["ds"], errors="coerce")
+            frame["reconciled_value"] = pd.to_numeric(frame["reconciled_value"], errors="coerce")
+            method_palette = {"bottom_up": C["champ"], "top_down": C["alt2"]}
+            for method in sorted(frame["reconciliation_method"].astype(str).unique()):
+                method_frame = frame[frame["reconciliation_method"].astype(str) == method]
+                parent = method_frame[method_frame["unique_id"].astype(str) == parent_id].sort_values("ds")
+                if not parent.empty:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=parent["ds"],
+                            y=parent["reconciled_value"],
+                            name=f"{method} parent",
+                            line=dict(color=method_palette.get(method, C["dim"]), width=3),
+                            mode="lines+markers",
+                        )
+                    )
+                children = method_frame[method_frame["unique_id"].astype(str).isin(hierarchy_children(parent_id))]
+                if not children.empty:
+                    summed = children.groupby("ds", as_index=False)["reconciled_value"].sum()
+                    fig.add_trace(
+                        go.Scatter(
+                            x=summed["ds"],
+                            y=summed["reconciled_value"],
+                            name=f"{method} child sum",
+                            line=dict(color=method_palette.get(method, C["dim"]), width=2, dash="dash"),
+                        )
+                    )
+            fig.update_layout(
+                height=420,
+                margin=dict(l=55, r=40, t=35, b=45),
+                hovermode="x unified",
+                legend=dict(orientation="h", y=-0.18),
+                yaxis_title="reconciled yhat",
+                plot_bgcolor="#fbfdff",
+                paper_bgcolor="#ffffff",
+            )
             return fig
 
 
@@ -1968,6 +2225,65 @@ def build_streamlit_app() -> str:
                 )
             )
             fig.update_layout(height=max(320, 26 * len(frame)), margin=dict(l=170, r=30, t=25, b=35), xaxis_title="win rate vs benchmark", xaxis_tickformat=".0%")
+            return fig
+
+
+        def pareto_tradeoff_chart(uid: str) -> go.Figure:
+            fig = go.Figure()
+            if model_pareto_frontier.empty or not {"unique_id", "model", "rmse", "mae"}.issubset(model_pareto_frontier.columns):
+                return fig
+            frame = model_pareto_frontier[model_pareto_frontier["unique_id"].astype(str) == uid].copy()
+            if frame.empty:
+                return fig
+            frame["rmse"] = pd.to_numeric(frame["rmse"], errors="coerce")
+            frame["mae"] = pd.to_numeric(frame["mae"], errors="coerce")
+            frame = frame.dropna(subset=["rmse", "mae"])
+            if frame.empty:
+                return fig
+            if "is_pareto_optimal" in frame.columns:
+                frame["is_pareto_optimal"] = frame["is_pareto_optimal"].astype(str).str.lower().isin(["true", "1", "yes"])
+            else:
+                frame["is_pareto_optimal"] = False
+            if "is_selected_model" in frame.columns:
+                frame["is_selected_model"] = frame["is_selected_model"].astype(str).str.lower().isin(["true", "1", "yes"])
+            else:
+                frame["is_selected_model"] = False
+            frame["marker_group"] = np.select(
+                [frame["is_selected_model"], frame["is_pareto_optimal"]],
+                ["Selected model", "Pareto alternative"],
+                default="Dominated challenger",
+            )
+            colors = {
+                "Selected model": C["champ"],
+                "Pareto alternative": C["alt2"],
+                "Dominated challenger": C["dim"],
+            }
+            for group_name, group_frame in frame.groupby("marker_group", sort=False):
+                fig.add_trace(
+                    go.Scatter(
+                        x=group_frame["rmse"],
+                        y=group_frame["mae"],
+                        mode="markers+text" if group_name != "Dominated challenger" else "markers",
+                        text=group_frame["model"].astype(str) if group_name != "Dominated challenger" else None,
+                        textposition="top center",
+                        marker=dict(
+                            color=colors.get(group_name, C["dim"]),
+                            size=13 if group_name == "Selected model" else (11 if group_name == "Pareto alternative" else 8),
+                            opacity=0.95 if group_name != "Dominated challenger" else 0.45,
+                            line=dict(color="#ffffff", width=1),
+                        ),
+                        name=group_name,
+                        customdata=group_frame[[col for col in ["model", "selection_alignment", "metrics_considered", "mae", "wape", "mase", "rmsse"] if col in group_frame.columns]],
+                        hovertemplate="%{customdata[0]}<br>RMSE=%{x:.4g}<br>MAE=%{y:.4g}<br>alignment=%{customdata[1]}<br>metrics=%{customdata[2]}<extra></extra>",
+                    )
+                )
+            fig.update_layout(
+                height=420,
+                margin=dict(l=70, r=30, t=25, b=55),
+                xaxis_title="RMSE (lower is better)",
+                yaxis_title="MAE (lower is better)",
+                legend_title="Tradeoff status",
+            )
             return fig
 
 
@@ -2931,6 +3247,8 @@ def build_streamlit_app() -> str:
         series_summary = read_csv("series_summary.csv")
         model_audit = read_csv("model_audit.csv")
         model_win_rates = read_csv("model_win_rates.csv")
+        model_tradeoff_scores = read_csv("model_tradeoff_scores.csv")
+        model_pareto_frontier = read_csv("model_pareto_frontier.csv")
         model_window_metrics = prep_dates(read_csv("model_window_metrics.csv"))
         residual_diagnostics = read_csv("residual_diagnostics.csv")
         residual_tests = read_csv("residual_tests.csv")
@@ -2944,13 +3262,18 @@ def build_streamlit_app() -> str:
         hierarchy_reconciliation = read_csv("hierarchy_reconciliation.csv")
         hierarchy_coherence_pre = prep_dates(read_csv("hierarchy_coherence_pre.csv"))
         hierarchy_coherence_post = prep_dates(read_csv("hierarchy_coherence_post.csv"))
+        hierarchy_rollup = prep_dates(read_csv("hierarchy_rollup.csv"))
         hierarchy_contribution = prep_dates(read_csv("hierarchy_contribution.csv"))
+        hierarchy_reconciliation_comparison = prep_dates(read_csv("hierarchy_reconciliation_comparison.csv"))
         hierarchy_backtest_comparison = prep_dates(read_csv("hierarchy_backtest_comparison.csv"))
         scenario_assumptions = read_csv("scenario_assumptions.csv")
         scenario_forecast = prep_dates(read_csv("scenario_forecast.csv"))
         known_future_regressors = read_csv("known_future_regressors.csv")
         driver_availability_audit = read_csv("driver_availability_audit.csv")
+        driver_model_features = read_csv("driver_model_features.csv")
+        driver_model_cv_delta = read_csv("driver_model_cv_delta.csv")
         driver_experiment_summary = read_csv("driver_experiment_summary.csv")
+        feature_selection_receipts = read_csv("feature_selection_receipts.csv")
         artifact_load_seconds = time.perf_counter() - artifact_load_started
         artifact_row_count = sum(
             len(frame)
@@ -2967,6 +3290,9 @@ def build_streamlit_app() -> str:
                 series_summary,
                 model_audit,
                 model_win_rates,
+                model_tradeoff_scores,
+                model_pareto_frontier,
+                feature_selection_receipts,
                 model_window_metrics,
                 residual_diagnostics,
                 residual_tests,
@@ -2980,12 +3306,16 @@ def build_streamlit_app() -> str:
                 hierarchy_reconciliation,
                 hierarchy_coherence_pre,
                 hierarchy_coherence_post,
+                hierarchy_rollup,
                 hierarchy_contribution,
+                hierarchy_reconciliation_comparison,
                 hierarchy_backtest_comparison,
                 scenario_assumptions,
                 scenario_forecast,
                 known_future_regressors,
                 driver_availability_audit,
+                driver_model_features,
+                driver_model_cv_delta,
                 driver_experiment_summary,
             ]
         )
@@ -3178,6 +3508,31 @@ def build_streamlit_app() -> str:
             inv_cols[3].metric("Available candidates", len(model_options))
             if not investigation.empty:
                 st.dataframe(investigation, width="stretch", hide_index=True)
+            st.subheader("Model tradeoffs / Pareto frontier")
+            st.caption("Pareto highlights non-dominated models across complete backtest metrics for analyst review. It does not override the official selected model or `forecast.csv`.")
+            if not model_pareto_frontier.empty:
+                st.plotly_chart(pareto_tradeoff_chart(uid), width="stretch", key="pareto_tradeoff_chart")
+                pareto_view = model_pareto_frontier[model_pareto_frontier["unique_id"].astype(str) == uid].copy()
+                pareto_cols = [
+                    col
+                    for col in [
+                        "model",
+                        "is_pareto_optimal",
+                        "selection_alignment",
+                        "metrics_considered",
+                        "excluded_metrics",
+                        "rmse",
+                        "mae",
+                        "wape",
+                        "mase",
+                        "rmsse",
+                        "abs_bias",
+                    ]
+                    if col in pareto_view.columns
+                ]
+                st.dataframe(pareto_view[pareto_cols].head(1000), width="stretch", hide_index=True)
+            else:
+                st.info("No Pareto frontier rows are available. Runs without backtest metrics produce an empty schema for this review lens.")
             st.subheader("Focused future forecast")
             focused_interval_models = [model for model in dedupe_models(focus_models) if selected_interval_levels(uid, model)]
             if focused_interval_models:
@@ -3510,6 +3865,12 @@ def build_streamlit_app() -> str:
                     st.dataframe(explainability_view.sort_values(["model", "importance"], ascending=[True, False]), width="stretch", hide_index=True)
             else:
                 st.info("No MLForecast feature importance available. Use model policy auto/all with enough history and installed MLForecast/LightGBM dependencies.")
+            st.subheader("Feature selection receipts")
+            st.caption("Descriptive evidence only: these receipts explain feature inclusion and model-reported importance, but they do not auto-prune features or override backtest selection.")
+            if not feature_selection_receipts.empty:
+                st.dataframe(feature_selection_receipts, width="stretch", hide_index=True)
+            else:
+                st.info("No feature-selection receipt rows were produced for this run.")
 
         if active_section == "Seasonality":
             st.subheader("Seasonality credibility")
@@ -3606,9 +3967,11 @@ def build_streamlit_app() -> str:
             if "hierarchy_depth" not in forecast.columns:
                 st.info("Hierarchy metadata is not present in this run. Use the `hierarchy` command before forecasting to enable roll-up/down diagnostics.")
             else:
-                st.subheader("Hierarchy roll-up / roll-down")
+                st.subheader("Hierarchy forecast structure")
+                st.caption("This view now puts the hierarchy in the same frame as the forecast: historical parent/child paths first, then the selected future path and coherence audit. Use `--hierarchy-reconciliation both` to save bottom-up and top-down paths side by side.")
                 if not hierarchy_reconciliation.empty:
-                    st.success("Hierarchy reconciliation is enabled. Parent/child forecasts are coherent after the applied reconciliation method; unreconciled forecasts and pre/post gap audits are saved under audit/.")
+                    methods = sorted(hierarchy_reconciliation.get("applied_method", pd.Series(dtype=str)).astype(str).dropna().unique())
+                    st.success(f"Hierarchy reconciliation is enabled. Applied method(s): {', '.join(methods) or 'recorded in table'}. Unreconciled forecasts and pre/post gap audits are saved under audit/.")
                     st.dataframe(hierarchy_reconciliation, width="stretch", hide_index=True)
                 else:
                     st.caption("Current forecasts are independent per node unless reconciliation is enabled. This view compares selected parent forecasts with the sum of their immediate children.")
@@ -3623,8 +3986,26 @@ def build_streamlit_app() -> str:
                 parent_options = hierarchy_parent_options()
                 if parent_options:
                     parent_id = st.selectbox("Parent node", parent_options)
+                    st.subheader("Parent history + forecast")
                     st.plotly_chart(hierarchy_rollup_chart(parent_id), width="stretch", key="hierarchy_rollup_plot")
+                    if not hierarchy_rollup.empty and "parent_unique_id" in hierarchy_rollup.columns:
+                        st.subheader("Hierarchy roll-up output")
+                        rollup_view = hierarchy_rollup[hierarchy_rollup["parent_unique_id"].astype(str) == parent_id].copy()
+                        st.caption("This is the appendix/hierarchy_rollup.csv slice for the selected parent: history and selected forecast beside immediate-child sums and child coverage.")
+                        st.dataframe(rollup_view.head(1000), width="stretch", hide_index=True)
+                    st.subheader("Children history + forecast")
                     st.plotly_chart(hierarchy_children_chart(parent_id), width="stretch", key="hierarchy_children_plot")
+                    if not hierarchy_reconciliation_comparison.empty:
+                        st.subheader("Bottom-up vs top-down method comparison")
+                        st.caption("This appears when the run was produced with `--hierarchy-reconciliation both`. Bottom-up is the primary output by default; top-down is saved as a comparison path for sparse/noisy children.")
+                        st.plotly_chart(hierarchy_method_comparison_chart(parent_id), width="stretch", key="hierarchy_method_comparison_plot")
+                        st.dataframe(
+                            hierarchy_reconciliation_comparison[
+                                hierarchy_reconciliation_comparison["unique_id"].astype(str).isin([parent_id, *hierarchy_children(parent_id)])
+                            ].head(1000),
+                            width="stretch",
+                            hide_index=True,
+                        )
                     if not hierarchy_contribution.empty and "parent_unique_id" in hierarchy_contribution.columns:
                         st.subheader("Child contribution to selected parent")
                         contribution_view = hierarchy_contribution[hierarchy_contribution["parent_unique_id"].astype(str) == parent_id].copy()
@@ -3664,12 +4045,14 @@ def build_streamlit_app() -> str:
 
         if active_section == "Assumptions & Drivers":
             st.subheader("Assumptions & Drivers")
-            st.caption("Scenario/event overlays are post-model assumptions: baseline `yhat` stays separate from `yhat_scenario`. Known-future regressors are audited for leakage and future availability; this release does not automatically train arbitrary external regressors.")
+            st.caption("Scenario/event overlays are post-model assumptions: baseline `yhat` stays separate from `yhat_scenario`. Known-future regressors are audited for leakage and future availability; MLForecast trains them only when opt-in training is enabled and the feature gate passes.")
             if (
                 scenario_assumptions.empty
                 and scenario_forecast.empty
                 and known_future_regressors.empty
                 and driver_availability_audit.empty
+                and driver_model_features.empty
+                and driver_model_cv_delta.empty
                 and driver_experiment_summary.empty
             ):
                 st.info("No scenario assumptions or known-future regressors were declared for this run.")
@@ -3699,6 +4082,12 @@ def build_streamlit_app() -> str:
                     st.dataframe(distribution, width="stretch", hide_index=True)
                 st.subheader("Driver availability audit")
                 st.dataframe(driver_availability_audit, width="stretch", hide_index=True)
+            if not driver_model_features.empty:
+                st.subheader("MLForecast driver feature gate")
+                st.dataframe(driver_model_features, width="stretch", hide_index=True)
+            if not driver_model_cv_delta.empty:
+                st.subheader("Driver model CV evidence")
+                st.dataframe(driver_model_cv_delta, width="stretch", hide_index=True)
             if not driver_experiment_summary.empty:
                 st.subheader("Driver experiment summary")
                 st.dataframe(driver_experiment_summary, width="stretch", hide_index=True)
@@ -3873,30 +4262,33 @@ def build_streamlit_app() -> str:
             st.subheader("Consolidated feeder files")
             st.markdown(
                 """
-                - `forecast_long.csv`: future predictions in long format for every model.
-                - `backtest_long.csv`: rolling-origin predictions in long format with actuals, errors, interval bounds, and coverage flags.
-                - `series_summary.csv`: one row per series for analyst review and model feeds.
-                - `model_audit.csv`: leaderboard enriched with weights and selected flags.
-                - `model_win_rates.csv`: cross-series win rates against SeasonalNaive/Naive benchmarks.
-                - `model_window_metrics.csv`, `residual_diagnostics.csv`, `residual_tests.csv`, `interval_diagnostics.csv`: practitioner diagnostics for CV, residual health, and interval calibration. Residual tests are heuristic screening, not formal adequacy certification.
-                - `trust_summary.csv`: High/Medium/Low per-series readiness with caveats and next actions.
+                - `appendix/forecast_long.csv`: future predictions in long format for every model.
+                - `appendix/backtest_long.csv`: rolling-origin predictions in long format with actuals, errors, interval bounds, and coverage flags.
+                - `appendix/series_summary.csv`: one row per series for analyst review and model feeds.
+                - `appendix/model_audit.csv`: leaderboard enriched with weights and selected flags.
+                - `appendix/model_win_rates.csv`: cross-series win rates against SeasonalNaive/Naive benchmarks.
+                - `appendix/model_tradeoff_scores.csv`, `appendix/model_pareto_frontier.csv`: RMSE/MAE/WAPE/MASE/RMSSE/absolute-bias tradeoff scores and non-dominated Pareto alternatives for review only; official forecasts still come from `forecast.csv`.
+                - `appendix/feature_selection_receipts.csv`: descriptive feature evidence for MLForecast lag/date/rolling/driver features; it never auto-prunes or overrides selection.
+                - `appendix/model_window_metrics.csv`, `appendix/residual_diagnostics.csv`, `appendix/residual_tests.csv`, `appendix/interval_diagnostics.csv`: practitioner diagnostics for CV, residual health, and interval calibration. Residual tests are heuristic screening, not formal adequacy certification.
+                - `appendix/trust_summary.csv`: High/Medium/Low per-series readiness with caveats and next actions.
                 - `scenario_assumptions.csv`, `scenario_forecast.csv`: event/scenario overlay assumptions and baseline-versus-scenario forecast rows.
-                - `known_future_regressors.csv`, `driver_availability_audit.csv`, `driver_experiment_summary.csv`: declared known-future driver contracts, leakage/future-availability audit, and next-step summary. External regressors are audited, not auto-trained, in this release.
+                - `known_future_regressors.csv`, `driver_availability_audit.csv`, `driver_model_features.csv`, `driver_model_cv_delta.csv`, `driver_experiment_summary.csv`: declared known-future driver contracts, leakage/future-availability audit, opt-in MLForecast feature gate, CV evidence, and next-step summary.
                 - `audit/target_transform_audit.csv`: raw, adjusted, transformed, and modeled target trail for finance normalization/log transforms.
                 - `audit/seasonality_diagnostics.csv`, `audit/seasonality_decomposition.csv`: cycle counts, credibility labels, and additive decomposition evidence.
-                - `model_explainability.csv`: MLForecast/sklearn/LightGBM lag and date feature importance or coefficient magnitude when ML models run.
+                - `appendix/model_explainability.csv`: MLForecast/sklearn/LightGBM lag and date feature importance or coefficient magnitude when ML models run.
                 - `llm_context.json`: fat LLM handoff packet with the executive headline, trust/horizon/interval/residual/seasonality/hierarchy/driver context, artifact index, guardrails, and recommended questions.
                 - `manifest.json`: includes `model_policy_resolution`, showing which requested families were eligible, ran, or were skipped.
-                - `hierarchy_coherence.csv`: parent forecast versus immediate-child sum when hierarchy metadata exists.
-                - `hierarchy_contribution.csv`: parent/child contribution and gap attribution for hierarchy storytelling; allocation heuristic, not reconciliation output.
-                - `hierarchy_reconciliation.csv`, `audit/hierarchy_backtest_comparison.csv`, `audit/hierarchy_unreconciled_forecast.csv`, `audit/hierarchy_coherence_pre.csv`, `audit/hierarchy_coherence_post.csv`: method summary, selected backtest accuracy comparison, and pre/post coherence audits when reconciliation is enabled. Reconciliation enforces coherence and may worsen node-level accuracy.
+                - `appendix/hierarchy_rollup.csv`: parent-level history and selected-forecast rollups beside immediate-child sums and child coverage when hierarchy metadata exists.
+                - `appendix/hierarchy_coherence.csv`: parent forecast versus immediate-child sum when hierarchy metadata exists.
+                - `appendix/hierarchy_contribution.csv`: parent/child contribution and gap attribution for hierarchy storytelling; allocation heuristic, not reconciliation output.
+                - `appendix/hierarchy_reconciliation.csv`, `appendix/hierarchy_reconciliation_comparison.csv`, `audit/hierarchy_backtest_comparison.csv`, `audit/hierarchy_unreconciled_forecast.csv`, `audit/hierarchy_coherence_pre.csv`, `audit/hierarchy_coherence_post.csv`: method summary, optional bottom-up/top-down comparison, selected backtest accuracy comparison, and pre/post coherence audits when reconciliation is enabled. Reconciliation enforces coherence and may worsen node-level accuracy.
                 - `ledger_context.json`: optional pointer to a forecast ledger with version snapshots, official locks, landed actuals, selected-lock deltas, and adjustment-audit exports for Power BI folder ingestion.
                 """
             )
-            st.subheader("forecast_long.csv")
+            st.subheader("appendix/forecast_long.csv")
             st.caption("Model feed columns keep `yhat`, `yhat_lo_80`, `yhat_hi_80`, `yhat_lo_95`, and `yhat_hi_95` adjacent so point forecasts and interval levels can be read together.")
             st.dataframe(forecast_long[ordered_model_feed_columns(forecast_long)].head(1000), width="stretch", hide_index=True)
-            st.subheader("backtest_long.csv")
+            st.subheader("appendix/backtest_long.csv")
             st.dataframe(backtest_long[ordered_model_feed_columns(backtest_long)].head(1000), width="stretch", hide_index=True)
         '''
     ).strip() + "\n"
@@ -4306,8 +4698,12 @@ def _backtest_svg(payload: dict[str, Any], series_id: str, cutoff: Any) -> str:
 def _payload_from_run(run: ForecastRun) -> dict[str, Any]:
     from nixtla_scaffold.outputs import (
         build_forecast_long,
+        build_feature_selection_receipts,
         build_hierarchy_backtest_comparison,
         build_hierarchy_contribution_frame,
+        build_hierarchy_rollup_frame,
+        build_model_pareto_frontier,
+        build_model_tradeoff_scores,
         build_residual_test_summary,
         build_selected_forecast,
         build_trust_summary,
@@ -4333,6 +4729,9 @@ def _payload_from_run(run: ForecastRun) -> dict[str, Any]:
         "model_selection": _records(run.model_selection),
         "backtest_metrics": _records(run.backtest_metrics),
         "model_win_rates": _model_win_rates_from_metrics(run.backtest_metrics),
+        "model_tradeoff_scores": _records(build_model_tradeoff_scores(run)),
+        "model_pareto_frontier": _records(build_model_pareto_frontier(run)),
+        "feature_selection_receipts": _records(build_feature_selection_receipts(run)),
         "residual_tests": _records(build_residual_test_summary(run)),
         "trust_summary": _records(build_trust_summary(run)),
         "target_transform_audit": _records(run.transformation_audit),
@@ -4340,6 +4739,8 @@ def _payload_from_run(run: ForecastRun) -> dict[str, Any]:
         "scenario_forecast": _records(build_scenario_forecast_frame(selected_forecast)),
         "known_future_regressors": _records(build_known_future_regressors_frame(run.spec.regressors)),
         "driver_availability_audit": _records(run.driver_availability_audit),
+        "driver_model_features": _records(run.driver_model_features),
+        "driver_model_cv_delta": _records(run.driver_model_cv_delta),
         "driver_experiment_summary": _records(build_driver_experiment_summary_frame(run)),
         "backtest_predictions": _records(run.backtest_predictions),
         "backtest_windows": _records(backtest_windows_frame(run)),
@@ -4348,6 +4749,8 @@ def _payload_from_run(run: ForecastRun) -> dict[str, Any]:
         "seasonality_diagnostics": _records(seasonality_diagnostics_frame(run)),
         "seasonality_decomposition": _records(seasonality_decomposition_frame(run)),
         "hierarchy_reconciliation": _records(run.hierarchy_reconciliation),
+        "hierarchy_reconciliation_comparison": _records(run.hierarchy_reconciliation_comparison),
+        "hierarchy_rollup": _records(build_hierarchy_rollup_frame(run)),
         "hierarchy_contribution": _records(build_hierarchy_contribution_frame(run)),
         "hierarchy_backtest_comparison": _records(build_hierarchy_backtest_comparison(run)),
         "model_policy_resolution": run.model_policy_resolution,
@@ -4375,13 +4778,16 @@ def _payload_from_directory(run_dir: Path) -> dict[str, Any]:
             "series_count": profile.get("series_count", "unknown"),
             "horizon": spec.get("horizon", "unknown"),
         },
-        "history": _read_csv_records(run_dir / "history.csv"),
+        "history": _read_artifact_records(run_dir, "history.csv"),
         "forecast": forecast,
         "forecast_long": _read_artifact_records(run_dir, "forecast_long.csv"),
         "all_models": _read_artifact_records(run_dir, "all_models.csv"),
         "model_selection": _read_artifact_records(run_dir, "model_selection.csv"),
         "backtest_metrics": _read_artifact_records(run_dir, "backtest_metrics.csv"),
         "model_win_rates": _read_artifact_records(run_dir, "model_win_rates.csv"),
+        "model_tradeoff_scores": _read_artifact_records(run_dir, "model_tradeoff_scores.csv"),
+        "model_pareto_frontier": _read_artifact_records(run_dir, "model_pareto_frontier.csv"),
+        "feature_selection_receipts": _read_artifact_records(run_dir, "feature_selection_receipts.csv"),
         "residual_tests": _read_artifact_records(run_dir, "residual_tests.csv"),
         "trust_summary": _read_artifact_records(run_dir, "trust_summary.csv"),
         "target_transform_audit": _read_artifact_records(run_dir, "target_transform_audit.csv"),
@@ -4389,6 +4795,8 @@ def _payload_from_directory(run_dir: Path) -> dict[str, Any]:
         "scenario_forecast": _read_artifact_records(run_dir, "scenario_forecast.csv"),
         "known_future_regressors": _read_artifact_records(run_dir, "known_future_regressors.csv"),
         "driver_availability_audit": _read_artifact_records(run_dir, "driver_availability_audit.csv"),
+        "driver_model_features": _read_artifact_records(run_dir, "driver_model_features.csv"),
+        "driver_model_cv_delta": _read_artifact_records(run_dir, "driver_model_cv_delta.csv"),
         "driver_experiment_summary": _read_artifact_records(run_dir, "driver_experiment_summary.csv"),
         "backtest_predictions": _read_artifact_records(run_dir, "backtest_predictions.csv"),
         "backtest_windows": _read_artifact_records(run_dir, "backtest_windows.csv"),
@@ -4397,6 +4805,8 @@ def _payload_from_directory(run_dir: Path) -> dict[str, Any]:
         "seasonality_diagnostics": _read_artifact_records(run_dir, "seasonality_diagnostics.csv"),
         "seasonality_decomposition": _read_artifact_records(run_dir, "seasonality_decomposition.csv"),
         "hierarchy_reconciliation": _read_artifact_records(run_dir, "hierarchy_reconciliation.csv"),
+        "hierarchy_reconciliation_comparison": _read_artifact_records(run_dir, "hierarchy_reconciliation_comparison.csv"),
+        "hierarchy_rollup": _read_artifact_records(run_dir, "hierarchy_rollup.csv"),
         "hierarchy_contribution": _read_artifact_records(run_dir, "hierarchy_contribution.csv"),
         "hierarchy_backtest_comparison": _read_artifact_records(run_dir, "hierarchy_backtest_comparison.csv"),
         "model_policy_resolution": manifest.get("model_policy_resolution", {}),
@@ -4583,6 +4993,76 @@ def _model_win_rates_from_metrics(metrics: pd.DataFrame) -> list[dict[str, Any]]
     return _records(frame)
 
 
+def _pareto_tradeoff_chart_html(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return '<p class="footnote">No Pareto frontier rows are available for this run.</p>'
+    frame = pd.DataFrame(rows)
+    required = {"unique_id", "model", "rmse", "mae", "is_pareto_optimal", "is_selected_model"}
+    if not required.issubset(frame.columns):
+        return '<p class="footnote">Pareto frontier rows are missing the columns needed for the RMSE vs MAE chart.</p>'
+    frame["rmse"] = pd.to_numeric(frame["rmse"], errors="coerce")
+    frame["mae"] = pd.to_numeric(frame["mae"], errors="coerce")
+    frame = frame.dropna(subset=["rmse", "mae"])
+    if frame.empty:
+        return '<p class="footnote">Pareto frontier rows do not include numeric RMSE and MAE values.</p>'
+    uids = sorted(frame["unique_id"].astype(str).unique())
+    uid = uids[0]
+    one = frame[frame["unique_id"].astype(str) == uid].copy().head(32)
+    x_min, x_max = float(one["rmse"].min()), float(one["rmse"].max())
+    y_min, y_max = float(one["mae"].min()), float(one["mae"].max())
+    x_span = x_max - x_min if x_max != x_min else 1.0
+    y_span = y_max - y_min if y_max != y_min else 1.0
+    x_min -= x_span * 0.08
+    x_max += x_span * 0.08
+    y_min = max(0.0, y_min - y_span * 0.08)
+    y_max += y_span * 0.08
+    x_span = x_max - x_min if x_max != x_min else 1.0
+    y_span = y_max - y_min if y_max != y_min else 1.0
+    width, height = 900, 330
+    left, top, right, bottom = 70, 24, 190, 52
+    plot_w, plot_h = width - left - right, height - top - bottom
+
+    def xy(rmse: float, mae: float) -> tuple[float, float]:
+        return left + ((rmse - x_min) / x_span) * plot_w, top + (1 - (mae - y_min) / y_span) * plot_h
+
+    parts = [
+        '<div class="chart-block" style="margin:12px 0">',
+        f'<div class="chart-head"><strong>{_esc(uid)} - RMSE vs MAE</strong><span>selected model and non-dominated alternatives highlighted</span></div>',
+        f'<svg viewBox="0 0 {width} {height}" style="width:100%;display:block">',
+        f'<rect width="{width}" height="{height}" fill="#fff"/>',
+    ]
+    for j in range(5):
+        y = top + j * plot_h / 4
+        label = _fmt(y_max - j * y_span / 4)
+        parts.append(f'<line x1="{left}" x2="{width - right}" y1="{y:.1f}" y2="{y:.1f}" stroke="#edf0f4"/>')
+        parts.append(f'<text x="8" y="{y + 4:.1f}" fill="#6b7480" font-size="11">{_esc(label)}</text>')
+    for j in range(5):
+        x = left + j * plot_w / 4
+        label = _fmt(x_min + j * x_span / 4)
+        parts.append(f'<line x1="{x:.1f}" x2="{x:.1f}" y1="{top}" y2="{top + plot_h}" stroke="#f3f5f8"/>')
+        parts.append(f'<text x="{x - 14:.1f}" y="{height - 18}" fill="#6b7480" font-size="11">{_esc(label)}</text>')
+    parts.append(f'<text x="{left + plot_w / 2:.1f}" y="{height - 4}" fill="#59636e" font-size="12" text-anchor="middle">RMSE</text>')
+    parts.append(f'<text x="18" y="{top + plot_h / 2:.1f}" fill="#59636e" font-size="12" transform="rotate(-90 18 {top + plot_h / 2:.1f})" text-anchor="middle">MAE</text>')
+    for row in one.to_dict("records"):
+        x, y = xy(float(row["rmse"]), float(row["mae"]))
+        is_selected = _truthy(row.get("is_selected_model"))
+        is_pareto = _truthy(row.get("is_pareto_optimal"))
+        color = "#b65f32" if is_selected else ("#62518f" if is_pareto else "#b9c0c9")
+        radius = 7 if is_selected else (6 if is_pareto else 4)
+        opacity = "0.95" if (is_selected or is_pareto) else "0.42"
+        label = str(row.get("model") or "")
+        parts.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{radius}" fill="{color}" opacity="{opacity}"><title>{_esc(label)} | RMSE={_fmt(float(row["rmse"]))} | MAE={_fmt(float(row["mae"]))}</title></circle>')
+        if is_selected or is_pareto:
+            parts.append(f'<text x="{x + 9:.1f}" y="{y + 4:.1f}" fill="#17202a" font-size="11">{_esc(label[:28])}</text>')
+    parts.append(f'<text x="{width - right + 18}" y="{top + 20}" fill="#b65f32" font-size="12">selected</text>')
+    parts.append(f'<text x="{width - right + 18}" y="{top + 42}" fill="#62518f" font-size="12">Pareto alternative</text>')
+    parts.append(f'<text x="{width - right + 18}" y="{top + 64}" fill="#8f98a3" font-size="12">dominated challenger</text>')
+    if len(uids) > 1:
+        parts.append(f'<text x="{width - right + 18}" y="{top + 92}" fill="#59636e" font-size="11">Showing {_esc(uid)} of {len(uids)} series.</text>')
+    parts.extend(["</svg>", "</div>"])
+    return "\n".join(parts)
+
+
 def _model_columns_from_records(records: list[dict[str, Any]]) -> list[str]:
     excluded = {"unique_id", "ds", "cutoff", "y"}
     cols: list[str] = []
@@ -4666,7 +5146,7 @@ def _limitations(summary: dict[str, Any], warnings: list[str]) -> str:
         "<li>Validate the trajectory against plan, budget, prior year, and domain-owner expectations.</li>"
         "<li>Add known future events with --event when the history cannot know about launches, pricing changes, or contract movements.</li>"
         "<li>Search for regressors only when future values are known and leakage checks pass.</li>"
-        "<li>Use forecast_long.csv and backtest_long.csv as model feeds; use granular files only for audit/debug.</li>"
+        "<li>Use appendix/forecast_long.csv and appendix/backtest_long.csv as model feeds; use granular files only for audit/debug.</li>"
         "</ol>"
     )
     return f'<ul class="warn">{items}</ul><h3 style="margin-top:14px">Action plan</h3>{actions}'
@@ -4690,7 +5170,7 @@ def _trust_summary_cards(rows: list[dict[str, Any]], *, limit: int) -> str:
         return '<p class="footnote">No trust summary rows available.</p>'
     visible = rows[:limit]
     cards = "".join(_trust_summary_card(row) for row in visible)
-    suffix = '<p class="footnote">Use <code>trust_summary.csv</code> for the raw wide table; this report renders one readable decision card per series.</p>'
+    suffix = '<p class="footnote">Use <code>appendix/trust_summary.csv</code> for the raw wide table; this report renders one readable decision card per series.</p>'
     if len(rows) > limit:
         suffix += f'<p class="footnote">Showing {limit} of {len(rows)} series. Use the CSV artifacts for the full set.</p>'
     return f'<div class="decision-grid">{cards}</div>{suffix}'
@@ -4797,20 +5277,26 @@ def _driver_assumptions_section(
     scenario_forecast: list[dict[str, Any]],
     known_future_regressors: list[dict[str, Any]],
     driver_availability_audit: list[dict[str, Any]],
+    driver_model_features: list[dict[str, Any]],
+    driver_model_cv_delta: list[dict[str, Any]],
     driver_experiment_summary: list[dict[str, Any]],
+    feature_selection_receipts: list[dict[str, Any]],
 ) -> str:
     if not (
         scenario_assumptions
         or scenario_forecast
         or known_future_regressors
         or driver_availability_audit
+        or driver_model_features
+        or driver_model_cv_delta
         or driver_experiment_summary
+        or feature_selection_receipts
     ):
         return ""
     return f"""
     <section class="panel" style="margin-bottom:14px">
       <h2>Assumptions and drivers</h2>
-      <p class="footnote">Scenario events are post-model overlays: baseline <code>yhat</code> remains separate from <code>yhat_scenario</code>. Known-future regressors are audited for leakage and future availability, but this release does not automatically train arbitrary external regressors; current MLForecast candidates use lag/date features.</p>
+      <p class="footnote">Scenario events are post-model overlays: baseline <code>yhat</code> remains separate from <code>yhat_scenario</code>. Known-future regressors are audited for leakage and future availability; MLForecast uses them only when opt-in training is enabled and the feature gate passes.</p>
       <h3>Driver experiment summary</h3>
       {_table(driver_experiment_summary, ["driver_type", "name", "mode", "availability", "audit_status", "modeling_decision", "affected_or_required_rows", "next_step"], limit=16)}
       <h3 style="margin-top:14px">Scenario assumptions</h3>
@@ -4821,6 +5307,12 @@ def _driver_assumptions_section(
       {_table(known_future_regressors, ["name", "value_col", "availability", "mode", "future_file", "source_system", "owner", "contract_status"], limit=16)}
       <h3 style="margin-top:14px">Driver availability audit</h3>
       {_table(driver_availability_audit, ["name", "audit_status", "modeling_decision", "leakage_risk", "required_future_rows", "missing_future_rows", "known_as_of_violations", "audit_message"], limit=16)}
+      <h3 style="margin-top:14px">MLForecast driver feature gate</h3>
+      {_table(driver_model_features, ["name", "value_col", "status", "modeling_decision", "reason", "required_future_rows", "missing_future_rows"], limit=16)}
+      <h3 style="margin-top:14px">Driver model CV evidence</h3>
+      {_table(driver_model_cv_delta, ["unique_id", "model", "feature_columns", "driver_rmse", "driver_mae", "driver_wape", "comparison_status"], limit=16)}
+      <h3 style="margin-top:14px">Feature selection receipts</h3>
+      {_table(feature_selection_receipts, ["feature", "feature_role", "models_reporting_importance", "availability_status", "cv_evidence_status", "final_decision", "notes"], limit=16)}
     </section>
     """
 
@@ -4879,14 +5371,20 @@ def _ledger_section(ledger: dict[str, Any]) -> str:
 
 
 def _hierarchy_depth_section(
+    hierarchy_rollup: list[dict[str, Any]],
     hierarchy_contribution: list[dict[str, Any]],
     hierarchy_backtest_comparison: list[dict[str, Any]],
+    hierarchy_reconciliation_comparison: list[dict[str, Any]],
 ) -> str:
-    if not hierarchy_contribution and not hierarchy_backtest_comparison:
+    if not hierarchy_rollup and not hierarchy_contribution and not hierarchy_backtest_comparison and not hierarchy_reconciliation_comparison:
         return ""
     return f"""
       <h2 style="margin-top:18px">Hierarchy depth review</h2>
-      <p class="footnote">Use these before stakeholder planning: contribution rows show which children drive parent totals/gaps; backtest comparison shows whether reconciliation improves coherence at the cost of historical accuracy.</p>
+      <p class="footnote">Use these before stakeholder planning: roll-up rows show parent history/forecast beside immediate-child sums and child coverage; contribution rows show which children drive parent totals/gaps; backtest comparison shows whether reconciliation improves coherence at the cost of historical accuracy.</p>
+      <h3>Hierarchy roll-up preview</h3>
+      {_table(hierarchy_rollup, ["record_type", "value_col", "parent_unique_id", "ds", "parent_value", "immediate_child_sum", "gap", "gap_pct", "observed_child_count", "structural_child_count", "coverage_status"], limit=16)}
+      <h3>Bottom-up vs top-down comparison preview</h3>
+      {_table(hierarchy_reconciliation_comparison, ["reconciliation_method", "comparison_role", "value_col", "unique_id", "ds", "hierarchy_level", "reconciled_value"], limit=16)}
       <h3>Hierarchy contribution preview</h3>
       {_table(hierarchy_contribution, ["value_col", "parent_unique_id", "child_unique_id", "ds", "child_value", "child_share_of_parent", "parent_child_gap", "gap_pct"], limit=16)}
       <h3 style="margin-top:14px">Reconciled vs unreconciled backtest preview</h3>
@@ -4971,7 +5469,7 @@ def _read_csv_records(path: Path) -> list[dict[str, Any]]:
 
 
 def _read_artifact_records(run_dir: Path, name: str) -> list[dict[str, Any]]:
-    for path in (run_dir / name, run_dir / "audit" / name):
+    for path in (run_dir / name, run_dir / "appendix" / name, run_dir / "audit" / name):
         if path.exists():
             return _records(pd.read_csv(path))
     return []

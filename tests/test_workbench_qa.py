@@ -42,9 +42,9 @@ def test_workbench_qa_generates_golden_runs_and_summary(tmp_path) -> None:
     perf_frame = pd.read_csv(tmp_path / "qa" / "workbench_perf_summary.csv")
     assert {"scenario", "performance_status", "streamlit_app_bytes", "csv_artifact_rows"}.issubset(perf_frame.columns)
     assert (tmp_path / "qa" / "workbench_perf_summary.json").exists()
-    assert (tmp_path / "qa" / "hierarchy_reconciled" / "hierarchy_reconciliation.csv").exists()
+    assert (tmp_path / "qa" / "hierarchy_reconciled" / "appendix" / "hierarchy_reconciliation.csv").exists()
     assert (tmp_path / "qa" / "normalized_target_forecast" / "audit" / "target_transform_audit.csv").exists()
-    assert (tmp_path / "qa" / "custom_model_challenger" / "custom_model_contracts.csv").exists()
+    assert (tmp_path / "qa" / "custom_model_challenger" / "appendix" / "custom_model_contracts.csv").exists()
     assert (tmp_path / "qa" / "custom_model_challenger" / "audit" / "custom_model_invocations.csv").exists()
 
 

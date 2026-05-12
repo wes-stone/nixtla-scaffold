@@ -143,7 +143,7 @@ def load_scaffold_forecast_for_comparison(run_dir: str | Path, *, scaffold_model
             raise FileNotFoundError(path)
         frame = pd.read_csv(path)
     else:
-        path = run_path / "forecast_long.csv"
+        path = _run_artifact_path(run_path, "forecast_long.csv")
         if not path.exists():
             raise FileNotFoundError(path)
         frame = pd.read_csv(path)
@@ -180,6 +180,13 @@ def load_scaffold_forecast_for_comparison(run_dir: str | Path, *, scaffold_model
         "interval_status",
     ]
     return out[[column for column in keep if column in out.columns]].sort_values(["unique_id", "ds"]).reset_index(drop=True)
+
+
+def _run_artifact_path(run_dir: Path, name: str) -> Path:
+    for path in (run_dir / name, run_dir / "appendix" / name, run_dir / "audit" / name):
+        if path.exists():
+            return path
+    return run_dir / name
 
 
 def build_forecast_comparison(
@@ -314,7 +321,7 @@ def build_forecast_comparison_manifest(
         "comparison_scope": "directional_unscored",
         "inputs": {
             "scaffold_run_dir": str(Path(run_dir)),
-            "scaffold_forecast_file": "forecast.csv" if scaffold_model is None else "forecast_long.csv",
+            "scaffold_forecast_file": "forecast.csv" if scaffold_model is None else "appendix/forecast_long.csv",
             "scaffold_model": scaffold_model or "selected",
             "scaffold_forecast_origin": forecast_origin.date().isoformat() if forecast_origin is not None else None,
             "scaffold_forecast_origin_status": _forecast_origin_status(comparison, forecast_origin),

@@ -25,7 +25,7 @@ from nixtla_scaffold.external_scoring import (
 )
 from nixtla_scaffold.forecast import run_forecast
 from nixtla_scaffold.headline import ExecutiveHeadline, build_executive_headline
-from nixtla_scaffold.hierarchy import aggregate_hierarchy_frame, hierarchy_coherence, hierarchy_summary, reconcile_hierarchy_forecast
+from nixtla_scaffold.hierarchy import aggregate_hierarchy_frame, hierarchy_coherence, hierarchy_summary, reconcile_hierarchy_forecast, reconcile_hierarchy_forecast_both
 from nixtla_scaffold.knowledge import load_agent_skill
 from nixtla_scaffold.ledger import (
     DEFAULT_LEDGER_PATH,
@@ -44,7 +44,7 @@ from nixtla_scaffold.profile import profile_dataset
 from nixtla_scaffold.release_gates import OPTIONAL_EXTRAS, ReleaseGateResult, format_release_gate_console_summary, run_release_gates
 from nixtla_scaffold.reports import build_html_report, build_streamlit_app, write_report_artifacts
 from nixtla_scaffold.scenario_lab import run_scenario_lab
-from nixtla_scaffold.schema import CustomModelSpec, DataProfile, DriverEvent, ForecastRun, ForecastSpec, KnownFutureRegressor, SeriesProfile, TransformSpec
+from nixtla_scaffold.schema import CustomModelSpec, DataProfile, DriverEvent, ForecastRun, ForecastSpec, KnownFutureRegressor, SeriesProfile, TransformSpec, forecast_spec_from_dict
 from nixtla_scaffold.setup import SetupAnswers, create_forecast_setup, setup_questions
 from nixtla_scaffold.transformations import add_fiscal_calendar, apply_event_adjustments, label_anomalies, normalize_by_factor
 from nixtla_scaffold.workbench_qa import GOLDEN_SCENARIOS, SCENARIO_ALIASES, SCENARIO_DESCRIPTIONS, WORKBENCH_QA_SCENARIOS, run_workbench_qa
@@ -88,6 +88,7 @@ __all__ = [
     "compare_forecasts",
     "create_forecast_setup",
     "forecast_spec_preset",
+    "forecast_spec_from_dict",
     "forecast_with_custom_model",
     "format_release_gate_console_summary",
     "hierarchy_coherence",
@@ -105,6 +106,7 @@ __all__ = [
     "profile_dataset",
     "preset_catalog",
     "reconcile_hierarchy_forecast",
+    "reconcile_hierarchy_forecast_both",
     "register_run",
     "run_forecast",
     "run_release_gates",

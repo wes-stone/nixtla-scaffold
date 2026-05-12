@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import json
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -96,6 +97,27 @@ DRIVER_EXPERIMENT_SUMMARY_COLUMNS = [
     "next_step",
 ]
 
+DRIVER_MODEL_FEATURE_COLUMNS = [
+    "name",
+    "value_col",
+    "feature_columns",
+    "feature_role",
+    "status",
+    "modeling_decision",
+    "reason",
+    "safe_lags",
+    "historical_rows",
+    "historical_non_null_rows",
+    "training_non_null_min_rows",
+    "future_file",
+    "future_rows",
+    "required_future_rows",
+    "missing_future_rows",
+    "known_as_of_violations",
+    "source_system",
+    "owner",
+]
+
 _TARGET_LEAKAGE_NAMES = {
     "y",
     "target",
@@ -107,6 +129,15 @@ _TARGET_LEAKAGE_NAMES = {
     "realized",
     "reported_actual",
 }
+
+
+@dataclass(frozen=True)
+class DriverFeatureBundle:
+    historical: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=["unique_id", "ds"]))
+    future: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=["unique_id", "ds"]))
+    audit: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=DRIVER_MODEL_FEATURE_COLUMNS))
+    feature_columns: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
 
 
 def parse_driver_events(
@@ -210,6 +241,154 @@ def build_known_future_regressors_frame(regressors: Sequence[KnownFutureRegresso
     return pd.DataFrame(rows, columns=KNOWN_FUTURE_REGRESSOR_COLUMNS)
 
 
+def prepare_mlforecast_regressor_features(
+    history: pd.DataFrame,
+    spec: ForecastSpec,
+    *,
+    freq: str,
+    horizon: int,
+    season_length: int,
+    min_training_rows: int,
+    forecast_origin: str | pd.Timestamp | None,
+) -> DriverFeatureBundle:
+    """Build MLForecast dynamic feature frames from audit-passing known-future regressors."""
+
+    if not spec.regressors or not spec.train_known_future_regressors:
+        return DriverFeatureBundle()
+
+    requirements = _future_grid_from_history(history, freq=freq, horizon=horizon)
+    origin = pd.Timestamp(forecast_origin) if forecast_origin is not None else _max_timestamp(history.get("ds"))
+    historical = history[["unique_id", "ds"]].copy()
+    future = requirements.copy()
+    rows: list[dict[str, Any]] = []
+    warnings_out: list[str] = []
+    included_cols: list[str] = []
+    used_value_cols: set[str] = set()
+
+    for regressor in spec.regressors:
+        value_col = _regressor_value_col(regressor)
+        future_frame, future_error = _load_future_frame(regressor.future_file)
+        future_cols = set(future_frame.columns) if future_frame is not None else set()
+        source_cols = set(history.columns) | future_cols
+        historical_values = pd.to_numeric(history[value_col], errors="coerce") if value_col in history.columns else pd.Series(dtype="float64")
+        coverage = (
+            _historical_only_coverage()
+            if regressor.availability == "historical_only"
+            else _future_coverage(
+                future_frame,
+                requirements,
+                value_col=value_col,
+                known_as_of_col=regressor.known_as_of_col,
+                forecast_origin=origin,
+            )
+        )
+        failures = _regressor_contract_failures(
+            regressor,
+            value_col=value_col,
+            source_cols=source_cols,
+            future_cols=future_cols,
+            future_error=future_error,
+            coverage=coverage,
+        )
+        feature_role = "historical_only_lag_regressor" if regressor.availability == "historical_only" else "dynamic_known_future_regressor"
+        status = "excluded"
+        modeling_decision = "excluded_from_mlforecast"
+        reason = "; ".join(failures)
+        feature_columns: list[str] = []
+        safe_lags: list[int] = []
+        training_non_null_min_rows = 0
+
+        if regressor.mode != "model_candidate":
+            reason = "regressor mode is audit_only; not a model feature"
+            modeling_decision = "audit_only_not_trained"
+        elif not failures and value_col not in history.columns:
+            reason = f"value_col '{value_col}' is absent from repaired history"
+        elif not failures and historical_values.isna().any():
+            reason = f"value_col '{value_col}' has {int(historical_values.isna().sum())} missing or non-numeric historical row(s)"
+        elif not failures and regressor.availability == "historical_only":
+            lag_result = _historical_only_lag_features(
+                history,
+                requirements,
+                value_col=value_col,
+                horizon=horizon,
+                season_length=season_length,
+                min_training_rows=min_training_rows,
+            )
+            if lag_result["included"]:
+                status = "included"
+                modeling_decision = "included_mlforecast_historical_lag_candidate"
+                reason = lag_result["reason"]
+                feature_columns = list(lag_result["feature_columns"])
+                safe_lags = list(lag_result["safe_lags"])
+                training_non_null_min_rows = int(lag_result["training_non_null_min_rows"])
+                for column in feature_columns:
+                    historical[column] = lag_result["historical"][column].to_numpy(dtype="float64")
+                    future[column] = lag_result["future"][column].to_numpy(dtype="float64")
+                included_cols.extend(column for column in feature_columns if column not in included_cols)
+            else:
+                reason = lag_result["reason"]
+                training_non_null_min_rows = int(lag_result["training_non_null_min_rows"])
+        elif not failures:
+            future_values = _future_values_for_requirements(
+                future_frame,
+                requirements,
+                value_col=value_col,
+            )
+            missing_future = int(pd.to_numeric(future_values[value_col], errors="coerce").isna().sum())
+            if missing_future:
+                reason = f"value_col '{value_col}' has {missing_future} missing or non-numeric future row(s)"
+            else:
+                status = "included"
+                modeling_decision = "included_mlforecast_model_candidate"
+                reason = "passed leakage, known-as-of, historical, and future-value checks"
+                if value_col not in used_value_cols:
+                    historical[value_col] = historical_values.astype("float64").to_numpy()
+                    future[value_col] = pd.to_numeric(future_values[value_col], errors="coerce").astype("float64").to_numpy()
+                    used_value_cols.add(value_col)
+                    included_cols.append(value_col)
+                    feature_columns = [value_col]
+                    training_non_null_min_rows = int(
+                        historical.groupby("unique_id")[value_col].apply(lambda values: pd.to_numeric(values, errors="coerce").notna().sum()).min()
+                    )
+
+        if status != "included" and regressor.mode == "model_candidate":
+            warnings_out.append(f"external regressor '{regressor.name}' excluded from MLForecast training: {reason}")
+
+        rows.append(
+            {
+                "name": regressor.name,
+                "value_col": value_col,
+                "feature_columns": "; ".join(feature_columns),
+                "feature_role": feature_role,
+                "status": status,
+                "modeling_decision": modeling_decision,
+                "reason": reason,
+                "safe_lags": "; ".join(str(lag) for lag in safe_lags),
+                "historical_rows": int(len(history)) if value_col in history.columns else 0,
+                "historical_non_null_rows": int(historical_values.notna().sum()) if value_col in history.columns else 0,
+                "training_non_null_min_rows": training_non_null_min_rows,
+                "future_file": regressor.future_file or "",
+                "future_rows": coverage["future_rows"],
+                "required_future_rows": coverage["required_future_rows"],
+                "missing_future_rows": coverage["missing_future_rows"],
+                "known_as_of_violations": coverage["known_as_of_violations"],
+                "source_system": regressor.source_system,
+                "owner": regressor.owner,
+            }
+        )
+
+    if not included_cols:
+        warnings_out.append("train_known_future_regressors=True, but no declared regressor passed the MLForecast feature gate")
+
+    return DriverFeatureBundle(
+        historical=historical[["unique_id", "ds", *included_cols]].copy() if included_cols else pd.DataFrame(columns=["unique_id", "ds"]),
+        future=future[["unique_id", "ds", *included_cols]].copy() if included_cols else pd.DataFrame(columns=["unique_id", "ds"]),
+        audit=pd.DataFrame(rows, columns=DRIVER_MODEL_FEATURE_COLUMNS),
+        feature_columns=tuple(included_cols),
+        warnings=tuple(dict.fromkeys(warnings_out)),
+    )
+
+
 def audit_known_future_regressors(
     dataset: pd.DataFrame,
     forecast: pd.DataFrame,
@@ -228,9 +407,15 @@ def audit_known_future_regressors(
 
     origin = pd.Timestamp(forecast_origin) if forecast_origin is not None else _max_timestamp(dataset.get("ds"))
     requirements = _future_requirements(forecast)
-    warnings: list[str] = [
-        "known-future regressors were declared and audited, but arbitrary external regressors are not automatically trained yet; current models use lag/date features only"
-    ]
+    warnings: list[str] = []
+    if spec.train_known_future_regressors:
+        warnings.append(
+            "known-future regressor training was requested; only MLForecast model_candidate rows that pass the feature gate can enter modeling"
+        )
+    else:
+        warnings.append(
+            "known-future regressors were declared and audited, but arbitrary external regressors are not automatically trained unless train_known_future_regressors=True; current models use lag/date features only"
+        )
     rows: list[dict[str, Any]] = []
     for regressor in spec.regressors:
         value_col = _regressor_value_col(regressor)
@@ -240,49 +425,35 @@ def audit_known_future_regressors(
         historical_rows = int(len(dataset)) if value_col in dataset.columns else 0
         historical_non_null = int(pd.to_numeric(dataset[value_col], errors="coerce").notna().sum()) if value_col in dataset.columns else 0
 
-        coverage = _future_coverage(
-            future_frame,
-            requirements,
-            value_col=value_col,
-            known_as_of_col=regressor.known_as_of_col,
-            forecast_origin=origin,
+        coverage = (
+            _historical_only_coverage()
+            if regressor.availability == "historical_only"
+            else _future_coverage(
+                future_frame,
+                requirements,
+                value_col=value_col,
+                known_as_of_col=regressor.known_as_of_col,
+                forecast_origin=origin,
+            )
         )
         failures: list[str] = []
         cautions: list[str] = []
         leakage_risk = _leakage_risk(regressor.name, value_col)
 
-        if leakage_risk != "none":
-            failures.append(f"value column/name looks like target leakage ({leakage_risk})")
-        if regressor.availability == "historical_only" and regressor.mode == "model_candidate":
-            failures.append("historical_only regressors cannot be model candidates because future values are not known")
-        if regressor.availability != "calendar" and value_col not in source_cols:
-            failures.append(f"value_col '{value_col}' is absent from history and future_file")
-        if (
-            regressor.mode == "model_candidate"
-            and regressor.availability != "calendar"
-            and future_frame is not None
-            and not future_frame.empty
-            and regressor.known_as_of_col not in future_cols
-        ):
-            failures.append(f"future_file missing known_as_of_col '{regressor.known_as_of_col}' for model_candidate timing audit")
-        if future_error:
-            if regressor.mode == "model_candidate":
-                failures.append(future_error)
-            else:
-                cautions.append(future_error)
-        if regressor.mode == "model_candidate" and regressor.availability != "calendar":
-            if coverage["required_future_rows"] and coverage["missing_future_rows"]:
-                failures.append(
-                    f"future values missing for {coverage['missing_future_rows']} of {coverage['required_future_rows']} required forecast rows"
-                )
-            if not coverage["required_future_rows"]:
-                failures.append("no forecast horizon rows were available for future-value validation")
-        elif regressor.mode == "audit_only" and regressor.availability != "calendar" and coverage["required_future_rows"] and coverage["missing_future_rows"]:
-            cautions.append("future values are incomplete; retained as audit-only context")
-        if coverage["known_as_of_violations"]:
-            failures.append(
-                f"{coverage['known_as_of_violations']} future row(s) have {regressor.known_as_of_col} after the forecast origin"
+        failures.extend(
+            _regressor_contract_failures(
+                regressor,
+                value_col=value_col,
+                source_cols=source_cols,
+                future_cols=future_cols,
+                future_error=future_error,
+                coverage=coverage,
             )
+        )
+        if future_error and regressor.mode == "audit_only":
+            cautions.append(future_error)
+        if regressor.mode == "audit_only" and regressor.availability != "calendar" and coverage["required_future_rows"] and coverage["missing_future_rows"]:
+            cautions.append("future values are incomplete; retained as audit-only context")
 
         if failures:
             audit_status = "failed"
@@ -294,16 +465,32 @@ def audit_known_future_regressors(
             message = "; ".join(cautions)
         else:
             audit_status = "passed"
-            modeling_decision = "audit_only_context" if regressor.mode == "audit_only" else "candidate_audited_not_trained"
+            if regressor.mode == "audit_only":
+                modeling_decision = "audit_only_context"
+            elif spec.train_known_future_regressors and regressor.availability == "historical_only":
+                modeling_decision = "candidate_passed_for_historical_lag_training"
+            elif spec.train_known_future_regressors:
+                modeling_decision = "candidate_passed_for_opt_in_training"
+            else:
+                modeling_decision = "candidate_audited_not_trained"
             message = "future availability/leakage contract passed"
 
         if regressor.mode == "model_candidate":
             if failures:
                 warnings.append(f"known-future regressor '{regressor.name}' blocked for modeling: {message}")
             else:
-                warnings.append(
-                    f"known-future regressor '{regressor.name}' passed availability audit but is not automatically trained in this release"
-                )
+                if spec.train_known_future_regressors and regressor.availability == "historical_only":
+                    warnings.append(
+                        f"historical-only regressor '{regressor.name}' passed audit and may enter MLForecast as safe lag features if the feature gate includes it"
+                    )
+                elif spec.train_known_future_regressors:
+                    warnings.append(
+                        f"known-future regressor '{regressor.name}' passed availability audit and may be used by MLForecast if the feature gate includes it"
+                    )
+                else:
+                    warnings.append(
+                        f"known-future regressor '{regressor.name}' passed availability audit but is not automatically trained unless train_known_future_regressors=True"
+                    )
 
         rows.append(
             {
@@ -354,6 +541,14 @@ def build_driver_experiment_summary_frame(run: ForecastRun) -> pd.DataFrame:
         )
     if not run.driver_availability_audit.empty:
         for row in run.driver_availability_audit.to_dict("records"):
+            next_step = (
+                "Review appendix/driver_model_features.csv and appendix/model_explainability.csv to confirm which audited drivers entered MLForecast."
+                if row.get("modeling_decision") == "candidate_passed_for_opt_in_training"
+                else (
+                    "Treat as audited context until exogenous modeling is explicitly enabled; "
+                    "rolling-origin driver experiments must beat the lag/calendar baseline before production use."
+                )
+            )
             rows.append(
                 {
                     "driver_type": "known_future_regressor",
@@ -364,13 +559,248 @@ def build_driver_experiment_summary_frame(run: ForecastRun) -> pd.DataFrame:
                     "modeling_decision": row.get("modeling_decision"),
                     "affected_or_required_rows": row.get("required_future_rows"),
                     "evidence": row.get("audit_message"),
-                    "next_step": (
-                        "Treat as audited context until exogenous modeling is explicitly enabled; "
-                        "rolling-origin driver experiments must beat the lag/calendar baseline before production use."
-                    ),
+                    "next_step": next_step,
+                }
+            )
+    driver_model_features = getattr(run, "driver_model_features", pd.DataFrame())
+    if not driver_model_features.empty:
+        for row in driver_model_features.to_dict("records"):
+            rows.append(
+                {
+                    "driver_type": "mlforecast_feature",
+                    "name": row.get("name"),
+                    "mode": "model_candidate",
+                    "availability": row.get("feature_role"),
+                    "audit_status": row.get("status"),
+                    "modeling_decision": row.get("modeling_decision"),
+                    "affected_or_required_rows": row.get("required_future_rows"),
+                    "evidence": row.get("reason"),
+                    "next_step": "Compare appendix/model_explainability.csv, appendix/driver_model_cv_delta.csv, and appendix/model_audit.csv before trusting driver-enhanced candidates.",
                 }
             )
     return pd.DataFrame(rows, columns=DRIVER_EXPERIMENT_SUMMARY_COLUMNS)
+
+
+def _future_grid_from_history(history: pd.DataFrame, *, freq: str, horizon: int) -> pd.DataFrame:
+    rows: list[pd.DataFrame] = []
+    for uid, grp in history.groupby("unique_id", sort=True):
+        last_date = pd.to_datetime(grp["ds"], errors="coerce").max()
+        if pd.isna(last_date):
+            continue
+        dates = pd.date_range(start=pd.Timestamp(last_date), periods=horizon + 1, freq=freq)[1:]
+        rows.append(pd.DataFrame({"unique_id": str(uid), "ds": dates}))
+    if not rows:
+        return pd.DataFrame(columns=["unique_id", "ds"])
+    return pd.concat(rows, ignore_index=True).sort_values(["unique_id", "ds"]).reset_index(drop=True)
+
+
+def _historical_only_coverage() -> dict[str, Any]:
+    return {
+        "future_scope": "not_required_historical_only",
+        "future_rows": 0,
+        "required_future_rows": 0,
+        "missing_future_rows": 0,
+        "missing_future_dates": "",
+        "known_as_of_violations": 0,
+    }
+
+
+def _historical_only_lag_features(
+    history: pd.DataFrame,
+    requirements: pd.DataFrame,
+    *,
+    value_col: str,
+    horizon: int,
+    season_length: int,
+    min_training_rows: int,
+) -> dict[str, Any]:
+    lags = _candidate_historical_regressor_lags(horizon=horizon, season_length=season_length)
+    if not lags:
+        return _historical_lag_result(False, reason="no safe historical-only lags are available for the requested horizon")
+
+    base = history[["unique_id", "ds", value_col]].copy()
+    base["unique_id"] = base["unique_id"].astype(str)
+    base["ds"] = pd.to_datetime(base["ds"], errors="coerce")
+    base[value_col] = pd.to_numeric(base[value_col], errors="coerce")
+    base = base.dropna(subset=["ds"]).sort_values(["unique_id", "ds"]).reset_index(drop=True)
+    future = requirements[["unique_id", "ds"]].copy()
+    future["unique_id"] = future["unique_id"].astype(str)
+    future["ds"] = pd.to_datetime(future["ds"], errors="coerce")
+    feature_base = _normalize_name(value_col)
+
+    included_columns: list[str] = []
+    included_lags: list[int] = []
+    historical_features = history[["unique_id", "ds"]].copy()
+    future_features = requirements[["unique_id", "ds"]].copy()
+    rejected: list[str] = []
+    best_training_rows = 0
+
+    for lag in lags:
+        column = f"{feature_base}_lag_{lag}"
+        lagged_history = _lag_history_feature(base, value_col=value_col, column=column, lag=lag)
+        lagged_future = _lag_future_feature(base, future, value_col=value_col, column=column, lag=lag)
+        training_counts = lagged_history.groupby("unique_id", sort=True)[column].apply(lambda values: pd.to_numeric(values, errors="coerce").notna().sum())
+        min_non_null = int(training_counts.min()) if not training_counts.empty else 0
+        best_training_rows = max(best_training_rows, min_non_null)
+        missing_future = int(pd.to_numeric(lagged_future[column], errors="coerce").isna().sum()) if column in lagged_future.columns else len(future)
+        if missing_future:
+            rejected.append(f"lag {lag} has {missing_future} missing future feature row(s)")
+            continue
+        if min_non_null < min_training_rows:
+            rejected.append(f"lag {lag} leaves only {min_non_null} non-null training row(s) per series; need at least {min_training_rows}")
+            continue
+        historical_features = historical_features.merge(lagged_history[["unique_id", "ds", column]], on=["unique_id", "ds"], how="left")
+        future_features = future_features.merge(lagged_future[["unique_id", "ds", column]], on=["unique_id", "ds"], how="left")
+        included_columns.append(column)
+        included_lags.append(lag)
+
+    if not included_columns:
+        reason = "; ".join(rejected) if rejected else "no historical-only lag candidates passed the safety gate"
+        return _historical_lag_result(False, reason=reason, training_non_null_min_rows=best_training_rows)
+
+    reason = (
+        "included safe historical-only lag feature(s) "
+        f"{', '.join(included_columns)}; every future row uses source values known at the forecast origin"
+    )
+    return _historical_lag_result(
+        True,
+        reason=reason,
+        feature_columns=tuple(included_columns),
+        safe_lags=tuple(included_lags),
+        training_non_null_min_rows=min(
+            int(
+                historical_features.groupby("unique_id", sort=True)[column]
+                .apply(lambda values: pd.to_numeric(values, errors="coerce").notna().sum())
+                .min()
+            )
+            for column in included_columns
+        ),
+        historical=historical_features,
+        future=future_features,
+    )
+
+
+def _historical_lag_result(
+    included: bool,
+    *,
+    reason: str,
+    feature_columns: tuple[str, ...] = (),
+    safe_lags: tuple[int, ...] = (),
+    training_non_null_min_rows: int = 0,
+    historical: pd.DataFrame | None = None,
+    future: pd.DataFrame | None = None,
+) -> dict[str, Any]:
+    return {
+        "included": included,
+        "reason": reason,
+        "feature_columns": feature_columns,
+        "safe_lags": safe_lags,
+        "training_non_null_min_rows": training_non_null_min_rows,
+        "historical": historical if historical is not None else pd.DataFrame(columns=["unique_id", "ds"]),
+        "future": future if future is not None else pd.DataFrame(columns=["unique_id", "ds"]),
+    }
+
+
+def _candidate_historical_regressor_lags(*, horizon: int, season_length: int) -> list[int]:
+    candidates = [max(1, int(horizon))]
+    if season_length > horizon:
+        candidates.append(int(season_length))
+    return sorted(set(lag for lag in candidates if lag >= horizon and lag >= 1))
+
+
+def _lag_history_feature(base: pd.DataFrame, *, value_col: str, column: str, lag: int) -> pd.DataFrame:
+    out = base[["unique_id", "ds", value_col]].copy()
+    out[column] = out.groupby("unique_id", sort=True)[value_col].shift(lag)
+    return out[["unique_id", "ds", column]]
+
+
+def _lag_future_feature(
+    base: pd.DataFrame,
+    future: pd.DataFrame,
+    *,
+    value_col: str,
+    column: str,
+    lag: int,
+) -> pd.DataFrame:
+    rows: list[pd.DataFrame] = []
+    for uid, hist_grp in base.groupby("unique_id", sort=True):
+        future_grp = future[future["unique_id"].astype(str) == str(uid)][["unique_id", "ds"]].copy()
+        if future_grp.empty:
+            continue
+        hist_values = hist_grp[["unique_id", "ds", value_col]].copy()
+        future_values = future_grp.copy()
+        future_values[value_col] = pd.NA
+        combined = pd.concat([hist_values, future_values], ignore_index=True).sort_values(["ds"]).reset_index(drop=True)
+        combined[column] = combined[value_col].shift(lag)
+        rows.append(combined[combined["ds"].isin(future_grp["ds"])][["unique_id", "ds", column]])
+    if not rows:
+        out = future[["unique_id", "ds"]].copy()
+        out[column] = pd.NA
+        return out
+    return pd.concat(rows, ignore_index=True).sort_values(["unique_id", "ds"]).reset_index(drop=True)
+
+
+def _regressor_contract_failures(
+    regressor: KnownFutureRegressor,
+    *,
+    value_col: str,
+    source_cols: set[str],
+    future_cols: set[str],
+    future_error: str,
+    coverage: dict[str, Any],
+) -> list[str]:
+    failures: list[str] = []
+    leakage_risk = _leakage_risk(regressor.name, value_col)
+    if leakage_risk != "none":
+        failures.append(f"value column/name looks like target leakage ({leakage_risk})")
+    if regressor.availability != "calendar" and value_col not in source_cols:
+        failures.append(f"value_col '{value_col}' is absent from history and future_file")
+    if regressor.availability == "historical_only":
+        return failures
+    if (
+        regressor.mode == "model_candidate"
+        and regressor.availability != "calendar"
+        and future_cols
+        and regressor.known_as_of_col not in future_cols
+    ):
+        failures.append(f"future_file missing known_as_of_col '{regressor.known_as_of_col}' for model_candidate timing audit")
+    if future_error and regressor.mode == "model_candidate":
+        failures.append(future_error)
+    if regressor.mode == "model_candidate" and regressor.availability != "calendar":
+        if coverage["required_future_rows"] and coverage["missing_future_rows"]:
+            failures.append(
+                f"future values missing for {coverage['missing_future_rows']} of {coverage['required_future_rows']} required forecast rows"
+            )
+        if not coverage["required_future_rows"]:
+            failures.append("no forecast horizon rows were available for future-value validation")
+    if coverage["known_as_of_violations"]:
+        failures.append(
+            f"{coverage['known_as_of_violations']} future row(s) have {regressor.known_as_of_col} after the forecast origin"
+        )
+    return failures
+
+
+def _future_values_for_requirements(
+    future_frame: pd.DataFrame | None,
+    requirements: pd.DataFrame,
+    *,
+    value_col: str,
+) -> pd.DataFrame:
+    if requirements.empty:
+        return pd.DataFrame(columns=["unique_id", "ds", value_col])
+    out = requirements[["unique_id", "ds"]].copy()
+    if future_frame is None or future_frame.empty or "ds" not in future_frame.columns or value_col not in future_frame.columns:
+        out[value_col] = pd.NA
+        return out
+    future = future_frame.copy()
+    future["ds"] = pd.to_datetime(future["ds"], errors="coerce")
+    future = future.dropna(subset=["ds"])
+    if "unique_id" in future.columns:
+        future["unique_id"] = future["unique_id"].astype(str)
+        values = future[["unique_id", "ds", value_col]].drop_duplicates(["unique_id", "ds"], keep="last")
+        return out.merge(values, on=["unique_id", "ds"], how="left")
+    values = future[["ds", value_col]].drop_duplicates(["ds"], keep="last")
+    return out.merge(values, on="ds", how="left")
 
 
 def _payload_records(path: Path, *, key: str) -> list[dict[str, Any]]:

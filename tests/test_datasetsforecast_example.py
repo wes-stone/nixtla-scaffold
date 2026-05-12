@@ -114,7 +114,7 @@ def test_tourism_small_real_data_example_smoke(tmp_path) -> None:
     output_dir = module.run_example(tmp_path / "tourism_run", cache_dir=tmp_path / "cache", allow_download=True)
 
     assert (output_dir / "forecast.csv").exists()
-    assert (output_dir / "hierarchy_reconciliation.csv").exists()
+    assert (output_dir / "appendix" / "hierarchy_reconciliation.csv").exists()
     forecast = pd.read_csv(output_dir / "forecast.csv")
     assert len(forecast) == module.EXPECTED_SOURCE_SERIES * module.HORIZON
     assert forecast["unique_id"].nunique() == module.EXPECTED_SOURCE_SERIES

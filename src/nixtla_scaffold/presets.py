@@ -60,6 +60,8 @@ def preset_catalog() -> list[dict[str, Any]]:
                 "require_backtest": spec.require_backtest,
                 "strict_cv_horizon": spec.strict_cv_horizon,
                 "hierarchy_reconciliation": spec.hierarchy_reconciliation,
+                "train_known_future_regressors": spec.train_known_future_regressors,
+                "mlforecast_feature_policy": spec.mlforecast_feature_policy,
                 "weighted_ensemble": spec.weighted_ensemble,
                 "verbose": spec.verbose,
             }

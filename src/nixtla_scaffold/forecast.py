@@ -5,7 +5,7 @@ import pandas as pd
 from nixtla_scaffold.custom_models import append_custom_model_result
 from nixtla_scaffold.data import load_forecast_dataset
 from nixtla_scaffold.drivers import audit_known_future_regressors
-from nixtla_scaffold.hierarchy import hierarchy_metadata, reconcile_hierarchy_forecast
+from nixtla_scaffold.hierarchy import hierarchy_metadata, reconcile_hierarchy_forecast, reconcile_hierarchy_forecast_both
 from nixtla_scaffold.models import (
     ModelResult,
     build_selected_forecast,
@@ -79,12 +79,21 @@ def run_forecast(
         warnings.append(f"{len(spec.events)} driver/event scenario adjustment(s) applied to forecast")
     unreconciled_forecast = pd.DataFrame()
     hierarchy_reconciliation = pd.DataFrame()
+    hierarchy_reconciliation_comparison = pd.DataFrame()
     if spec.hierarchy_reconciliation != "none":
         before_reconciliation = forecast.copy()
-        forecast, hierarchy_reconciliation, reconciliation_warnings = reconcile_hierarchy_forecast(
-            forecast,
-            method=spec.hierarchy_reconciliation,
-        )
+        if spec.hierarchy_reconciliation == "both":
+            (
+                forecast,
+                hierarchy_reconciliation,
+                hierarchy_reconciliation_comparison,
+                reconciliation_warnings,
+            ) = reconcile_hierarchy_forecast_both(forecast)
+        else:
+            forecast, hierarchy_reconciliation, reconciliation_warnings = reconcile_hierarchy_forecast(
+                forecast,
+                method=spec.hierarchy_reconciliation,
+            )
         warnings.extend(reconciliation_warnings)
         if not hierarchy_reconciliation.empty:
             unreconciled_forecast = before_reconciliation
@@ -109,10 +118,13 @@ def run_forecast(
         model_explainability=model_result.model_explainability,
         transformation_audit=transformation_audit,
         driver_availability_audit=driver_availability_audit,
+        driver_model_features=model_result.driver_model_features,
+        driver_model_cv_delta=model_result.driver_model_cv_delta,
         custom_model_contracts=model_result.custom_model_contracts,
         custom_model_invocations=model_result.custom_model_invocations,
         unreconciled_forecast=unreconciled_forecast,
         hierarchy_reconciliation=hierarchy_reconciliation,
+        hierarchy_reconciliation_comparison=hierarchy_reconciliation_comparison,
         warnings=list(dict.fromkeys(warnings)),
         engine=model_result.engine,
         model_policy_resolution=model_result.model_policy_resolution,
@@ -133,6 +145,8 @@ def _inverse_model_result_target_transform(result: ModelResult, transform: Targe
         engine=result.engine,
         model_weights=result.model_weights,
         model_explainability=result.model_explainability,
+        driver_model_features=result.driver_model_features,
+        driver_model_cv_delta=result.driver_model_cv_delta,
         custom_model_contracts=result.custom_model_contracts,
         custom_model_invocations=result.custom_model_invocations,
         warnings=result.warnings,
