@@ -120,7 +120,7 @@ def build_run_diagnostics(run: Any) -> dict[str, Any]:
         "outputs": manifest["outputs"],
         "next_diagnostic_steps": [
             "Quote diagnostics.json executive_headline.paragraph verbatim when summarizing this run; do not rewrite it into a stronger claim.",
-            "Open model_card.md first for the human-readable forecast narrative.",
+            "Open OPEN_ME_FIRST.html or output/forecast_review.xlsx first for the curated forecast review.",
             "Open llm_context.json when asking an LLM to walk through the run; it bundles headline, trust, horizon, interval, residual, seasonality, hierarchy, driver, and artifact-index context.",
             "Open diagnostics.json for machine-readable run context and warnings.",
             "Open appendix/trust_summary.csv first for per-series High/Medium/Low readiness, caveats, and next actions.",
