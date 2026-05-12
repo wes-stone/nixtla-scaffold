@@ -524,7 +524,7 @@ Thresholds are intentionally broad smoke gates rather than brittle exact-value s
 
 The GitHub Actions workflow in `.github\workflows\release.yml` runs on pull requests and on pushes to `main`. Pull requests run validation only. A push to `main` runs the same validation, reads `[project].version` from `pyproject.toml`, builds the package, creates a GitHub release tagged `v<version>`, and marks it latest.
 
-Release rule: every merge to `main` that should publish a release must bump `pyproject.toml` to a new version before merging. If the tag already exists, the release job fails with a clear version-bump message instead of overwriting an existing release. If the repository has a `PYPI_API_TOKEN` secret configured, the workflow publishes the built distributions to PyPI before creating the GitHub release; otherwise it creates the GitHub release only.
+Release rule: every merge to `main` that should publish a release must bump `pyproject.toml` to a new version before merging. If the tag already exists, the release job fails with a clear version-bump message instead of overwriting an existing release. If the repository has a `PYPI_API_TOKEN` secret configured, the workflow publishes the built wheel and source distribution to PyPI before creating the GitHub release; otherwise it creates the GitHub release only.
 
 Local outputs are intentionally ignored by git. `.gitignore` excludes `.intern`, `.venv`, `runs`, temporary validation folders, query artifacts, and local reports because user tests often contain sensitive data.
 
