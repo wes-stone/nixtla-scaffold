@@ -129,6 +129,9 @@ def reconcile_hierarchy_forecast(
     value_cols = tuple(value_cols or _reconciliation_value_columns(frame))
     if not value_cols:
         return frame.copy(), pd.DataFrame(), [f"hierarchy reconciliation '{method}' requested, but no numeric forecast columns were available"]
+    if method == "both":
+        out, summary, _comparison, warnings = reconcile_hierarchy_forecast_both(frame, value_cols=value_cols)
+        return out, summary, warnings
 
     out = frame.copy()
     pre = hierarchy_coherence(out, value_cols=value_cols)
@@ -138,6 +141,10 @@ def reconcile_hierarchy_forecast(
         if method == "bottom_up":
             out[value_col] = _bottom_up_reconciled_values(out, value_col)
             applied_methods[value_col] = "bottom_up"
+            continue
+        if method == "top_down":
+            out[value_col] = _top_down_reconciled_values(out, value_col)
+            applied_methods[value_col] = "top_down"
             continue
         try:
             out[value_col] = _hierarchicalforecast_reconciled_values(out, value_col, method=method)
@@ -165,6 +172,59 @@ def reconcile_hierarchy_forecast(
         f"post-reconciliation max absolute gap_pct={max_post_gap:.4%}"
     )
     return out, summary, warnings
+
+
+def reconcile_hierarchy_forecast_both(
+    frame: pd.DataFrame,
+    *,
+    primary_method: str = "bottom_up",
+    comparison_methods: Sequence[str] = ("bottom_up", "top_down"),
+    value_cols: Sequence[str] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, list[str]]:
+    """Compare bottom-up and top-down reconciliation, returning one primary output.
+
+    Both methods cannot be the single official forecast at the same time. This helper
+    keeps bottom-up as the default primary output and writes method-level comparison
+    rows so analysts can inspect the tradeoff without rerunning the pipeline.
+    """
+
+    requested_value_cols = tuple(value_cols or _reconciliation_value_columns(frame))
+    if not requested_value_cols:
+        reconciled, summary, warnings = reconcile_hierarchy_forecast(frame, method=primary_method, value_cols=value_cols)
+        return reconciled, summary, pd.DataFrame(), warnings
+
+    frames_by_method: dict[str, pd.DataFrame] = {}
+    summary_frames: list[pd.DataFrame] = []
+    warnings: list[str] = []
+    for method in tuple(dict.fromkeys(comparison_methods)):
+        reconciled, summary, method_warnings = reconcile_hierarchy_forecast(
+            frame,
+            method=method,
+            value_cols=requested_value_cols,
+        )
+        frames_by_method[method] = reconciled
+        if not summary.empty:
+            method_summary = summary.copy()
+            method_summary["comparison_role"] = "primary_output" if method == primary_method else "comparison_only"
+            summary_frames.append(method_summary)
+        warnings.extend(method_warnings)
+
+    primary = frames_by_method.get(primary_method)
+    if primary is None:
+        primary = next(iter(frames_by_method.values()), frame.copy())
+        primary_method = next(iter(frames_by_method.keys()), primary_method)
+
+    comparison = _reconciliation_comparison_frame(
+        frames_by_method,
+        value_cols=requested_value_cols,
+        primary_method=primary_method,
+    )
+    summary = pd.concat(summary_frames, ignore_index=True) if summary_frames else pd.DataFrame()
+    warnings.append(
+        "hierarchy reconciliation comparison requested for bottom_up and top_down; "
+        f"{primary_method} is the primary forecast output and the alternate method is saved for review"
+    )
+    return primary, summary, comparison, sorted(set(warnings))
 
 
 def hierarchy_structure(frame: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, np.ndarray]]:
@@ -287,6 +347,91 @@ def _bottom_up_reconciled_values(frame: pd.DataFrame, value_col: str) -> pd.Seri
         mask = work["unique_id"].astype(str).eq(node_id)
         out.loc[mask] = work.loc[mask, "ds"].map(sums).to_numpy(dtype="float64")
     return out
+
+
+def _top_down_reconciled_values(frame: pd.DataFrame, value_col: str) -> pd.Series:
+    work = frame[["unique_id", "ds", "hierarchy_depth", value_col]].copy()
+    work["hierarchy_depth"] = pd.to_numeric(work["hierarchy_depth"], errors="coerce")
+    out = pd.to_numeric(work[value_col], errors="coerce").astype("float64")
+    max_depth = int(work["hierarchy_depth"].max())
+    root_ids = work.loc[work["hierarchy_depth"] == 0, "unique_id"].dropna().astype(str).unique().tolist()
+    root_id = root_ids[0] if root_ids else "Total"
+    ids_by_depth = {
+        depth: work.loc[work["hierarchy_depth"] == depth, "unique_id"].dropna().astype(str).unique().tolist()
+        for depth in range(max_depth + 1)
+    }
+    uid_series = work["unique_id"].astype(str)
+    for ds_value in work["ds"].dropna().drop_duplicates():
+        date_mask = work["ds"].eq(ds_value)
+        for depth in range(max_depth):
+            for parent_id in ids_by_depth.get(depth, []):
+                child_ids = [
+                    child_id
+                    for child_id in ids_by_depth.get(depth + 1, [])
+                    if _parent_id(
+                        pd.Series({"unique_id": child_id, "hierarchy_depth": depth + 1}),
+                        root_id,
+                    )
+                    == parent_id
+                ]
+                if not child_ids:
+                    continue
+                parent_mask = date_mask & uid_series.eq(parent_id)
+                if not parent_mask.any():
+                    continue
+                parent_value = pd.to_numeric(out.loc[parent_mask], errors="coerce").dropna()
+                if parent_value.empty:
+                    continue
+                child_mask = date_mask & uid_series.isin(child_ids)
+                child_values = pd.to_numeric(out.loc[child_mask], errors="coerce")
+                finite_child_sum = float(child_values.sum(skipna=True))
+                if abs(finite_child_sum) > 1e-12:
+                    out.loc[child_mask] = child_values * (float(parent_value.iloc[0]) / finite_child_sum)
+                else:
+                    out.loc[child_mask] = float(parent_value.iloc[0]) / max(1, len(child_ids))
+    return out
+
+
+def _reconciliation_comparison_frame(
+    frames_by_method: dict[str, pd.DataFrame],
+    *,
+    value_cols: Sequence[str],
+    primary_method: str,
+) -> pd.DataFrame:
+    rows: list[pd.DataFrame] = []
+    id_cols = ["unique_id", "ds"]
+    metadata_cols = ["hierarchy_level", "hierarchy_depth"]
+    for method, frame in frames_by_method.items():
+        available_value_cols = [col for col in value_cols if col in frame.columns]
+        if not available_value_cols:
+            continue
+        cols = [*id_cols, *[col for col in metadata_cols if col in frame.columns], *available_value_cols]
+        method_frame = frame[cols].copy()
+        method_frame = method_frame.melt(
+            id_vars=[col for col in [*id_cols, *metadata_cols] if col in method_frame.columns],
+            value_vars=available_value_cols,
+            var_name="value_col",
+            value_name="reconciled_value",
+        )
+        method_frame["reconciliation_method"] = method
+        method_frame["comparison_role"] = "primary_output" if method == primary_method else "comparison_only"
+        rows.append(method_frame)
+    if not rows:
+        return pd.DataFrame()
+    out = pd.concat(rows, ignore_index=True)
+    ordered = [
+        "reconciliation_method",
+        "comparison_role",
+        "value_col",
+        "unique_id",
+        "ds",
+        "hierarchy_level",
+        "hierarchy_depth",
+        "reconciled_value",
+    ]
+    return out[[col for col in ordered if col in out.columns]].sort_values(
+        [col for col in ["value_col", "unique_id", "ds", "reconciliation_method"] if col in out.columns]
+    ).reset_index(drop=True)
 
 
 def _hierarchicalforecast_reconciled_values(frame: pd.DataFrame, value_col: str, *, method: str) -> pd.Series:

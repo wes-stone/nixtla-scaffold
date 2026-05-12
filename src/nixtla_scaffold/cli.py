@@ -30,8 +30,9 @@ from nixtla_scaffold.presets import PRESET_NAMES, forecast_spec_preset, preset_c
 from nixtla_scaffold.profile import profile_dataset
 from nixtla_scaffold.release_gates import OPTIONAL_EXTRAS, format_release_gate_console_summary, run_release_gates
 from nixtla_scaffold.reports import write_report_artifacts_from_directory
+from nixtla_scaffold.refresh import write_refresh_artifacts
 from nixtla_scaffold.scenario_lab import run_scenario_lab
-from nixtla_scaffold.schema import CustomModelSpec, ForecastSpec, TransformSpec
+from nixtla_scaffold.schema import CustomModelSpec, ForecastSpec, TransformSpec, forecast_spec_from_dict
 from nixtla_scaffold.setup import (
     DATA_SOURCES,
     INTERVAL_MODES,
@@ -102,9 +103,21 @@ def main(argv: list[str] | None = None) -> int:
     forecast_cmd.add_argument("--normalization-label", default="", help="Readable label for the normalization assumption")
     forecast_cmd.add_argument(
         "--hierarchy-reconciliation",
-        choices=["none", "bottom_up", "mint_ols", "mint_wls_struct"],
+        choices=["none", "bottom_up", "top_down", "both", "mint_ols", "mint_wls_struct"],
         default="none",
-        help="Optional reconciliation for hierarchy nodes; keeps parent/child forecasts coherent for planning",
+        help="Optional reconciliation for hierarchy nodes; use both to save bottom-up and top-down comparison paths",
+    )
+    forecast_cmd.add_argument(
+        "--train-known-future-regressors",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Opt in to training MLForecast candidates with declared model_candidate regressors that pass leakage and future-value audits",
+    )
+    forecast_cmd.add_argument(
+        "--mlforecast-feature-policy",
+        choices=["basic", "rolling"],
+        default="basic",
+        help="MLForecast feature policy: basic keeps current lag/date features; rolling adds a small audited rolling-transform set",
     )
     forecast_cmd.add_argument("--require-backtest", action=argparse.BooleanOptionalAction, default=False, help="Fail if rolling backtest metrics cannot be produced")
     forecast_cmd.add_argument(
@@ -157,6 +170,38 @@ def main(argv: list[str] | None = None) -> int:
     forecast_cmd.add_argument("--output", default="runs/latest")
     _add_ledger_registration_args(forecast_cmd)
 
+    refresh_cmd = sub.add_parser("refresh", help="Refresh a forecast by reusing a previous run's persisted setup")
+    refresh_cmd.add_argument("--previous-run", required=True, help="Prior run directory with manifest.json")
+    refresh_cmd.add_argument("--input", required=True, help="Updated CSV, XLSX, or XLSM file")
+    refresh_cmd.add_argument("--sheet", default=None, help="Excel sheet name/index")
+    refresh_cmd.add_argument("--id-col", default=None, help="Override series identifier column; defaults to previous run spec")
+    refresh_cmd.add_argument("--time-col", default=None, help="Override date/time column; defaults to previous run spec")
+    refresh_cmd.add_argument("--target-col", default=None, help="Override target column; defaults to previous run spec")
+    refresh_cmd.add_argument("--horizon", type=int, default=None)
+    refresh_cmd.add_argument("--freq", default=None)
+    refresh_cmd.add_argument("--season-length", type=int, default=None)
+    refresh_cmd.add_argument("--levels", nargs="+", type=int, default=None)
+    refresh_cmd.add_argument("--unit-label", default=None)
+    refresh_cmd.add_argument("--fill-method", choices=["ffill", "zero", "interpolate", "drop"], default=None)
+    refresh_cmd.add_argument("--model-policy", choices=MODEL_POLICY_CHOICES, default=None, help=MODEL_POLICY_HELP)
+    _add_model_allowlist_args(refresh_cmd)
+    refresh_cmd.add_argument("--target-transform", choices=["none", "log", "log1p"], default=None)
+    refresh_cmd.add_argument("--normalization-factor-col", default=None)
+    refresh_cmd.add_argument("--normalization-label", default=None)
+    refresh_cmd.add_argument("--hierarchy-reconciliation", choices=["none", "bottom_up", "top_down", "both", "mint_ols", "mint_wls_struct"], default=None)
+    refresh_cmd.add_argument("--train-known-future-regressors", action=argparse.BooleanOptionalAction, default=None)
+    refresh_cmd.add_argument("--mlforecast-feature-policy", choices=["basic", "rolling"], default=None)
+    refresh_cmd.add_argument("--require-backtest", action=argparse.BooleanOptionalAction, default=None)
+    refresh_cmd.add_argument("--strict-cv-horizon", action=argparse.BooleanOptionalAction, default=None)
+    refresh_cmd.add_argument("--weighted-ensemble", action=argparse.BooleanOptionalAction, default=None)
+    refresh_cmd.add_argument("--verbose", action=argparse.BooleanOptionalAction, default=None)
+    refresh_cmd.add_argument("--event", action="append", default=[], help="Replacement driver/event scenario JSON; reused from previous run unless any --event/--event-file is provided")
+    refresh_cmd.add_argument("--event-file", action="append", default=[], help="Replacement event file; reused from previous run unless any --event/--event-file is provided")
+    refresh_cmd.add_argument("--regressor", action="append", default=[], help="Replacement regressor declaration; reused from previous run unless any --regressor/--regressor-file is provided")
+    refresh_cmd.add_argument("--regressor-file", action="append", default=[], help="Replacement regressor file; reused from previous run unless any --regressor/--regressor-file is provided")
+    refresh_cmd.add_argument("--output", default="runs/refresh_latest")
+    _add_ledger_registration_args(refresh_cmd)
+
     ingest_cmd = sub.add_parser("ingest", help="Convert a Kusto/DAX/MCP query result export into canonical forecast input")
     ingest_cmd.add_argument("--input", required=True, help="Query result file: CSV, XLSX/XLSM, JSON, JSONL, or MCP columnar JSON")
     ingest_cmd.add_argument("--sheet", default=None, help="Excel sheet name/index")
@@ -181,7 +226,9 @@ def main(argv: list[str] | None = None) -> int:
     ingest_cmd.add_argument("--target-transform", choices=["none", "log", "log1p"], default="none")
     ingest_cmd.add_argument("--normalization-factor-col", default=None)
     ingest_cmd.add_argument("--normalization-label", default="")
-    ingest_cmd.add_argument("--hierarchy-reconciliation", choices=["none", "bottom_up", "mint_ols", "mint_wls_struct"], default="none")
+    ingest_cmd.add_argument("--hierarchy-reconciliation", choices=["none", "bottom_up", "top_down", "both", "mint_ols", "mint_wls_struct"], default="none")
+    ingest_cmd.add_argument("--train-known-future-regressors", action=argparse.BooleanOptionalAction, default=False)
+    ingest_cmd.add_argument("--mlforecast-feature-policy", choices=["basic", "rolling"], default="basic")
     ingest_cmd.add_argument("--require-backtest", action=argparse.BooleanOptionalAction, default=False, help="Fail if rolling backtest metrics cannot be produced")
     ingest_cmd.add_argument("--strict-cv-horizon", action=argparse.BooleanOptionalAction, default=False, help="Require CV folds to match --horizon when forecasting after ingest")
     ingest_cmd.add_argument("--weighted-ensemble", action=argparse.BooleanOptionalAction, default=True)
@@ -227,7 +274,7 @@ def main(argv: list[str] | None = None) -> int:
     compare_cmd.add_argument("--time-col", default="ds", help="Date column in the external forecast")
     compare_cmd.add_argument("--target-col", default="yhat", help="External forecast value column")
     compare_cmd.add_argument("--model-col", default="model", help="External model column")
-    compare_cmd.add_argument("--scaffold-model", default=None, help="Optional scaffold model from forecast_long.csv; defaults to selected forecast.csv")
+    compare_cmd.add_argument("--scaffold-model", default=None, help="Optional scaffold model from appendix/forecast_long.csv; defaults to selected forecast.csv")
     compare_cmd.add_argument("--output", default=None, help="Output folder for comparison artifacts; defaults to <run>\\comparison")
 
     score_external_cmd = sub.add_parser("score-external", help="Score cutoff-labeled external forecasts against actuals")
@@ -396,6 +443,20 @@ def _run(args: argparse.Namespace) -> int:
         output_dir = run.to_directory(args.output)
         ledger_result = _maybe_register_ledger(args, output_dir)
         print(f"Forecast written to {output_dir}")
+        if ledger_result:
+            print(f"Ledger version registered: {ledger_result['forecast_version_id']}")
+        print()
+        print(run.explanation())
+        return 0
+
+    if args.command == "refresh":
+        spec = _refresh_spec_from_args(args)
+        run = run_forecast(args.input, spec, sheet=_coerce_sheet(args.sheet))
+        output_dir = run.to_directory(args.output)
+        refresh_result = write_refresh_artifacts(args.previous_run, output_dir)
+        ledger_result = _maybe_register_ledger(args, output_dir)
+        print(f"Refresh forecast written to {output_dir}")
+        print(f"Refresh delta rows: {refresh_result['delta_rows']}")
         if ledger_result:
             print(f"Ledger version registered: {ledger_result['forecast_version_id']}")
         print()
@@ -769,6 +830,20 @@ def _spec_from_args(args: argparse.Namespace) -> ForecastSpec:
     strict_cv_horizon = _arg_or_preset(args, "strict_cv_horizon", "--strict-cv-horizon", base.strict_cv_horizon, provided_flags)
     weighted_ensemble = _arg_or_preset(args, "weighted_ensemble", "--weighted-ensemble", base.weighted_ensemble, provided_flags)
     verbose = _arg_or_preset(args, "verbose", "--verbose", base.verbose, provided_flags)
+    train_known_future_regressors = _arg_or_preset(
+        args,
+        "train_known_future_regressors",
+        "--train-known-future-regressors",
+        base.train_known_future_regressors,
+        provided_flags,
+    )
+    mlforecast_feature_policy = _arg_or_preset(
+        args,
+        "mlforecast_feature_policy",
+        "--mlforecast-feature-policy",
+        base.mlforecast_feature_policy,
+        provided_flags,
+    )
     return ForecastSpec(
         horizon=horizon,
         freq=freq,
@@ -790,11 +865,65 @@ def _spec_from_args(args: argparse.Namespace) -> ForecastSpec:
             normalization_label=getattr(args, "normalization_label", ""),
         ),
         hierarchy_reconciliation=hierarchy_reconciliation,
+        train_known_future_regressors=train_known_future_regressors,
+        mlforecast_feature_policy=mlforecast_feature_policy,
         require_backtest=require_backtest,
         strict_cv_horizon=strict_cv_horizon,
         weighted_ensemble=weighted_ensemble,
         verbose=verbose,
     )
+
+
+def _refresh_spec_from_args(args: argparse.Namespace) -> ForecastSpec:
+    manifest_path = Path(args.previous_run) / "manifest.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(manifest_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    base = forecast_spec_from_dict(manifest.get("spec", {}))
+    provided_flags = getattr(args, "_provided_flags", set())
+    model_allowlist = base.model_allowlist
+    if _flag_was_provided(provided_flags, "--model") or _flag_was_provided(provided_flags, "--model-allowlist"):
+        model_allowlist = _parse_model_allowlist(args)
+    events = base.events
+    if _flag_was_provided(provided_flags, "--event") or _flag_was_provided(provided_flags, "--event-file"):
+        events = _parse_events(getattr(args, "event", []), getattr(args, "event_file", []))
+    regressors = base.regressors
+    if _flag_was_provided(provided_flags, "--regressor") or _flag_was_provided(provided_flags, "--regressor-file"):
+        regressors = _parse_regressors(getattr(args, "regressor", []), getattr(args, "regressor_file", []))
+    transform = TransformSpec(
+        target=_override(base.transform.target, args, "target_transform"),
+        normalization_factor_col=_override(base.transform.normalization_factor_col, args, "normalization_factor_col"),
+        normalization_label=_override(base.transform.normalization_label, args, "normalization_label"),
+    )
+    return replace(
+        base,
+        horizon=_override(base.horizon, args, "horizon"),
+        freq=_override(base.freq, args, "freq"),
+        season_length=_override(base.season_length, args, "season_length"),
+        levels=tuple(_override(list(base.levels), args, "levels")),
+        fill_method=_override(base.fill_method, args, "fill_method"),
+        model_policy=_override(base.model_policy, args, "model_policy"),
+        model_allowlist=model_allowlist,
+        id_col=_override(base.id_col, args, "id_col"),
+        time_col=_override(base.time_col, args, "time_col"),
+        target_col=_override(base.target_col, args, "target_col"),
+        unit_label=_override(base.unit_label, args, "unit_label"),
+        events=events,
+        regressors=regressors,
+        transform=transform,
+        hierarchy_reconciliation=_override(base.hierarchy_reconciliation, args, "hierarchy_reconciliation"),
+        train_known_future_regressors=_override(base.train_known_future_regressors, args, "train_known_future_regressors"),
+        mlforecast_feature_policy=_override(base.mlforecast_feature_policy, args, "mlforecast_feature_policy"),
+        require_backtest=_override(base.require_backtest, args, "require_backtest"),
+        strict_cv_horizon=_override(base.strict_cv_horizon, args, "strict_cv_horizon"),
+        weighted_ensemble=_override(base.weighted_ensemble, args, "weighted_ensemble"),
+        verbose=_override(base.verbose, args, "verbose"),
+    )
+
+
+def _override(default: Any, args: argparse.Namespace, attr: str) -> Any:
+    value = getattr(args, attr, None)
+    return default if value is None else value
 
 
 def _parse_model_allowlist(args: argparse.Namespace) -> tuple[str, ...]:

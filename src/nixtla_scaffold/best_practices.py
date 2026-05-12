@@ -46,7 +46,7 @@ BEST_PRACTICE_DOCTRINE = [
             "Chapter 11 hierarchical forecasting",
             "https://otexts.com/fpppy/11-hierarchical-forecasting.html",
         ),
-        "modeling_hook": "hierarchy_coherence.csv diagnostics",
+        "modeling_hook": "appendix/hierarchy_coherence.csv diagnostics",
     },
     {
         "id": "drivers_are_audited_overlays",
@@ -271,7 +271,8 @@ def _known_future_regressor_receipt(run: Any) -> dict[str, str]:
     model_candidates = int((audit.get("mode", pd.Series(dtype=str)).astype(str) == "model_candidate").sum())
     evidence = (
         f"{len(run.spec.regressors)} regressor(s); audit_status={statuses}; "
-        f"model_candidate_rows={model_candidates}; external_regressor_training_enabled=False"
+        f"model_candidate_rows={model_candidates}; "
+        f"external_regressor_training_enabled={bool(getattr(run.spec, 'train_known_future_regressors', False))}"
     )
     return _receipt("known_future_regressors_audited", status, evidence)
 

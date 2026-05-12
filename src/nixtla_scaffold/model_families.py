@@ -158,7 +158,8 @@ def model_family(model: Any) -> str:
         return "ensemble"
     if name.startswith("Custom_"):
         return "custom"
-    if name in MLFORECAST_MODELS or name.startswith("LightGBM"):
+    base_name = name.removesuffix("_Drivers")
+    if base_name in MLFORECAST_MODELS or base_name.startswith("LightGBM"):
         return "mlforecast"
     if name in BASELINE_MODELS:
         return "baseline"

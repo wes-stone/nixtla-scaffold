@@ -84,12 +84,12 @@ def build_model_card(run: ForecastRun) -> str:
     lines.append("- Quote `diagnostics.json.executive_headline.paragraph` verbatim when summarizing this run; do not rewrite it into a stronger claim.")
     lines.append("- Start with `diagnostics.json` for machine-readable run context, warnings, model weights, and next checks.")
     lines.append("- Use `failure_diagnostics.json` if a CLI run fails before normal artifacts are produced.")
-    lines.append("- Use `forecast_long.csv`, `backtest_long.csv`, `series_summary.csv`, and `model_audit.csv` as the core feeder/review files.")
+    lines.append("- Use `appendix/forecast_long.csv`, `appendix/backtest_long.csv`, `appendix/series_summary.csv`, and `appendix/model_audit.csv` as the core feeder/review files.")
     lines.append("- Use `audit/backtest_windows.csv` and `audit/backtest_predictions.csv` to inspect forecast-vs-actual holdouts by cutoff.")
     if run.spec.transform.enabled:
         lines.append("- Use `audit/target_transform_audit.csv` to trace raw y, normalized y, modeled target values, and output scale.")
     if run.spec.hierarchy_reconciliation != "none":
-        lines.append("- Use `hierarchy_reconciliation.csv` plus `audit/hierarchy_coherence_pre.csv` and `audit/hierarchy_coherence_post.csv` to inspect pre/post planning coherence.")
+        lines.append("- Use `appendix/hierarchy_rollup.csv` for parent-level history/forecast rollups, then `appendix/hierarchy_reconciliation.csv` plus `audit/hierarchy_coherence_pre.csv` and `audit/hierarchy_coherence_post.csv` to inspect pre/post planning coherence.")
     lines.append("- Use `audit/seasonality_diagnostics.csv` and `audit/seasonality_decomposition.csv` to inspect cycle counts, credibility, trend/seasonal/remainder evidence, and seasonal warnings.")
     lines.append("- Open `interpretation.md` for a readable backtesting and seasonality walkthrough.")
     lines.append("- Open `report.html` for a portable visual report; `report_base64.txt` stores the same HTML for text-only handoff.")

@@ -64,13 +64,14 @@ From a local clone of this repository, `Set-Location` to the repo root before ru
 
 ---
 
-## Quick Reference — The 8 Commands You Need
+## Quick Reference — The 9 Commands You Need
 
 | Command | What it does | When to use |
 |---------|-------------|-------------|
 | `setup` | Creates a workspace with intake questions, config, and agent brief | First touch — user says "forecast this" |
 | `profile` | Analyzes data quality: frequency, gaps, zeros, negatives, readiness | Before forecasting — check the data |
 | `forecast` | Runs the full pipeline: profile → repair → model → backtest → select → output | The main event |
+| `refresh` | Reuses a previous run manifest with new actuals and writes compact refresh deltas | Monthly/weekly operational forecast updates |
 | `explain` | Generates model card from an existing run | After forecast — understand the results |
 | `report` | Regenerates HTML/Streamlit report artifacts | When you need to share results |
 | `ingest` | Converts MCP/query exports to canonical forecast input | When data comes from Kusto/DAX/SQL |
@@ -278,11 +279,13 @@ run.to_directory("runs/my_forecast")
 This is mandatory for frontier forecasting enablement. A univariate model is the
 baseline, not the ceiling.
 
-**Current package reality:** MLForecast currently uses safe lag/calendar features
-by default. It does **not** yet automatically train with arbitrary external
-regressors from MCPs. The skill should still walk users through the feature
-engineering discovery process so the next iteration is structured, auditable,
-and leakage-safe instead of "throw every column into LightGBM."
+**Current package reality:** MLForecast uses safe lag/calendar features by
+default. It can train explicitly declared `model_candidate` regressors only when
+`--train-known-future-regressors` is set and the feature gate passes. Known-future
+drivers require future values and timing provenance. `availability="historical_only"`
+drivers can enter only as safe lag features where every forecast row is built
+from values known at the forecast origin. The scaffold does not recursively
+forecast regressors.
 
 Before or immediately after the baseline forecast, ask:
 
@@ -304,10 +307,10 @@ Before or immediately after the baseline forecast, ask:
    - It must not leak the target from the future.
    - It should make business sense, not only correlate historically.
    - It should be tested in rolling-origin CV against the univariate baseline.
-4. **How to use it today if true exogenous modeling is not wired yet?**
+4. **How to use it today?**
    - Add known future events with `--event` or reusable JSON/YAML/CSV files via `--event-file`.
    - Create scenario overlays for launch/pricing/contract assumptions.
-   - Declare candidate known-future regressors with `--regressor` or `--regressor-file` so the package writes leakage and future-availability audit artifacts.
+   - Declare candidate known-future or historical-only regressors with `--regressor` or `--regressor-file` so the package writes leakage, future-availability, lag-safety, and feature-selection receipt artifacts.
    - Store candidate feature extracts next to the run for analyst review.
    - Use `model_explainability.csv` when MLForecast runs to inspect lag/date
      importance; do not over-interpret feature importance as causality.
@@ -392,12 +395,15 @@ Every forecast run produces these artifacts:
 | `series_summary.csv` | One-row-per-series decision table with selected model, RMSE/MAE/MASE/RMSSE/WAPE, CV horizon contract, seasonality, and top alternatives |
 | `model_audit.csv` | Model leaderboard enriched with weights and selected/challenger flags |
 | `model_win_rates.csv` | Cross-series win rates versus SeasonalNaive or Naive benchmarks |
+| `model_tradeoff_scores.csv` | Per-series/model RMSE/MAE/WAPE/MASE/RMSSE/absolute-bias scores for multi-objective review |
+| `model_pareto_frontier.csv` | Non-dominated model tradeoff set for analyst review; not an automatic champion override |
 | `model_window_metrics.csv` | Per-cutoff RMSE/MAE/MASE/RMSSE/WAPE/bias for reviewing rolling-origin windows one at a time |
 | `residual_diagnostics.csv` | Error diagnostics by model and horizon step |
 | `residual_tests.csv` | Heuristic residual bias, one-step autocorrelation, outlier, and early/late structural-break checks over rolling-origin residuals; diagnostic screening only, not formal model adequacy certification; small samples are directional |
 | `interval_diagnostics.csv` | Empirical prediction-interval coverage, width, method label, and pass/warn/fail calibration status when CV intervals are available |
 | `trust_summary.csv` | First-stop decision artifact with per-series High/Medium/Low trust, score drivers, horizon trust, full-horizon claim gate, caveats, and recommended next actions |
 | `model_explainability.csv` | MLForecast lag/date feature importance or coefficient magnitudes when ML models run |
+| `feature_selection_receipts.csv` | Descriptive MLForecast feature evidence for lag/date/rolling/driver features; it does not auto-prune or override champion selection |
 | `forecast.csv` | Selected point forecasts + intervals (if supported), plus `row_horizon_status`, `horizon_trust_state`, `validated_through_horizon`, `planning_eligible`, and `planning_eligibility_scope`; `planning_eligible` is horizon-validation only, not a global planning approval |
 | `forecast_comparison.csv` / `forecast_comparison.xlsx` | Optional `compare` output aligning scaffold forecasts to finance-owned external forecasts; directional deltas only, not residuals, accuracy metrics, or model-selection evidence |
 | `comparison_report.html` / `comparison_llm_context.json` | Optional `compare` output for readable triangulation and LLM handoff; quote guardrails before discussing deltas |
@@ -405,6 +411,8 @@ Every forecast run produces these artifacts:
 | `scenario_forecast.csv` | Baseline `yhat` beside `yhat_scenario`, `event_adjustment`, and `event_names` for scenario review |
 | `known_future_regressors.csv` | Declared known-future driver contracts from `--regressor` or `--regressor-file` |
 | `driver_availability_audit.csv` | Leakage, future coverage, known-as-of timing, audit status, and modeling decision for declared regressors |
+| `driver_model_features.csv` | Opt-in MLForecast feature gate for known-future and historical-only lag driver features |
+| `driver_model_cv_delta.csv` | CV evidence for MLForecast runs that actually used approved driver features |
 | `driver_experiment_summary.csv` | One summary table for event overlays and known-future regressor audit outcomes |
 | `custom_model_contracts.csv` | Optional custom-challenger contract audit with source, invocation type, leakage guard, output contract, status, and error if excluded |
 | `audit\all_models.csv` | Every model's future predictions for transparency |
@@ -416,8 +424,9 @@ Every forecast run produces these artifacts:
 | `audit\target_transform_audit.csv` | Raw y, normalization factor, adjusted y, transformed/modeling values, output scale, and notes when log/log1p or factor normalization is enabled |
 | `audit\seasonality_diagnostics.csv` | Cycle counts, complete cycles, seasonal/trend/remainder strength, credibility label, and warnings about insufficient seasonal evidence |
 | `audit\seasonality_decomposition.csv` | Additive observed/trend/seasonal/remainder evidence when at least two complete seasonal cycles exist |
-| `hierarchy_reconciliation.csv` | Reconciliation method summary and pre/post gap metrics when hierarchy reconciliation is enabled; coherence is prioritized and node-level accuracy may decrease |
-| `hierarchy_contribution.csv` | Parent/child contribution and gap attribution for hierarchy storytelling; gap contributions are allocation heuristics, not reconciliation algorithm outputs |
+| `appendix\hierarchy_rollup.csv` | Parent-level hierarchy add-on output with historical actuals and selected forecasts beside immediate-child sums, child coverage, and selected-forecast gaps |
+| `appendix\hierarchy_reconciliation.csv` | Reconciliation method summary and pre/post gap metrics when hierarchy reconciliation is enabled; coherence is prioritized and node-level accuracy may decrease |
+| `appendix\hierarchy_contribution.csv` | Parent/child contribution and gap attribution for hierarchy storytelling; gap contributions are allocation heuristics, not reconciliation algorithm outputs |
 | `audit\hierarchy_backtest_comparison.csv` | Selected-model rolling-origin errors before and after reconciliation for node-level accuracy/coherence tradeoff review |
 | `audit\hierarchy_unreconciled_forecast.csv` | Independent model-tournament forecast preserved before reconciliation |
 | `audit\hierarchy_coherence_pre.csv` | Parent/child coherence gaps before reconciliation |
@@ -426,7 +435,7 @@ Every forecast run produces these artifacts:
 | `diagnostics.md` | Human-readable diagnostics markdown with the same executive headline and next steps |
 | `report.html` | Visual report with decision summary, charts, fixed-axis rolling-origin backtest filmstrip, and a static forecast-ledger preview when `ledger_context.json` exists |
 | `report_base64.txt` | Same report, base64 for embedding |
-| `streamlit_app.py` | Interactive dashboard with cached local artifact loading, polished sidebar **Workbench section** button tabs that keep every section visible while rendering only the active heavy section on rerun. Forecast review owns the styled executive headline card, copy-safe code block, decision/action cards for watchouts and current model next actions, and a forecast operating loop for connecting refreshes end to end, adding drivers/regressors, and tracking forecast performance over time. When `ledger_context.json` exists, a lazy Forecast ledger section opens with one clean line chart: latest actuals/history, official locks emphasized, and recent non-lock forecast versions as lighter lines before collapsing the raw ledger audit tables for deeper review. It also includes champion lens controls for best overall vs best StatsForecast/classical vs best MLForecast, active champion horizon/interval banners, winner-metric guidance, first-glance forecast charts, dedicated Model investigation, fixed-axis CV window player, Prediction intervals, Model audit, Seasonality, Hierarchy, Assumptions & Drivers, Feeder outputs, and pre/post reconciliation review when enabled. Set `NIXTLA_SCAFFOLD_STREAMLIT_PERF=1` before launching to show artifact-load diagnostics in the sidebar. |
+| `streamlit_app.py` | Interactive dashboard with cached local artifact loading, polished sidebar **Workbench section** button tabs that keep every section visible while rendering only the active heavy section on rerun. Forecast review owns the styled executive headline card, copy-safe code block, decision/action cards for watchouts and current model next actions, and a forecast operating loop for connecting refreshes end to end, adding drivers/regressors, and tracking forecast performance over time. When `ledger_context.json` exists, a lazy Forecast ledger section opens with one clean line chart: latest actuals/history, official locks emphasized, and recent non-lock forecast versions as lighter lines before collapsing the raw ledger audit tables for deeper review. It also includes champion lens controls for best overall vs best StatsForecast/classical vs best MLForecast, active champion horizon/interval banners, winner-metric guidance, first-glance forecast charts, dedicated Model investigation with Pareto tradeoffs, fixed-axis CV window player, Prediction intervals, Model audit, Seasonality, Hierarchy, Assumptions & Drivers, Feeder outputs, and pre/post reconciliation review when enabled. Set `NIXTLA_SCAFFOLD_STREAMLIT_PERF=1` before launching to show artifact-load diagnostics in the sidebar. |
 | `ledger_context.json` | Optional pointer written when a run is registered in a forecast ledger; lets `report.html` and the Streamlit workbench discover ledger exports. |
 | `runs\forecast_ledger\exports\*.csv` | Power BI-ready forecast ledger mirrors: versions, snapshots, official locks, actual revisions, forecast-vs-actuals, performance, selected-lock deltas, adjustments, corrected actuals, and regime changes. |
 | `forecast.xlsx` | Excel workbook with all sheets |
@@ -448,14 +457,14 @@ uv run nixtla-scaffold report --run runs\my_forecast
 #### A. Sanity Checks (do all of these)
 
 1. **Trust/action summary**: Open `trust_summary.csv` first. Use it to tell the user the per-series High/Medium/Low readiness, score drivers, `horizon_trust_state`, `full_horizon_claim_allowed`, caveats, and next actions. Do not present Low-trust or no-full-horizon-claim forecasts as planning-ready for the full requested horizon.
-2. **Backtest accuracy**: Open `model_audit.csv` or `audit\backtest_metrics.csv`. RMSE is the default selection metric because it penalizes large misses more strongly than MAE/WAPE. Use MASE/RMSSE for scale-free cross-series comparisons and WAPE as a business-readable secondary metric, not the sole model selector.
+2. **Backtest accuracy**: Open `model_audit.csv` or `audit\backtest_metrics.csv`. RMSE is the default selection metric because it penalizes large misses more strongly than MAE/WAPE. Use MASE/RMSSE for scale-free cross-series comparisons and WAPE as a business-readable secondary metric, not the sole model selector. When metrics disagree, inspect `model_tradeoff_scores.csv` and `model_pareto_frontier.csv` for non-dominated alternatives, but still lead with the official selected model and trust artifacts.
 3. **CV horizon contract**: Check `selection_horizon` vs `requested_horizon`, `cv_windows`, `full_horizon_claim_allowed`, `unvalidated_steps`, and `horizon_trust_score_cap`, then inspect `forecast.csv` row-level `row_horizon_status`, `planning_eligible`, and `planning_eligibility_scope`. If selection used a shorter horizon, disclose that steps after `validated_through_horizon` are directional, not validated planning rows. If full horizon was evaluated with only one CV window, disclose that it is still not a planning-ready champion claim. `planning_eligible=True` is horizon-validation only; still review trust, intervals, residuals, hierarchy, and data-quality caveats. Rerun with `--strict-cv-horizon` and/or add history when the decision requires full-horizon evidence.
 4. **Naive comparison**: Check `interpretation.md` and `model_win_rates.csv` — does the selected model beat Naive/SeasonalNaive? If not, the data may be too noisy or have structural breaks. Be honest.
 5. **Trend extrapolation**: Does the forecast trajectory make business sense? A model that extrapolates 40% monthly growth for 12 months may be mathematically correct but operationally useless.
 6. **Interval width and validity**: Are the 95% intervals so wide they're uninformative? Does `lo <= yhat <= hi` hold? If not, fix before stakeholder use.
 7. **Target transform / normalization audit**: If `audit\target_transform_audit.csv` has rows, explain the output scale before showing the forecast. Log/log1p outputs are inverse-transformed for reporting; factor-normalized forecasts are normalized units unless future factors are supplied externally.
 8. **Seasonality credibility**: Check `audit\seasonality_diagnostics.csv` before trusting a seasonal story. If the credibility label is `low`, or complete cycles are fewer than 2, say the model cannot validate annual/weekly seasonality yet. Use `audit\seasonality_decomposition.csv` to inspect observed, trend, seasonal, and remainder components when available.
-9. **Hierarchy coherence**: If the data has parent/child nodes, decide whether independent node forecasts are acceptable or whether planning requires `--hierarchy-reconciliation bottom_up`, `mint_ols`, or `mint_wls_struct`. Review `hierarchy_contribution.csv`, `audit\hierarchy_backtest_comparison.csv`, `hierarchy_reconciliation.csv`, and the pre/post coherence artifacts when reconciliation is enabled; reconciliation enforces planning coherence and can improve or worsen node-level accuracy.
+9. **Hierarchy coherence**: If the data has parent/child nodes, decide whether independent node forecasts are acceptable or whether planning requires `--hierarchy-reconciliation bottom_up`, `top_down`, `both`, `mint_ols`, or `mint_wls_struct`. Review `appendix\hierarchy_rollup.csv`, `appendix\hierarchy_contribution.csv`, `audit\hierarchy_backtest_comparison.csv`, `appendix\hierarchy_reconciliation.csv`, and the pre/post coherence artifacts when reconciliation is enabled; reconciliation enforces planning coherence and can improve or worsen node-level accuracy.
 10. **Driver opportunity**: Ask whether MCP sources can provide leading indicators, known future events, or normalization factors that should become features/scenarios.
 
 #### B. Limitations Disclosure (present to user)
@@ -731,7 +740,7 @@ Default hierarchy forecasts are independent per node so the model tournament can
 | MinTrace OLS | `mint_ols` | You want HierarchicalForecast reconciliation without insample covariance requirements |
 | MinTrace structural WLS | `mint_wls_struct` | You want a structure-weighted MinTrace variant when the hierarchy is reliable |
 
-Review rule: reconciliation improves planning coherence, not necessarily independent predictive accuracy. Always inspect `hierarchy_contribution.csv`, `audit\hierarchy_backtest_comparison.csv`, the unreconciled model tournament, `audit\hierarchy_unreconciled_forecast.csv`, `audit\hierarchy_coherence_pre.csv`, `audit\hierarchy_coherence_post.csv`, and `hierarchy_reconciliation.csv` before stakeholder use.
+Review rule: reconciliation improves planning coherence, not necessarily independent predictive accuracy. Always inspect `appendix\hierarchy_rollup.csv`, `appendix\hierarchy_contribution.csv`, `audit\hierarchy_backtest_comparison.csv`, the unreconciled model tournament, `audit\hierarchy_unreconciled_forecast.csv`, `audit\hierarchy_coherence_pre.csv`, `audit\hierarchy_coherence_post.csv`, and `appendix\hierarchy_reconciliation.csv` before stakeholder use.
 
 ---
 
@@ -907,7 +916,7 @@ Key facts verified by experiment:
 ## DEPENDENCIES
 
 ```
-numpy>=1.26, pandas>=2.0, statsforecast>=1.7, utilsforecast>=0.2, openpyxl>=3.1, pyyaml>=6.0
+numpy>=1.26, pandas>=2.0, statsforecast>=1.7, utilsforecast>=0.2.16, openpyxl>=3.1, pyyaml>=6.0
 ```
 
 Reporting/dashboard dependency: `plotly>=6.0`.

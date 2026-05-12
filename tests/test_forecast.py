@@ -9,15 +9,25 @@ import pytest
 from nixtla_scaffold import DataProfile, ForecastRun, ForecastSpec, TransformSpec, build_executive_headline, run_forecast
 from nixtla_scaffold.citations import FPPY_CITATION
 from nixtla_scaffold.cli import _coerce_sheet, main
+from nixtla_scaffold.drivers import DriverFeatureBundle
 from nixtla_scaffold.forecast import _apply_shrinkage_toward_last_actual
 from nixtla_scaffold.models import (
     ModelResult,
     _add_weighted_ensemble_to_cv,
+    _driver_model_cv_delta,
     _interval_windows,
     _metrics_from_cv,
     rebuild_result_metrics_on_output_scale,
 )
-from nixtla_scaffold.outputs import build_forecast_long, build_interval_diagnostics, build_residual_test_summary, build_selected_forecast, build_trust_summary
+from nixtla_scaffold.outputs import (
+    build_forecast_long,
+    build_interval_diagnostics,
+    build_model_pareto_frontier,
+    build_model_tradeoff_scores,
+    build_residual_test_summary,
+    build_selected_forecast,
+    build_trust_summary,
+)
 from nixtla_scaffold.profile import profile_dataset
 from nixtla_scaffold.reports import write_report_artifacts_from_directory
 import nixtla_scaffold.models as model_module
@@ -237,6 +247,135 @@ def test_model_allowlist_disallows_baseline_fallback_when_statsforecast_unavaila
         run_forecast(df, ForecastSpec(horizon=3, freq="ME", model_policy="auto", model_allowlist=("arima",)))
 
 
+def test_mlforecast_rolling_feature_policy_adds_audited_lag_transforms() -> None:
+    pytest.importorskip("mlforecast")
+    df = pd.DataFrame(
+        {
+            "unique_id": ["Revenue"] * 36,
+            "ds": pd.date_range("2023-01-31", periods=36, freq="ME"),
+            "y": [100 + i * 3 + (12 if i % 6 == 0 else 0) for i in range(36)],
+        }
+    )
+
+    run = run_forecast(
+        df,
+        ForecastSpec(
+            horizon=2,
+            freq="ME",
+            levels=(),
+            model_policy="mlforecast",
+            model_allowlist=("LinearRegression",),
+            mlforecast_feature_policy="rolling",
+            weighted_ensemble=False,
+            verbose=False,
+        ),
+    )
+
+    assert any("feature policy 'rolling' enabled" in warning for warning in run.warnings)
+    assert any("rolling_mean" in feature for feature in run.model_explainability["feature"].astype(str))
+    assert run.manifest()["spec"]["mlforecast_feature_policy"] == "rolling"
+
+
+def test_driver_model_cv_delta_requires_driver_cv_evidence() -> None:
+    metrics = pd.DataFrame(
+        {
+            "unique_id": ["Revenue"],
+            "model": ["LinearRegression"],
+            "rmse": [1.0],
+            "mae": [0.8],
+            "wape": [0.02],
+        }
+    )
+    bundle = DriverFeatureBundle(feature_columns=("seats_plan",))
+
+    unverified = _driver_model_cv_delta(metrics, bundle, cv_used_exogenous_features=False)
+    verified = _driver_model_cv_delta(metrics, bundle, cv_used_exogenous_features=True)
+
+    assert unverified.empty
+    assert verified["feature_columns"].iloc[0] == "seats_plan"
+    assert verified["comparison_status"].iloc[0] == "driver_features_scored_in_mlforecast_cv"
+
+
+def test_model_pareto_frontier_marks_tradeoffs_without_changing_selection() -> None:
+    df = pd.DataFrame(
+        {
+            "unique_id": ["Revenue"] * 8,
+            "ds": pd.date_range("2025-01-31", periods=8, freq="ME"),
+            "y": [100, 105, 108, 112, 118, 121, 127, 130],
+        }
+    )
+    run = run_forecast(df, ForecastSpec(horizon=2, model_policy="baseline", weighted_ensemble=False))
+    run.model_selection = pd.DataFrame(
+        {
+            "unique_id": ["Revenue"],
+            "selected_model": ["RMSEWinner"],
+            "selection_reason": ["lowest backtested RMSE"],
+            "rmse": [1.1],
+            "mae": [4.0],
+            "abs_bias": [0.30],
+        }
+    )
+    selected_before = run.model_selection.copy(deep=True)
+    run.backtest_metrics = pd.DataFrame(
+        {
+            "unique_id": ["Revenue", "Revenue", "Revenue", "Revenue", "Revenue"],
+            "cutoff": pd.to_datetime(["2025-06-30", "2025-07-31", "2025-07-31", "2025-07-31", "2025-07-31"]),
+            "model": ["RMSEWinner", "RMSEWinner", "LowBias", "Dominated", "AllNan"],
+            "rmse": [1.0, 1.2, 2.0, 3.0, float("nan")],
+            "mae": [4.0, 4.0, 1.5, 5.0, float("nan")],
+            "wape": [0.20, 0.22, 0.08, 0.30, float("nan")],
+            "mase": [1.0, 1.1, 0.7, 1.5, float("nan")],
+            "rmsse": [1.0, 1.2, 1.8, 2.0, float("nan")],
+            "bias": [0.30, 0.30, 0.02, 0.60, float("nan")],
+            "abs_bias": [0.30, 0.30, 0.02, 0.60, float("nan")],
+            "observations": [2, 2, 4, 4, 0],
+            "requested_horizon": [2, 2, 2, 2, 2],
+            "selection_horizon": [2, 2, 2, 2, 2],
+            "cv_windows": [2, 2, 2, 2, 2],
+            "cv_step_size": [2, 2, 2, 2, 2],
+            "cv_horizon_matches_requested": [True, True, True, True, True],
+        }
+    )
+
+    tradeoffs = build_model_tradeoff_scores(run)
+    frontier = build_model_pareto_frontier(run)
+
+    pd.testing.assert_frame_equal(run.model_selection, selected_before)
+    assert tradeoffs["model"].tolist().count("RMSEWinner") == 1
+    assert tradeoffs.set_index("model").loc["RMSEWinner", "observations"] == 4
+    by_model = frontier.set_index("model")
+    assert bool(by_model.loc["RMSEWinner", "is_pareto_optimal"])
+    assert bool(by_model.loc["LowBias", "is_pareto_optimal"])
+    assert not bool(by_model.loc["Dominated", "is_pareto_optimal"])
+    assert not bool(by_model.loc["AllNan", "is_pareto_optimal"])
+    assert by_model.loc["AllNan", "pareto_status"] == "insufficient_metrics"
+    assert by_model.loc["RMSEWinner", "selection_alignment"] == "selected_pareto"
+    assert by_model.loc["LowBias", "selection_alignment"] == "pareto_alternative"
+    assert by_model.loc["Dominated", "selection_alignment"] == "dominated_challenger"
+    assert by_model.loc["RMSEWinner", "metrics_considered"] == "rmse|mae|wape|mase|rmsse|abs_bias"
+    assert set(frontier["dominance_scope"]) == {"within_unique_id"}
+
+
+def test_pareto_outputs_empty_schema_without_backtest(tmp_path) -> None:
+    df = pd.DataFrame(
+        {
+            "unique_id": ["Revenue"] * 2,
+            "ds": pd.date_range("2025-01-31", periods=2, freq="ME"),
+            "y": [100, 105],
+        }
+    )
+    run = run_forecast(df, ForecastSpec(horizon=3, model_policy="baseline", strict_cv_horizon=True))
+
+    output_dir = run.to_directory(tmp_path / "no_backtest")
+    tradeoffs = pd.read_csv(output_dir / "appendix" / "model_tradeoff_scores.csv")
+    frontier = pd.read_csv(output_dir / "appendix" / "model_pareto_frontier.csv")
+
+    assert tradeoffs.empty
+    assert frontier.empty
+    assert {"unique_id", "model", "family", "abs_bias"}.issubset(tradeoffs.columns)
+    assert {"unique_id", "model", "is_pareto_optimal", "selection_alignment", "metrics_considered"}.issubset(frontier.columns)
+
+
 def test_cli_model_allowlist_writes_canonical_spec(tmp_path) -> None:
     input_path = tmp_path / "input.csv"
     output_path = tmp_path / "run"
@@ -277,6 +416,68 @@ def test_cli_model_allowlist_writes_canonical_spec(tmp_path) -> None:
     assert manifest["spec"]["model_allowlist"] == ["AutoARIMA", "MSTL_AutoARIMA"]
     all_models = pd.read_csv(output_path / "audit" / "all_models.csv")
     assert set(model_module.model_columns(all_models)) == {"AutoARIMA", "MSTL_AutoARIMA"}
+
+
+def test_cli_refresh_reuses_previous_spec_and_writes_delta_artifacts(tmp_path, capsys) -> None:
+    input_path = tmp_path / "input.csv"
+    refresh_input = tmp_path / "refresh_input.csv"
+    first_run = tmp_path / "first"
+    refresh_run = tmp_path / "refresh"
+    pd.DataFrame(
+        {
+            "unique_id": ["Revenue"] * 12,
+            "ds": pd.date_range("2025-01-31", periods=12, freq="ME"),
+            "y": [100 + i * 4 for i in range(12)],
+        }
+    ).to_csv(input_path, index=False)
+    pd.DataFrame(
+        {
+            "unique_id": ["Revenue"] * 13,
+            "ds": pd.date_range("2025-01-31", periods=13, freq="ME"),
+            "y": [101 + i * 4 for i in range(13)],
+        }
+    ).to_csv(refresh_input, index=False)
+
+    assert main(
+        [
+            "forecast",
+            "--input",
+            str(input_path),
+            "--freq",
+            "ME",
+            "--horizon",
+            "2",
+            "--model-policy",
+            "baseline",
+            "--no-verbose",
+            "--output",
+            str(first_run),
+        ]
+    ) == 0
+    assert main(
+        [
+            "refresh",
+            "--previous-run",
+            str(first_run),
+            "--input",
+            str(refresh_input),
+            "--output",
+            str(refresh_run),
+        ]
+    ) == 0
+
+    captured = capsys.readouterr()
+    assert "Refresh forecast written to" in captured.out
+    manifest = json.loads((refresh_run / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["spec"]["horizon"] == 2
+    assert manifest["spec"]["model_policy"] == "baseline"
+    assert manifest["outputs"]["refresh_manifest"] == "refresh_manifest.json"
+    assert manifest["outputs"]["refresh_delta"] == "appendix/refresh_delta.csv"
+    refresh_manifest = json.loads((refresh_run / "refresh_manifest.json").read_text(encoding="utf-8"))
+    assert refresh_manifest["previous_run"] == str(first_run)
+    delta = pd.read_csv(refresh_run / "appendix" / "refresh_delta.csv")
+    assert "forecast_yhat_change" in set(delta["delta_type"])
+    assert {"delta_type", "field", "previous_value", "current_value", "status"}.issubset(delta.columns)
 
 
 def test_statsforecast_cv_intervals_feed_interval_diagnostics() -> None:
@@ -1194,6 +1395,7 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     run = run_forecast(df, ForecastSpec(horizon=2, model_policy="baseline"))
 
     output_dir = run.to_directory(tmp_path / "run")
+    appendix = output_dir / "appendix"
 
     assert (output_dir / "diagnostics.json").exists()
     assert (output_dir / "diagnostics.md").exists()
@@ -1201,16 +1403,20 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert (output_dir / "audit" / "model_weights.csv").exists()
     assert (output_dir / "audit" / "backtest_predictions.csv").exists()
     assert (output_dir / "audit" / "backtest_windows.csv").exists()
-    assert (output_dir / "forecast_long.csv").exists()
-    assert (output_dir / "backtest_long.csv").exists()
-    assert (output_dir / "series_summary.csv").exists()
-    assert (output_dir / "model_audit.csv").exists()
-    assert (output_dir / "model_win_rates.csv").exists()
-    assert (output_dir / "model_window_metrics.csv").exists()
-    assert (output_dir / "residual_diagnostics.csv").exists()
-    assert (output_dir / "interval_diagnostics.csv").exists()
-    assert (output_dir / "trust_summary.csv").exists()
-    assert (output_dir / "model_explainability.csv").exists()
+    assert (appendix / "forecast_long.csv").exists()
+    assert (appendix / "backtest_long.csv").exists()
+    assert (appendix / "series_summary.csv").exists()
+    assert (appendix / "model_audit.csv").exists()
+    assert (appendix / "model_win_rates.csv").exists()
+    assert (appendix / "model_tradeoff_scores.csv").exists()
+    assert (appendix / "model_pareto_frontier.csv").exists()
+    assert (appendix / "feature_selection_receipts.csv").exists()
+    assert (appendix / "model_window_metrics.csv").exists()
+    assert (appendix / "residual_diagnostics.csv").exists()
+    assert (appendix / "interval_diagnostics.csv").exists()
+    assert (appendix / "trust_summary.csv").exists()
+    assert (appendix / "model_explainability.csv").exists()
+    assert not (output_dir / "forecast_long.csv").exists()
     assert (output_dir / "audit" / "seasonality_profile.csv").exists()
     assert (output_dir / "audit" / "seasonality_summary.csv").exists()
     assert (output_dir / "audit" / "seasonality_diagnostics.csv").exists()
@@ -1230,6 +1436,9 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert "full_horizon_claim_allowed_count" in executive
     assert "full_horizon_validated_count" not in executive
     assert diagnostics["llm_triage_summary"]["weighted_ensemble_enabled"]
+    assert diagnostics["llm_triage_summary"]["model_tradeoff_score_rows"] > 0
+    assert diagnostics["llm_triage_summary"]["model_pareto_frontier_rows"] > 0
+    assert "feature_selection_receipt_rows" in diagnostics["llm_triage_summary"]
     assert "model_weights" in diagnostics
     assert "trust_summary" in diagnostics
     assert "reproducibility" in diagnostics
@@ -1241,13 +1450,19 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert llm_context["executive_headline"]["paragraph"] == executive_paragraph
     assert llm_context["series_reviews"][0]["forecast_rows"]
     assert "trust_summary" in llm_context["portfolio_tables"]
+    assert "model_tradeoff_scores_top_rows" in llm_context["portfolio_tables"]
+    assert "model_pareto_frontier_top_rows" in llm_context["portfolio_tables"]
+    assert "feature_selection_receipts_top_rows" in llm_context["portfolio_tables"]
     assert "recommended_questions" in llm_context
     manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
     assert len(manifest["reproducibility"]["data_hash_sha256"]) == 64
     assert manifest["reproducibility"]["forecast_origin"] == "2025-12-31"
     assert manifest["reproducibility"]["package_versions"]["pandas"] is not None
-    assert manifest["outputs"]["model_win_rates"] == "model_win_rates.csv"
-    assert manifest["outputs"]["trust_summary"] == "trust_summary.csv"
+    assert manifest["outputs"]["model_win_rates"] == "appendix/model_win_rates.csv"
+    assert manifest["outputs"]["model_tradeoff_scores"] == "appendix/model_tradeoff_scores.csv"
+    assert manifest["outputs"]["model_pareto_frontier"] == "appendix/model_pareto_frontier.csv"
+    assert manifest["outputs"]["feature_selection_receipts"] == "appendix/feature_selection_receipts.csv"
+    assert manifest["outputs"]["trust_summary"] == "appendix/trust_summary.csv"
     assert manifest["outputs"]["llm_context"] == "llm_context.json"
     assert manifest["outputs"]["seasonality_diagnostics"] == "audit/seasonality_diagnostics.csv"
     assert manifest["outputs"]["seasonality_decomposition"] == "audit/seasonality_decomposition.csv"
@@ -1257,8 +1472,10 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert policy_families["baseline"]["ran"]
     assert policy_families["statsforecast"]["reason_if_not_ran"] == "not_requested"
     assert "audit/backtest_windows.csv" in "\n".join(diagnostics["next_diagnostic_steps"])
-    assert "model_win_rates.csv" in "\n".join(diagnostics["next_diagnostic_steps"])
-    assert "trust_summary.csv" in "\n".join(diagnostics["next_diagnostic_steps"])
+    assert "appendix/model_win_rates.csv" in "\n".join(diagnostics["next_diagnostic_steps"])
+    assert "appendix/model_pareto_frontier.csv" in "\n".join(diagnostics["next_diagnostic_steps"])
+    assert "appendix/feature_selection_receipts.csv" in "\n".join(diagnostics["next_diagnostic_steps"])
+    assert "appendix/trust_summary.csv" in "\n".join(diagnostics["next_diagnostic_steps"])
     assert "audit/seasonality_diagnostics.csv" in "\n".join(diagnostics["next_diagnostic_steps"])
     assert "executive_headline.paragraph" in "\n".join(diagnostics["next_diagnostic_steps"])
     diagnostics_md = (output_dir / "diagnostics.md").read_text(encoding="utf-8")
@@ -1277,13 +1494,15 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert "Seasonality" in decoded_report
     assert "Seasonality credibility" in decoded_report
     assert "Forecast model review" in decoded_report
+    assert "Model tradeoffs and Pareto frontier" in decoded_report
+    assert "Pareto rows show non-dominated alternatives" in decoded_report
     assert "Executive forecast headline" in decoded_report
     assert executive_paragraph in decoded_report
     assert "Rolling-origin fixed-axis filmstrip" in decoded_report
     assert "Decision summary" in decoded_report
     assert "series-decision-card" in decoded_report
     assert "decision-detail-grid" in decoded_report
-    assert "Use <code>trust_summary.csv</code> for the raw wide table" in decoded_report
+    assert "Use <code>appendix/trust_summary.csv</code> for the raw wide table" in decoded_report
     assert "Trust rubric" in decoded_report
     assert "High &gt;=75" in decoded_report
     assert "Medium 40-74" in decoded_report
@@ -1299,7 +1518,7 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert "component-model intervals" in decoded_report
     assert "future-only bands" in decoded_report
     assert "adjusted-not-recalibrated bands" in decoded_report
-    assert "trust_summary.csv" in decoded_report
+    assert "appendix/trust_summary.csv" in decoded_report
     assert "other candidates shown faint/unlabeled" in decoded_report
     assert "selected intervals" in decoded_report
     assert "(selected)" in decoded_report
@@ -1318,7 +1537,8 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
         "planning_eligibility_reason",
         "horizon_warning",
     }.issubset(forecast.columns)
-    forecast_long = pd.read_csv(output_dir / "forecast_long.csv")
+    appendix = output_dir / "appendix"
+    forecast_long = pd.read_csv(appendix / "forecast_long.csv")
     assert _adjacent_columns(forecast_long, ["yhat", "yhat_lo_80", "yhat_hi_80", "yhat_lo_95", "yhat_hi_95"])
     assert {"record_type", "unique_id", "ds", "model", "family", "yhat", "interval_status", "is_selected_model"}.issubset(
         forecast_long.columns
@@ -1338,20 +1558,33 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert set(forecast_long["family"]) <= {"baseline", "statsforecast", "mlforecast", "ensemble", "unknown"}
     ensemble_status = set(forecast_long.loc[forecast_long["model"] == "WeightedEnsemble", "interval_status"])
     assert ensemble_status <= {"point_only_ensemble"}
-    backtest_long = pd.read_csv(output_dir / "backtest_long.csv")
+    backtest_long = pd.read_csv(appendix / "backtest_long.csv")
     assert _adjacent_columns(backtest_long, ["yhat", "yhat_lo_80", "yhat_hi_80", "yhat_lo_95", "yhat_hi_95"])
     assert {"h", "error", "abs_error", "squared_error", "pct_error"}.issubset(backtest_long.columns)
-    model_audit = pd.read_csv(output_dir / "model_audit.csv")
+    model_audit = pd.read_csv(appendix / "model_audit.csv")
     assert {"model", "family", "rmse", "mase", "rmsse", "is_selected_model"}.issubset(model_audit.columns)
     model_weights = pd.read_csv(output_dir / "audit" / "model_weights.csv")
     assert {"model", "family", "weight", "score_metric", "score_value"}.issubset(model_weights.columns)
-    model_win_rates = pd.read_csv(output_dir / "model_win_rates.csv")
+    model_win_rates = pd.read_csv(appendix / "model_win_rates.csv")
     assert {"benchmark_model", "metric", "model", "win_rate_vs_benchmark"}.issubset(model_win_rates.columns)
-    window_metrics = pd.read_csv(output_dir / "model_window_metrics.csv")
+    model_tradeoff_scores = pd.read_csv(appendix / "model_tradeoff_scores.csv")
+    assert {"model", "family", "selected_model", "is_selected_model", "rmse", "abs_bias"}.issubset(model_tradeoff_scores.columns)
+    model_pareto_frontier = pd.read_csv(appendix / "model_pareto_frontier.csv")
+    assert {
+        "model",
+        "is_pareto_optimal",
+        "pareto_status",
+        "selection_alignment",
+        "metrics_considered",
+        "dominance_scope",
+    }.issubset(model_pareto_frontier.columns)
+    feature_receipts = pd.read_csv(appendix / "feature_selection_receipts.csv")
+    assert {"feature", "feature_role", "final_decision", "cv_evidence_status"}.issubset(feature_receipts.columns)
+    window_metrics = pd.read_csv(appendix / "model_window_metrics.csv")
     assert {"unique_id", "cutoff", "model", "rmse", "mase", "rmsse"}.issubset(window_metrics.columns)
-    residual_diagnostics = pd.read_csv(output_dir / "residual_diagnostics.csv")
+    residual_diagnostics = pd.read_csv(appendix / "residual_diagnostics.csv")
     assert {"unique_id", "model", "horizon_step", "rmse", "mase", "rmsse"}.issubset(residual_diagnostics.columns)
-    residual_tests = pd.read_csv(output_dir / "residual_tests.csv")
+    residual_tests = pd.read_csv(appendix / "residual_tests.csv")
     assert {
         "unique_id",
         "model",
@@ -1364,7 +1597,7 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
         "structural_break_status",
         "interpretation",
     }.issubset(residual_tests.columns)
-    interval_diagnostics = pd.read_csv(output_dir / "interval_diagnostics.csv")
+    interval_diagnostics = pd.read_csv(appendix / "interval_diagnostics.csv")
     assert {
         "coverage_status",
         "interval_status",
@@ -1375,7 +1608,7 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
         "cv_step_size",
         "cv_horizon_matches_requested",
     }.issubset(interval_diagnostics.columns)
-    trust_summary = pd.read_csv(output_dir / "trust_summary.csv")
+    trust_summary = pd.read_csv(appendix / "trust_summary.csv")
     assert {
         "trust_level",
         "trust_score_0_100",
@@ -1397,6 +1630,8 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert {"unique_id", "ds", "observed", "trend", "seasonal", "remainder"}.issubset(seasonality_decomposition.columns)
     workbook = pd.ExcelFile(output_dir / "forecast.xlsx")
     assert "Trust Summary" in workbook.sheet_names
+    assert "Model Tradeoffs" in workbook.sheet_names
+    assert "Pareto Frontier" in workbook.sheet_names
     assert "Residual Tests" in workbook.sheet_names
     assert "Seasonality Diagnostics" in workbook.sheet_names
     assert "Seasonal Decomposition" in workbook.sheet_names
@@ -1519,6 +1754,11 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert "Absolute bias - avoid systematic over/under" in streamlit_app
     assert '"Model investigation"' in streamlit_app
     assert "Models to investigate" in streamlit_app
+    assert "Model tradeoffs / Pareto frontier" in streamlit_app
+    assert 'read_csv("model_pareto_frontier.csv")' in streamlit_app
+    assert 'read_csv("feature_selection_receipts.csv")' in streamlit_app
+    assert "Feature selection receipts" in streamlit_app
+    assert "pareto_tradeoff_chart" in streamlit_app
     assert "Menu labels use `#rank | model | engine`" in streamlit_app
     assert "Model picker guide: rank, engine, and role" in streamlit_app
     assert "Rank comes from the current winner metric" in streamlit_app
@@ -1556,7 +1796,9 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert "Residual white-noise check" in streamlit_app
     assert "residual_outlier_table" in streamlit_app
     assert "interval_calibration_chart" in streamlit_app
-    assert "Hierarchy roll-up / roll-down" in streamlit_app
+    assert "Hierarchy forecast structure" in streamlit_app
+    assert "Parent history + forecast" in streamlit_app
+    assert "Children history + forecast" in streamlit_app
     assert "add_vline" not in streamlit_app
 
 

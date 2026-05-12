@@ -19,9 +19,10 @@ FillMethod = Literal["ffill", "zero", "interpolate", "drop"]
 ModelPolicy = Literal["auto", "baseline", "statsforecast", "mlforecast", "all"]
 EventEffect = Literal["additive", "multiplicative"]
 TargetTransform = Literal["none", "log", "log1p"]
-HierarchyReconciliationMethod = Literal["none", "bottom_up", "mint_ols", "mint_wls_struct"]
+HierarchyReconciliationMethod = Literal["none", "bottom_up", "top_down", "both", "mint_ols", "mint_wls_struct"]
 RegressorAvailability = Literal["calendar", "contracted", "scheduled", "plan", "forecasted", "historical_only"]
 RegressorMode = Literal["audit_only", "model_candidate"]
+MLForecastFeaturePolicy = Literal["basic", "rolling"]
 
 
 @dataclass(frozen=True)
@@ -55,8 +56,8 @@ class DriverEvent:
 class KnownFutureRegressor:
     """Declared candidate model input with future-value and leakage audit metadata.
 
-    Current scaffold releases audit this contract but do not automatically train
-    StatsForecast or MLForecast candidates with arbitrary external regressors.
+    Scaffold releases audit this contract by default. MLForecast can use passing
+    model candidates only when opt-in regressor training is enabled.
     """
 
     name: str
@@ -206,6 +207,8 @@ class ForecastSpec:
     custom_models: tuple[CustomModelSpec, ...] = field(default_factory=tuple)
     transform: TransformSpec = field(default_factory=TransformSpec)
     hierarchy_reconciliation: HierarchyReconciliationMethod = "none"
+    train_known_future_regressors: bool = False
+    mlforecast_feature_policy: MLForecastFeaturePolicy = "basic"
     require_backtest: bool = False
     strict_cv_horizon: bool = False
     weighted_ensemble: bool = True
@@ -227,8 +230,10 @@ class ForecastSpec:
             valid = ", ".join(sorted(MODEL_ALLOWLIST_CANDIDATES))
             raise ValueError(f"unknown model_allowlist entr{'y' if len(unknown_models) == 1 else 'ies'}: {unknown}. Known models: {valid}")
         object.__setattr__(self, "model_allowlist", canonical_models)
-        if self.hierarchy_reconciliation not in {"none", "bottom_up", "mint_ols", "mint_wls_struct"}:
-            raise ValueError("hierarchy_reconciliation must be one of: none, bottom_up, mint_ols, mint_wls_struct")
+        if self.hierarchy_reconciliation not in {"none", "bottom_up", "top_down", "both", "mint_ols", "mint_wls_struct"}:
+            raise ValueError("hierarchy_reconciliation must be one of: none, bottom_up, top_down, both, mint_ols, mint_wls_struct")
+        if self.mlforecast_feature_policy not in {"basic", "rolling"}:
+            raise ValueError("mlforecast_feature_policy must be one of: basic, rolling")
         if len(self.custom_models) > 1:
             raise ValueError("custom model v1 supports at most one custom model per run")
         custom_names = [custom.model_name for custom in self.custom_models]
@@ -248,6 +253,100 @@ class ForecastSpec:
             data.pop("custom_models", None)
         data["transform"] = self.transform.to_dict()
         return data
+
+
+def forecast_spec_from_dict(data: dict[str, Any]) -> ForecastSpec:
+    """Rehydrate a persisted manifest spec into a ForecastSpec."""
+
+    transform_data = data.get("transform") if isinstance(data.get("transform"), dict) else {}
+    events = tuple(_driver_event_from_dict(item) for item in data.get("events", []) if isinstance(item, dict))
+    regressors = tuple(_known_future_regressor_from_dict(item) for item in data.get("regressors", []) if isinstance(item, dict))
+    custom_models = tuple(_custom_model_from_dict(item) for item in data.get("custom_models", []) if isinstance(item, dict))
+    return ForecastSpec(
+        horizon=int(data.get("horizon", 12)),
+        freq=data.get("freq"),
+        season_length=_optional_int(data.get("season_length")),
+        levels=tuple(int(level) for level in data.get("levels", (80, 95))),
+        model_policy=data.get("model_policy", "auto"),
+        fill_method=data.get("fill_method", "ffill"),
+        id_col=data.get("id_col", "unique_id"),
+        time_col=data.get("time_col", "ds"),
+        target_col=data.get("target_col", "y"),
+        unit_label=data.get("unit_label"),
+        model_allowlist=tuple(data.get("model_allowlist", ())),
+        hierarchy=tuple(data.get("hierarchy", ())),
+        events=events,
+        regressors=regressors,
+        custom_models=custom_models,
+        transform=TransformSpec(
+            target=transform_data.get("target", "none"),
+            normalization_factor_col=transform_data.get("normalization_factor_col"),
+            normalization_label=transform_data.get("normalization_label", ""),
+        ),
+        hierarchy_reconciliation=data.get("hierarchy_reconciliation", "none"),
+        train_known_future_regressors=bool(data.get("train_known_future_regressors", False)),
+        mlforecast_feature_policy=data.get("mlforecast_feature_policy", "basic"),
+        require_backtest=bool(data.get("require_backtest", False)),
+        strict_cv_horizon=bool(data.get("strict_cv_horizon", False)),
+        weighted_ensemble=bool(data.get("weighted_ensemble", True)),
+        verbose=bool(data.get("verbose", True)),
+    )
+
+
+def _driver_event_from_dict(data: dict[str, Any]) -> DriverEvent:
+    affected = data.get("affected_unique_ids", ())
+    if isinstance(affected, str):
+        affected_tuple = tuple(part.strip() for part in affected.replace(";", ",").split(",") if part.strip())
+    else:
+        affected_tuple = tuple(str(item) for item in affected or ())
+    return DriverEvent(
+        name=str(data.get("name", "")),
+        start=str(data.get("start", "")),
+        end=str(data["end"]) if data.get("end") not in (None, "") else None,
+        effect=data.get("effect", "multiplicative"),
+        magnitude=float(data.get("magnitude", 0.0)),
+        affected_unique_ids=affected_tuple,
+        confidence=float(data.get("confidence", 1.0)),
+        notes=str(data.get("notes", "")),
+    )
+
+
+def _known_future_regressor_from_dict(data: dict[str, Any]) -> KnownFutureRegressor:
+    return KnownFutureRegressor(
+        name=str(data.get("name", "")),
+        value_col=str(data["value_col"]) if data.get("value_col") not in (None, "") else None,
+        availability=data.get("availability", "historical_only"),
+        mode=data.get("mode", "audit_only"),
+        future_file=str(data["future_file"]) if data.get("future_file") not in (None, "") else None,
+        known_as_of_col=str(data.get("known_as_of_col", "known_as_of")),
+        source_system=str(data.get("source_system", "")),
+        source_query_file=str(data.get("source_query_file", "")),
+        owner=str(data.get("owner", "")),
+        refresh_latency_days=_optional_int(data.get("refresh_latency_days")),
+        notes=str(data.get("notes", "")),
+    )
+
+
+def _custom_model_from_dict(data: dict[str, Any]) -> CustomModelSpec:
+    callable_path = data.get("callable_path")
+    script_path = data.get("script_path")
+    if not callable_path and not script_path:
+        raise ValueError("cannot refresh a manifest custom model without callable_path or script_path")
+    return CustomModelSpec(
+        name=str(data.get("name") or data.get("model_name") or "custom_model"),
+        callable_path=str(callable_path) if callable_path else None,
+        script_path=str(script_path) if script_path else None,
+        timeout_seconds=int(data.get("timeout_seconds", 120)),
+        extra_args=tuple(str(arg) for arg in data.get("extra_args", ())),
+        source_id=str(data.get("source_id", "custom")),
+        notes=str(data.get("notes", "")),
+    )
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    return int(value)
 
 
 @dataclass(frozen=True)
@@ -308,29 +407,35 @@ class ForecastRun:
     model_explainability: pd.DataFrame = field(default_factory=pd.DataFrame)
     transformation_audit: pd.DataFrame = field(default_factory=pd.DataFrame)
     driver_availability_audit: pd.DataFrame = field(default_factory=pd.DataFrame)
+    driver_model_features: pd.DataFrame = field(default_factory=pd.DataFrame)
+    driver_model_cv_delta: pd.DataFrame = field(default_factory=pd.DataFrame)
     custom_model_contracts: pd.DataFrame = field(default_factory=pd.DataFrame)
     custom_model_invocations: pd.DataFrame = field(default_factory=pd.DataFrame)
     unreconciled_forecast: pd.DataFrame = field(default_factory=pd.DataFrame)
     hierarchy_reconciliation: pd.DataFrame = field(default_factory=pd.DataFrame)
+    hierarchy_reconciliation_comparison: pd.DataFrame = field(default_factory=pd.DataFrame)
     warnings: list[str] = field(default_factory=list)
     engine: str = "baseline"
     model_policy_resolution: dict[str, Any] = field(default_factory=dict)
 
     def manifest(self) -> dict[str, Any]:
         outputs = {
-            "history": "history.csv",
+            "history": "appendix/history.csv",
             "forecast": "forecast.csv",
-            "forecast_long": "forecast_long.csv",
-            "backtest_long": "backtest_long.csv",
-            "series_summary": "series_summary.csv",
-            "model_audit": "model_audit.csv",
-            "model_win_rates": "model_win_rates.csv",
-            "model_window_metrics": "model_window_metrics.csv",
-            "residual_diagnostics": "residual_diagnostics.csv",
-            "residual_tests": "residual_tests.csv",
-            "interval_diagnostics": "interval_diagnostics.csv",
-            "trust_summary": "trust_summary.csv",
-            "model_explainability": "model_explainability.csv",
+            "forecast_long": "appendix/forecast_long.csv",
+            "backtest_long": "appendix/backtest_long.csv",
+            "series_summary": "appendix/series_summary.csv",
+            "model_audit": "appendix/model_audit.csv",
+            "model_win_rates": "appendix/model_win_rates.csv",
+            "model_tradeoff_scores": "appendix/model_tradeoff_scores.csv",
+            "model_pareto_frontier": "appendix/model_pareto_frontier.csv",
+            "feature_selection_receipts": "appendix/feature_selection_receipts.csv",
+            "model_window_metrics": "appendix/model_window_metrics.csv",
+            "residual_diagnostics": "appendix/residual_diagnostics.csv",
+            "residual_tests": "appendix/residual_tests.csv",
+            "interval_diagnostics": "appendix/interval_diagnostics.csv",
+            "trust_summary": "appendix/trust_summary.csv",
+            "model_explainability": "appendix/model_explainability.csv",
             "all_models": "audit/all_models.csv",
             "model_selection": "audit/model_selection.csv",
             "backtest_metrics": "audit/backtest_metrics.csv",
@@ -347,7 +452,7 @@ class ForecastRun:
             "html_report": "report.html",
             "html_report_base64": "report_base64.txt",
             "streamlit_app": "streamlit_app.py",
-            "best_practice_receipts": "best_practice_receipts.csv",
+            "best_practice_receipts": "appendix/best_practice_receipts.csv",
             "diagnostics": "diagnostics.json",
             "diagnostics_markdown": "diagnostics.md",
             "llm_context": "llm_context.json",
@@ -355,25 +460,32 @@ class ForecastRun:
             "workbook": "forecast.xlsx",
         }
         if "hierarchy_depth" in self.forecast.columns:
-            outputs["hierarchy_coherence"] = "hierarchy_coherence.csv"
-            outputs["hierarchy_contribution"] = "hierarchy_contribution.csv"
+            outputs["hierarchy_rollup"] = "appendix/hierarchy_rollup.csv"
+            outputs["hierarchy_coherence"] = "appendix/hierarchy_coherence.csv"
+            outputs["hierarchy_contribution"] = "appendix/hierarchy_contribution.csv"
             outputs["hierarchy_backtest_comparison"] = "audit/hierarchy_backtest_comparison.csv"
             if not self.unreconciled_forecast.empty:
                 outputs["hierarchy_unreconciled_forecast"] = "audit/hierarchy_unreconciled_forecast.csv"
                 outputs["hierarchy_coherence_pre"] = "audit/hierarchy_coherence_pre.csv"
                 outputs["hierarchy_coherence_post"] = "audit/hierarchy_coherence_post.csv"
             if not self.hierarchy_reconciliation.empty:
-                outputs["hierarchy_reconciliation"] = "hierarchy_reconciliation.csv"
+                outputs["hierarchy_reconciliation"] = "appendix/hierarchy_reconciliation.csv"
+            if not self.hierarchy_reconciliation_comparison.empty:
+                outputs["hierarchy_reconciliation_comparison"] = "appendix/hierarchy_reconciliation_comparison.csv"
         if self.spec.events:
-            outputs["scenario_assumptions"] = "scenario_assumptions.csv"
-            outputs["scenario_forecast"] = "scenario_forecast.csv"
-            outputs["driver_experiment_summary"] = "driver_experiment_summary.csv"
+            outputs["scenario_assumptions"] = "appendix/scenario_assumptions.csv"
+            outputs["scenario_forecast"] = "appendix/scenario_forecast.csv"
+            outputs["driver_experiment_summary"] = "appendix/driver_experiment_summary.csv"
         if self.spec.regressors or not self.driver_availability_audit.empty:
-            outputs["known_future_regressors"] = "known_future_regressors.csv"
-            outputs["driver_availability_audit"] = "driver_availability_audit.csv"
-            outputs["driver_experiment_summary"] = "driver_experiment_summary.csv"
+            outputs["known_future_regressors"] = "appendix/known_future_regressors.csv"
+            outputs["driver_availability_audit"] = "appendix/driver_availability_audit.csv"
+            outputs["driver_experiment_summary"] = "appendix/driver_experiment_summary.csv"
+        if not self.driver_model_features.empty:
+            outputs["driver_model_features"] = "appendix/driver_model_features.csv"
+        if not self.driver_model_cv_delta.empty:
+            outputs["driver_model_cv_delta"] = "appendix/driver_model_cv_delta.csv"
         if self.spec.custom_models or not self.custom_model_contracts.empty or not self.custom_model_invocations.empty:
-            outputs["custom_model_contracts"] = "custom_model_contracts.csv"
+            outputs["custom_model_contracts"] = "appendix/custom_model_contracts.csv"
             outputs["custom_model_invocations"] = "audit/custom_model_invocations.csv"
         return {
             "engine": self.engine,

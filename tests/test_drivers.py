@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import pandas as pd
+import pytest
 
 from nixtla_scaffold import DriverEvent, ForecastSpec, KnownFutureRegressor, run_forecast
 from nixtla_scaffold.cli import main
@@ -31,6 +32,19 @@ def _future_driver_file(path, *, periods: int = 2, known_as_of: str = "2025-12-1
             "known_as_of": [known_as_of] * periods,
         }
     ).to_csv(path, index=False)
+
+
+def _ml_history_frame(periods: int = 36) -> pd.DataFrame:
+    dates = pd.date_range("2023-01-31", periods=periods, freq="ME")
+    seats = [50 + idx for idx in range(periods)]
+    return pd.DataFrame(
+        {
+            "unique_id": ["Revenue"] * periods,
+            "ds": dates,
+            "y": [100 + idx * 3 + seats[idx] * 0.4 for idx in range(periods)],
+            "seats_plan": seats,
+        }
+    )
 
 
 def test_driver_file_parsers_support_events_and_regressors(tmp_path) -> None:
@@ -107,16 +121,17 @@ def test_driver_contract_outputs_reports_and_workbook_surfaces(tmp_path) -> None
         ForecastSpec(horizon=2, freq="ME", model_policy="baseline", events=(event,), regressors=(regressor,)),
     )
     output_dir = run.to_directory(tmp_path / "run")
+    appendix = output_dir / "appendix"
 
-    assert (output_dir / "scenario_assumptions.csv").exists()
-    assert (output_dir / "scenario_forecast.csv").exists()
-    assert (output_dir / "known_future_regressors.csv").exists()
-    assert (output_dir / "driver_availability_audit.csv").exists()
-    assert (output_dir / "driver_experiment_summary.csv").exists()
-    audit = pd.read_csv(output_dir / "driver_availability_audit.csv")
+    assert (appendix / "scenario_assumptions.csv").exists()
+    assert (appendix / "scenario_forecast.csv").exists()
+    assert (appendix / "known_future_regressors.csv").exists()
+    assert (appendix / "driver_availability_audit.csv").exists()
+    assert (appendix / "driver_experiment_summary.csv").exists()
+    audit = pd.read_csv(appendix / "driver_availability_audit.csv")
     assert audit["audit_status"].tolist() == ["passed"]
     assert audit["modeling_decision"].tolist() == ["candidate_audited_not_trained"]
-    scenario_forecast = pd.read_csv(output_dir / "scenario_forecast.csv")
+    scenario_forecast = pd.read_csv(appendix / "scenario_forecast.csv")
     assert {
         "horizon_step",
         "row_horizon_status",
@@ -129,11 +144,11 @@ def test_driver_contract_outputs_reports_and_workbook_surfaces(tmp_path) -> None
     }.issubset(scenario_forecast.columns)
     assert any("not automatically trained" in warning for warning in run.warnings)
     manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["outputs"]["scenario_assumptions"] == "scenario_assumptions.csv"
-    assert manifest["outputs"]["scenario_forecast"] == "scenario_forecast.csv"
-    assert manifest["outputs"]["known_future_regressors"] == "known_future_regressors.csv"
-    assert manifest["outputs"]["driver_availability_audit"] == "driver_availability_audit.csv"
-    assert manifest["outputs"]["driver_experiment_summary"] == "driver_experiment_summary.csv"
+    assert manifest["outputs"]["scenario_assumptions"] == "appendix/scenario_assumptions.csv"
+    assert manifest["outputs"]["scenario_forecast"] == "appendix/scenario_forecast.csv"
+    assert manifest["outputs"]["known_future_regressors"] == "appendix/known_future_regressors.csv"
+    assert manifest["outputs"]["driver_availability_audit"] == "appendix/driver_availability_audit.csv"
+    assert manifest["outputs"]["driver_experiment_summary"] == "appendix/driver_experiment_summary.csv"
 
     report_html = (output_dir / "report.html").read_text(encoding="utf-8")
     assert "Assumptions and drivers" in report_html
@@ -152,6 +167,116 @@ def test_driver_contract_outputs_reports_and_workbook_surfaces(tmp_path) -> None
     assert "Known Future Regressors" in workbook.sheet_names
     assert "Driver Audit" in workbook.sheet_names
     assert "Driver Experiments" in workbook.sheet_names
+
+
+def test_known_future_regressors_are_audit_only_by_default_even_with_mlforecast(tmp_path) -> None:
+    pytest.importorskip("mlforecast")
+    future_file = tmp_path / "future_seats.csv"
+    _future_driver_file(future_file)
+    regressor = KnownFutureRegressor(
+        name="Seats plan",
+        value_col="seats_plan",
+        availability="plan",
+        mode="model_candidate",
+        future_file=str(future_file),
+    )
+
+    run = run_forecast(
+        _ml_history_frame(),
+        ForecastSpec(
+            horizon=2,
+            freq="ME",
+            levels=(),
+            model_policy="mlforecast",
+            model_allowlist=("LinearRegression",),
+            regressors=(regressor,),
+            weighted_ensemble=False,
+            verbose=False,
+        ),
+    )
+
+    assert run.driver_model_features.empty
+    audit = run.driver_availability_audit.set_index("name")
+    assert audit.loc["Seats plan", "audit_status"] == "passed"
+    assert audit.loc["Seats plan", "modeling_decision"] == "candidate_audited_not_trained"
+    assert any("not automatically trained unless train_known_future_regressors=True" in warning for warning in run.warnings)
+
+
+def test_opt_in_known_future_regressors_feed_mlforecast_artifacts(tmp_path) -> None:
+    pytest.importorskip("mlforecast")
+    future_file = tmp_path / "future_seats.csv"
+    _future_driver_file(future_file)
+    regressor = KnownFutureRegressor(
+        name="Seats plan",
+        value_col="seats_plan",
+        availability="plan",
+        mode="model_candidate",
+        future_file=str(future_file),
+    )
+
+    run = run_forecast(
+        _ml_history_frame(),
+        ForecastSpec(
+            horizon=2,
+            freq="ME",
+            levels=(),
+            model_policy="mlforecast",
+            model_allowlist=("LinearRegression",),
+            regressors=(regressor,),
+            train_known_future_regressors=True,
+            weighted_ensemble=False,
+            verbose=False,
+        ),
+    )
+    output_dir = run.to_directory(tmp_path / "run")
+
+    feature_gate = run.driver_model_features.set_index("name")
+    assert feature_gate.loc["Seats plan", "status"] == "included"
+    assert feature_gate.loc["Seats plan", "modeling_decision"] == "included_mlforecast_model_candidate"
+    assert "seats_plan" in set(run.model_explainability["feature"])
+    assert not run.driver_model_cv_delta.empty
+    assert (output_dir / "appendix" / "driver_model_features.csv").exists()
+    assert (output_dir / "appendix" / "driver_model_cv_delta.csv").exists()
+    workbook = pd.ExcelFile(output_dir / "forecast.xlsx")
+    assert "Driver Model Features" in workbook.sheet_names
+    assert "Driver Model CV Delta" in workbook.sheet_names
+
+
+def test_historical_only_regressor_lags_feed_mlforecast_without_future_file(tmp_path) -> None:
+    pytest.importorskip("mlforecast")
+    regressor = KnownFutureRegressor(
+        name="Historical seats",
+        value_col="seats_plan",
+        availability="historical_only",
+        mode="model_candidate",
+    )
+
+    run = run_forecast(
+        _ml_history_frame(40),
+        ForecastSpec(
+            horizon=2,
+            freq="ME",
+            levels=(),
+            model_policy="mlforecast",
+            model_allowlist=("LinearRegression",),
+            regressors=(regressor,),
+            train_known_future_regressors=True,
+            weighted_ensemble=False,
+            verbose=False,
+        ),
+    )
+    output_dir = run.to_directory(tmp_path / "historical_lag_run")
+
+    feature_gate = run.driver_model_features.set_index("name")
+    assert feature_gate.loc["Historical seats", "status"] == "included"
+    assert feature_gate.loc["Historical seats", "modeling_decision"] == "included_mlforecast_historical_lag_candidate"
+    assert "seats_plan_lag_2" in feature_gate.loc["Historical seats", "feature_columns"]
+    assert feature_gate.loc["Historical seats", "future_rows"] == 0
+    assert "seats_plan_lag_2" in set(run.model_explainability["feature"].astype(str))
+    receipts = pd.read_csv(output_dir / "appendix" / "feature_selection_receipts.csv")
+    receipt = receipts.set_index("feature").loc["seats_plan_lag_2"]
+    assert receipt["feature_role"] == "historical_only_lag_regressor"
+    assert receipt["final_decision"] == "included_and_seen_in_model"
 
 
 def test_known_future_regressor_audit_fails_closed_for_leakage_and_future_contracts(tmp_path) -> None:
@@ -222,11 +347,12 @@ def test_known_future_regressor_audit_fails_closed_for_leakage_and_future_contra
     )
 
     audit = run.driver_availability_audit.set_index("name")
-    assert set(audit["audit_status"]) == {"failed"}
+    assert set(audit["audit_status"]) == {"failed", "passed"}
     assert "future values missing" in audit.loc["Missing plan", "audit_message"]
     assert "target leakage" in audit.loc["Actual", "audit_message"]
     assert "target leakage" in audit.loc["Revenue proxy", "audit_message"]
-    assert "historical_only regressors cannot be model candidates" in audit.loc["Historical seats", "audit_message"]
+    assert audit.loc["Historical seats", "modeling_decision"] == "candidate_audited_not_trained"
+    assert audit.loc["Historical seats", "future_scope"] == "not_required_historical_only"
     assert "after the forecast origin" in audit.loc["Late plan", "audit_message"]
     assert "missing known_as_of_col" in audit.loc["No timing provenance", "audit_message"]
 
@@ -276,9 +402,10 @@ def test_cli_event_file_and_regressor_declaration_write_driver_artifacts(tmp_pat
     )
 
     assert exit_code == 0
-    assert (output_dir / "scenario_assumptions.csv").exists()
-    assert (output_dir / "scenario_forecast.csv").exists()
-    assert (output_dir / "known_future_regressors.csv").exists()
-    assert (output_dir / "driver_availability_audit.csv").exists()
-    assert (output_dir / "driver_experiment_summary.csv").exists()
+    appendix = output_dir / "appendix"
+    assert (appendix / "scenario_assumptions.csv").exists()
+    assert (appendix / "scenario_forecast.csv").exists()
+    assert (appendix / "known_future_regressors.csv").exists()
+    assert (appendix / "driver_availability_audit.csv").exists()
+    assert (appendix / "driver_experiment_summary.csv").exists()
     assert "Forecast written to" in capsys.readouterr().out

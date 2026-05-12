@@ -13,12 +13,22 @@ def build_run_diagnostics(run: Any) -> dict[str, Any]:
     """Build an LLM-readable runbook for debugging and handoff."""
 
     from nixtla_scaffold.headline import build_executive_headline
-    from nixtla_scaffold.outputs import build_hierarchy_backtest_comparison, build_residual_test_summary, build_trust_summary
+    from nixtla_scaffold.outputs import (
+        build_hierarchy_backtest_comparison,
+        build_feature_selection_receipts,
+        build_model_pareto_frontier,
+        build_model_tradeoff_scores,
+        build_residual_test_summary,
+        build_trust_summary,
+    )
 
     manifest = run.manifest()
     trust_summary = build_trust_summary(run)
     residual_tests = build_residual_test_summary(run)
     hierarchy_backtest = build_hierarchy_backtest_comparison(run)
+    model_tradeoffs = build_model_tradeoff_scores(run)
+    pareto_frontier = build_model_pareto_frontier(run)
+    feature_receipts = build_feature_selection_receipts(run)
     executive_headline = build_executive_headline(run).to_dict()
     driver_audit_distribution = (
         run.driver_availability_audit["audit_status"].value_counts().sort_index().to_dict()
@@ -62,15 +72,21 @@ def build_run_diagnostics(run: Any) -> dict[str, Any]:
             "scenario_event_count": len(run.spec.events),
             "known_future_regressor_count": len(run.spec.regressors),
             "driver_availability_audit_rows": int(len(run.driver_availability_audit)),
+            "driver_model_feature_rows": int(len(getattr(run, "driver_model_features", []))),
+            "driver_model_cv_delta_rows": int(len(getattr(run, "driver_model_cv_delta", []))),
             "driver_audit_distribution": driver_audit_distribution,
             "custom_model_count": len(run.spec.custom_models),
             "custom_model_contract_rows": int(len(run.custom_model_contracts)),
             "custom_model_invocation_rows": int(len(run.custom_model_invocations)),
             "hierarchy_reconciliation": run.spec.hierarchy_reconciliation,
             "hierarchy_reconciliation_rows": int(len(run.hierarchy_reconciliation)),
+            "hierarchy_reconciliation_comparison_rows": int(len(run.hierarchy_reconciliation_comparison)),
             "weighted_ensemble_enabled": run.spec.weighted_ensemble,
             "weighted_ensemble_weight_rows": int(len(run.model_weights)),
             "model_explainability_rows": int(len(run.model_explainability)),
+            "feature_selection_receipt_rows": int(len(feature_receipts)),
+            "model_tradeoff_score_rows": int(len(model_tradeoffs)),
+            "model_pareto_frontier_rows": int(len(pareto_frontier)),
             "residual_test_rows": int(len(residual_tests)),
             "residual_test_distribution": residual_test_distribution,
             "hierarchy_backtest_comparison_rows": int(len(hierarchy_backtest)),
@@ -91,10 +107,13 @@ def build_run_diagnostics(run: Any) -> dict[str, Any]:
         "model_selection": _records(run.model_selection),
         "model_weights": _records(run.model_weights),
         "model_explainability": _records(run.model_explainability),
+        "feature_selection_receipts": _records(feature_receipts),
         "custom_model_contracts": _records(run.custom_model_contracts),
         "custom_model_invocations": _records(run.custom_model_invocations),
         "residual_tests": _records(residual_tests),
         "driver_availability_audit": _records(run.driver_availability_audit),
+        "driver_model_features": _records(getattr(run, "driver_model_features", pd.DataFrame())),
+        "driver_model_cv_delta": _records(getattr(run, "driver_model_cv_delta", pd.DataFrame())),
         "trust_summary": _records(trust_summary),
         "reproducibility": manifest["reproducibility"],
         "best_practice_receipts": run.best_practice_receipts(),
@@ -104,29 +123,33 @@ def build_run_diagnostics(run: Any) -> dict[str, Any]:
             "Open model_card.md first for the human-readable forecast narrative.",
             "Open llm_context.json when asking an LLM to walk through the run; it bundles headline, trust, horizon, interval, residual, seasonality, hierarchy, driver, and artifact-index context.",
             "Open diagnostics.json for machine-readable run context and warnings.",
-            "Open trust_summary.csv first for per-series High/Medium/Low readiness, caveats, and next actions.",
+            "Open appendix/trust_summary.csv first for per-series High/Medium/Low readiness, caveats, and next actions.",
             "Filter forecast.csv to planning_eligible=True when users ask for stakeholder-ready horizon rows.",
             "Check horizon_trust_state, validated_through_horizon, and full_horizon_claim_allowed before calling a forecast planning-ready for the full requested horizon.",
             "Open audit/target_transform_audit.csv when target transforms or finance normalization are enabled; confirm whether outputs are raw units or normalized units.",
-            "Open scenario_assumptions.csv and scenario_forecast.csv when event overlays are present; keep baseline yhat separate from yhat_scenario.",
-            "Open known_future_regressors.csv and driver_availability_audit.csv when regressors are declared; model_candidate rows must pass future availability and leakage checks before future exogenous modeling work.",
+            "Open appendix/scenario_assumptions.csv and appendix/scenario_forecast.csv when event overlays are present; keep baseline yhat separate from yhat_scenario.",
+            "Open appendix/known_future_regressors.csv and appendix/driver_availability_audit.csv when regressors are declared; model_candidate rows must pass future availability and leakage checks before future exogenous modeling work.",
+            "Open appendix/driver_model_features.csv and appendix/driver_model_cv_delta.csv when train_known_future_regressors=True to see which audited drivers actually entered MLForecast and how they scored.",
+            "Open appendix/feature_selection_receipts.csv for descriptive MLForecast feature evidence; it does not auto-prune features or override backtest selection.",
             "Check profile.json for inferred frequency, season length, short histories, and repaired gaps.",
-            "Check series_summary.csv and model_audit.csv before trusting a selected model.",
-            "Check model_win_rates.csv to see which models beat SeasonalNaive/Naive across series.",
-            "Open backtest_long.csv and model_window_metrics.csv to inspect each rolling-origin cutoff with actuals, errors, and model forecasts.",
-            "Open residual_diagnostics.csv for horizon-step error diagnostics and interval_diagnostics.csv for empirical prediction-interval coverage when available.",
-            "Open residual_tests.csv for heuristic residual bias, one-step autocorrelation, outlier, and early/late structural-break checks over rolling-origin residuals. Treat failures as diagnostic signals, not formal model adequacy certification; small samples are directional only.",
-            "Open model_explainability.csv when MLForecast models run to inspect lag/date feature importance or coefficient magnitudes.",
+            "Check appendix/series_summary.csv and appendix/model_audit.csv before trusting a selected model.",
+            "Check appendix/model_win_rates.csv to see which models beat SeasonalNaive/Naive across series.",
+            "Open appendix/model_tradeoff_scores.csv and appendix/model_pareto_frontier.csv when RMSE, WAPE, scale-free errors, or bias disagree; Pareto is a non-authoritative review lens and does not override the selected forecast.",
+            "Open appendix/backtest_long.csv and appendix/model_window_metrics.csv to inspect each rolling-origin cutoff with actuals, errors, and model forecasts.",
+            "Open appendix/residual_diagnostics.csv for horizon-step error diagnostics and appendix/interval_diagnostics.csv for empirical prediction-interval coverage when available.",
+            "Open appendix/residual_tests.csv for heuristic residual bias, one-step autocorrelation, outlier, and early/late structural-break checks over rolling-origin residuals. Treat failures as diagnostic signals, not formal model adequacy certification; small samples are directional only.",
+            "Open appendix/model_explainability.csv when MLForecast models run to inspect lag/date, rolling, and driver feature importance or coefficient magnitudes.",
             "Open audit/backtest_windows.csv and audit/backtest_predictions.csv for the raw wide cross-validation audit trail.",
             "Open audit/seasonality_diagnostics.csv and audit/seasonality_decomposition.csv to check cycle counts, credibility labels, trend/seasonal/remainder evidence, and warnings.",
-            "If hierarchy metadata exists, open hierarchy_contribution.csv to see which child nodes drive each parent and how each child is allocated to parent-child incoherence.",
-            "If hierarchy reconciliation is enabled, open hierarchy_reconciliation.csv plus audit/hierarchy_backtest_comparison.csv, audit/hierarchy_coherence_pre.csv, and audit/hierarchy_coherence_post.csv to compare planning coherence and node-level accuracy before and after reconciliation.",
+            "If hierarchy metadata exists, open appendix/hierarchy_contribution.csv to see which child nodes drive each parent and how each child is allocated to parent-child incoherence.",
+            "If hierarchy metadata exists, open appendix/hierarchy_rollup.csv for parent-level history and selected-forecast rollups with immediate-child sums and child coverage.",
+            "If hierarchy reconciliation is enabled, open appendix/hierarchy_reconciliation.csv plus audit/hierarchy_backtest_comparison.csv, audit/hierarchy_coherence_pre.csv, and audit/hierarchy_coherence_post.csv to compare planning coherence and node-level accuracy before and after reconciliation. For --hierarchy-reconciliation both, also open appendix/hierarchy_reconciliation_comparison.csv to compare bottom-up and top-down paths.",
             "Open interpretation.md for a human-readable backtesting and seasonality summary.",
             "Check audit/model_weights.csv when WeightedEnsemble is selected or present.",
             "Open report.html for the portable fixed-axis filmstrip report, or decode report_base64.txt for text-only handoff.",
             "Run streamlit run streamlit_app.py inside the output folder for the interactive CV window player.",
-            "Check forecast_long.csv for all future model predictions and forecast.csv for selected yhat, intervals, interval_status, scenario columns, and event_names.",
-            "If hierarchy_depth exists, check hierarchy_coherence.csv before comparing parent and child forecasts.",
+            "Check appendix/forecast_long.csv for all future model predictions and forecast.csv for selected yhat, intervals, interval_status, scenario columns, and event_names.",
+            "If hierarchy_depth exists, check appendix/hierarchy_coherence.csv before comparing parent and child forecasts.",
         ],
     }
 
@@ -144,10 +167,14 @@ def build_llm_context(run: Any) -> dict[str, Any]:
     from nixtla_scaffold.interpretation import seasonality_diagnostics_frame, seasonality_summary_frame
     from nixtla_scaffold.outputs import (
         build_forecast_long,
+        build_feature_selection_receipts,
         build_hierarchy_backtest_comparison,
         build_hierarchy_contribution_frame,
+        build_hierarchy_rollup_frame,
         build_interval_diagnostics,
         build_model_audit,
+        build_model_pareto_frontier,
+        build_model_tradeoff_scores,
         build_model_win_rates,
         build_model_window_metrics,
         build_residual_diagnostics,
@@ -167,7 +194,11 @@ def build_llm_context(run: Any) -> dict[str, Any]:
     interval_diagnostics = build_interval_diagnostics(run)
     seasonality_diagnostics = seasonality_diagnostics_frame(run)
     driver_experiment_summary = build_driver_experiment_summary_frame(run)
+    feature_receipts = build_feature_selection_receipts(run)
+    model_tradeoffs = build_model_tradeoff_scores(run)
+    pareto_frontier = build_model_pareto_frontier(run)
     hierarchy_contribution = build_hierarchy_contribution_frame(run)
+    hierarchy_rollup = build_hierarchy_rollup_frame(run)
     hierarchy_backtest = build_hierarchy_backtest_comparison(run)
     series_ids = _series_ids(selected_forecast, trust_summary, model_selection)
 
@@ -187,7 +218,9 @@ def build_llm_context(run: Any) -> dict[str, Any]:
             "Prediction intervals are planning-ready uncertainty bands only when interval_status is calibrated; future-only or adjusted bands need extra review.",
             "Residual tests are heuristic screening signals, not formal model adequacy certification.",
             "Hierarchy reconciliation enforces coherence and may improve or worsen node-level accuracy.",
-            "Known-future regressors are audited for leakage/future coverage in this release; arbitrary external regressors are not auto-trained.",
+            "Known-future regressors are audited for leakage/future coverage by default; MLForecast trains them only when opt-in training is enabled and the feature gate passes.",
+            "Feature-selection receipts are descriptive evidence only; they do not prune features or create a separate validation claim.",
+            "Pareto frontier rows are a non-dominated tradeoff review lens; they do not change the official selected model or forecast.csv.",
         ],
         "executive_headline": build_executive_headline(run).to_dict(),
         "run_summary": build_run_diagnostics(run)["llm_triage_summary"],
@@ -216,6 +249,9 @@ def build_llm_context(run: Any) -> dict[str, Any]:
             "series_summary": _records(series_summary),
             "model_audit_top_rows": _records(build_model_audit(run).head(200)),
             "model_win_rates": _records(build_model_win_rates(run)),
+            "model_tradeoff_scores_top_rows": _records(model_tradeoffs.head(200)),
+            "model_pareto_frontier_top_rows": _records(pareto_frontier.head(200)),
+            "feature_selection_receipts_top_rows": _records(feature_receipts.head(200)),
             "model_window_metrics_top_rows": _records(build_model_window_metrics(run).head(200)),
             "residual_diagnostics_top_rows": _records(build_residual_diagnostics(run).head(200)),
             "residual_tests": _records(residual_tests),
@@ -225,7 +261,9 @@ def build_llm_context(run: Any) -> dict[str, Any]:
             "driver_experiment_summary": _records(driver_experiment_summary),
             "custom_model_contracts": _records(run.custom_model_contracts),
             "custom_model_invocations": _records(run.custom_model_invocations.head(200)),
+            "hierarchy_rollup_top_rows": _records(hierarchy_rollup.head(200)),
             "hierarchy_contribution_top_rows": _records(hierarchy_contribution.head(200)),
+            "hierarchy_reconciliation_comparison_top_rows": _records(run.hierarchy_reconciliation_comparison.head(200)),
             "hierarchy_backtest_comparison_top_rows": _records(hierarchy_backtest.head(200)),
         },
         "assumptions_and_drivers": {
@@ -240,6 +278,7 @@ def build_llm_context(run: Any) -> dict[str, Any]:
             "Which series are High/Medium/Low trust, and what should I do first?",
             "Which forecast rows are horizon-validated versus directional?",
             "Do the selected models beat simple Naive or SeasonalNaive benchmarks?",
+            "Is the selected model Pareto-optimal across RMSE, MAE, WAPE, MASE/RMSSE, and absolute bias, or are there non-dominated alternatives to review?",
             "Are intervals calibrated enough for stakeholder ranges?",
             "Do residual tests show bias, autocorrelation, outliers, or structural breaks?",
             "Is seasonality credible, or is the series too short?",
@@ -279,9 +318,13 @@ def format_run_diagnostics_markdown(run: Any) -> str:
         f"- Custom model invocation rows: {summary['custom_model_invocation_rows']}",
         f"- Hierarchy reconciliation: `{summary['hierarchy_reconciliation']}`",
         f"- Hierarchy reconciliation rows: {summary['hierarchy_reconciliation_rows']}",
+        f"- Hierarchy reconciliation comparison rows: {summary['hierarchy_reconciliation_comparison_rows']}",
         f"- Weighted ensemble enabled: {summary['weighted_ensemble_enabled']}",
         f"- Model weight rows: {summary['weighted_ensemble_weight_rows']}",
         f"- Model explainability rows: {summary['model_explainability_rows']}",
+        f"- Feature selection receipt rows: {summary['feature_selection_receipt_rows']}",
+        f"- Model tradeoff score rows: {summary['model_tradeoff_score_rows']}",
+        f"- Model Pareto frontier rows: {summary['model_pareto_frontier_rows']}",
         f"- Residual test rows: {summary['residual_test_rows']}",
         f"- Residual test distribution: {summary['residual_test_distribution'] or 'N/A'}",
         f"- Hierarchy backtest comparison rows: {summary['hierarchy_backtest_comparison_rows']}",

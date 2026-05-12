@@ -233,7 +233,7 @@ def build_interpretation_payload(run: Any) -> dict[str, Any]:
             "windows": _records(windows),
             "notes": [
                 "Each cutoff is a historical training endpoint; rows after the cutoff are forecast-vs-actual holdout periods.",
-                "Compare backtest_long.csv with audit/backtest_windows.csv to understand model behavior over time.",
+                "Compare appendix/backtest_long.csv with audit/backtest_windows.csv to understand model behavior over time.",
             ],
         },
         "naive_comparison": naive_comparison,

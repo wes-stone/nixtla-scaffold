@@ -316,11 +316,14 @@ def _check_required_artifacts(run_dir: Path, scenario: str) -> tuple[str, list[s
     scenario = _canonical_scenario(scenario)
     required = [
         "forecast.csv",
-        "forecast_long.csv",
-        "backtest_long.csv",
-        "series_summary.csv",
-        "model_audit.csv",
-        "trust_summary.csv",
+        "appendix/forecast_long.csv",
+        "appendix/backtest_long.csv",
+        "appendix/series_summary.csv",
+        "appendix/model_audit.csv",
+        "appendix/model_tradeoff_scores.csv",
+        "appendix/model_pareto_frontier.csv",
+        "appendix/feature_selection_receipts.csv",
+        "appendix/trust_summary.csv",
         "diagnostics.json",
         "llm_context.json",
         "model_card.md",
@@ -335,7 +338,8 @@ def _check_required_artifacts(run_dir: Path, scenario: str) -> tuple[str, list[s
     if scenario == "hierarchy_reconciled":
         required.extend(
             [
-                "hierarchy_reconciliation.csv",
+                "appendix/hierarchy_reconciliation.csv",
+                "appendix/hierarchy_rollup.csv",
                 "audit/hierarchy_unreconciled_forecast.csv",
                 "audit/hierarchy_coherence_pre.csv",
                 "audit/hierarchy_coherence_post.csv",
@@ -344,7 +348,7 @@ def _check_required_artifacts(run_dir: Path, scenario: str) -> tuple[str, list[s
     if scenario == "normalized_target_forecast":
         required.append("audit/target_transform_audit.csv")
     if scenario == "custom_model_challenger":
-        required.extend(["custom_model_contracts.csv", "audit/custom_model_invocations.csv"])
+        required.extend(["appendix/custom_model_contracts.csv", "audit/custom_model_invocations.csv"])
     missing = [path for path in required if not (run_dir / path).exists()]
     return ("passed" if not missing else "failed", missing)
 

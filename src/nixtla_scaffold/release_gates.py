@@ -49,13 +49,16 @@ REQUIRED_SDIST_MEMBERS = (
     "skills/nixtla-forecast/SKILL.md",
 )
 REQUIRED_RUN_OUTPUTS = (
-    "history.csv",
+    "appendix/history.csv",
     "forecast.csv",
-    "forecast_long.csv",
-    "backtest_long.csv",
-    "series_summary.csv",
-    "model_audit.csv",
-    "trust_summary.csv",
+    "appendix/forecast_long.csv",
+    "appendix/backtest_long.csv",
+    "appendix/series_summary.csv",
+    "appendix/model_audit.csv",
+    "appendix/model_tradeoff_scores.csv",
+    "appendix/model_pareto_frontier.csv",
+    "appendix/feature_selection_receipts.csv",
+    "appendix/trust_summary.csv",
     "diagnostics.json",
     "diagnostics.md",
     "llm_context.json",
@@ -64,7 +67,7 @@ REQUIRED_RUN_OUTPUTS = (
     "report_base64.txt",
     "streamlit_app.py",
     "forecast.xlsx",
-    "best_practice_receipts.csv",
+    "appendix/best_practice_receipts.csv",
     "audit/model_selection.csv",
     "audit/backtest_metrics.csv",
     "audit/backtest_predictions.csv",
@@ -331,7 +334,7 @@ def _quick_forecast_gate(output_dir: Path) -> tuple[ReleaseGateResult, Path | No
     run = run_forecast(df, ForecastSpec(horizon=3, freq="ME", model_policy="baseline", verbose=False))
     run.to_directory(run_dir)
     forecast = pd.read_csv(run_dir / "forecast.csv")
-    trust = pd.read_csv(run_dir / "trust_summary.csv")
+    trust = pd.read_csv(run_dir / "appendix" / "trust_summary.csv")
     diagnostics = json.loads((run_dir / "diagnostics.json").read_text(encoding="utf-8"))
     yhat = pd.to_numeric(forecast["yhat"], errors="coerce")
     interval_checks = _interval_sanity_failures(forecast)
@@ -952,7 +955,7 @@ def _remediation_for(gate: str) -> str:
         "build": "Run uv build from the repository root and inspect the captured stdout/stderr head and tail.",
         "install_smoke": "Rebuild the wheel, reinstall it into an isolated venv, and verify both public imports and the installed nixtla-scaffold console script.",
         "scenario_lab_numeric": "Open the scenario_lab artifacts, inspect failed scenarios and recommendations, then fix validity/explainability regressions before rerunning.",
-        "quick_forecast_numeric": "Open the quick_forecast diagnostics, forecast.csv, and trust_summary.csv; restore finite selected forecasts and headline/trust artifacts.",
+        "quick_forecast_numeric": "Open the quick_forecast diagnostics, forecast.csv, and appendix/trust_summary.csv; restore finite selected forecasts and headline/trust artifacts.",
         "artifact_hygiene": "Restore missing required outputs and remove temporary, bytecode, backup, or failure_diagnostics artifacts from generated runs.",
         "optional_extras": "Install required extras in the active environment, for example uv pip install -e .[ml,hierarchy], or do not require that extra for this release.",
         "workbench_qa": "Open workbench_qa_summary.csv/json, then fix missing artifacts, Streamlit compile/AppTest failures, or usability score regressions.",

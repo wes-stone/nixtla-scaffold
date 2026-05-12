@@ -600,11 +600,11 @@ def _version_record(
 
 
 def _forecast_snapshot_frame(run_path: Path, version: dict[str, Any]) -> pd.DataFrame:
-    source_path = run_path / "forecast_long.csv"
+    source_path = _run_artifact_path(run_path, "forecast_long.csv")
     if not source_path.exists():
         source_path = run_path / "forecast.csv"
     if not source_path.exists():
-        raise FileNotFoundError(f"forecast.csv or forecast_long.csv is required to register a run: {run_path}")
+        raise FileNotFoundError(f"forecast.csv or appendix/forecast_long.csv is required to register a run: {run_path}")
     frame = pd.read_csv(source_path)
     out = pd.DataFrame(index=frame.index)
     out["forecast_version_id"] = version["forecast_version_id"]
@@ -626,8 +626,8 @@ def _forecast_snapshot_frame(run_path: Path, version: dict[str, Any]) -> pd.Data
 
 
 def _forecast_version_metrics_frame(run_path: Path, version: dict[str, Any], diagnostics: dict[str, Any]) -> pd.DataFrame:
-    series = _read_csv_if_exists(run_path / "series_summary.csv")
-    trust = _read_csv_if_exists(run_path / "trust_summary.csv")
+    series = _read_csv_if_exists(_run_artifact_path(run_path, "series_summary.csv"))
+    trust = _read_csv_if_exists(_run_artifact_path(run_path, "trust_summary.csv"))
     selection = _read_csv_if_exists(run_path / "audit" / "model_selection.csv")
     base_ids = _unique_ids([series, trust, selection])
     if not base_ids:
@@ -1055,6 +1055,13 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 def _read_csv_if_exists(path: Path) -> pd.DataFrame:
     return pd.read_csv(path) if path.exists() else pd.DataFrame()
+
+
+def _run_artifact_path(run_path: Path, name: str) -> Path:
+    for path in (run_path / name, run_path / "appendix" / name, run_path / "audit" / name):
+        if path.exists():
+            return path
+    return run_path / name
 
 
 def _unique_ids(frames: list[pd.DataFrame]) -> list[str]:

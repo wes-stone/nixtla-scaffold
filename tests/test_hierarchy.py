@@ -12,10 +12,11 @@ from nixtla_scaffold import (
     hierarchy_coherence,
     hierarchy_summary,
     reconcile_hierarchy_forecast,
+    reconcile_hierarchy_forecast_both,
     run_forecast,
 )
 from nixtla_scaffold.cli import main
-from nixtla_scaffold.outputs import build_hierarchy_backtest_comparison, build_hierarchy_contribution_frame
+from nixtla_scaffold.outputs import build_hierarchy_backtest_comparison, build_hierarchy_contribution_frame, build_hierarchy_rollup_frame
 
 
 def _leaf_data() -> pd.DataFrame:
@@ -109,16 +110,27 @@ def test_hierarchy_coherence_reports_parent_child_gaps(tmp_path) -> None:
 
     assert not coherence.empty
     assert {"parent_unique_id", "parent_value", "child_sum", "gap_pct"}.issubset(coherence.columns)
-    assert (output_dir / "hierarchy_coherence.csv").exists()
-    assert (output_dir / "hierarchy_contribution.csv").exists()
-    assert (output_dir / "best_practice_receipts.csv").exists()
-    contribution = pd.read_csv(output_dir / "hierarchy_contribution.csv")
+    appendix = output_dir / "appendix"
+    assert (appendix / "hierarchy_rollup.csv").exists()
+    assert (appendix / "hierarchy_coherence.csv").exists()
+    assert (appendix / "hierarchy_contribution.csv").exists()
+    assert (appendix / "best_practice_receipts.csv").exists()
+    rollup = pd.read_csv(appendix / "hierarchy_rollup.csv")
+    assert {"history", "forecast"}.issubset(set(rollup["record_type"]))
+    assert {"parent_value", "immediate_child_sum", "coverage_status"}.issubset(rollup.columns)
+    assert set(rollup["coverage_status"].dropna()) == {"complete"}
+    contribution = pd.read_csv(appendix / "hierarchy_contribution.csv")
     assert {"parent_unique_id", "child_unique_id", "child_share_of_parent", "gap_contribution"}.issubset(contribution.columns)
     streamlit_app = (output_dir / "streamlit_app.py").read_text(encoding="utf-8")
-    assert "Hierarchy roll-up / roll-down" in streamlit_app
+    assert "Hierarchy forecast structure" in streamlit_app
+    assert "Parent history + forecast" in streamlit_app
+    assert "Children history + forecast" in streamlit_app
     assert "hierarchy_rollup_chart" in streamlit_app
     assert 'read_csv("hierarchy_contribution.csv")' in streamlit_app
+    assert 'read_csv("hierarchy_rollup.csv")' in streamlit_app
     assert "Child contribution to selected parent" in streamlit_app
+    assert "Hierarchy roll-up output" in streamlit_app
+    assert "hierarchy_rollup" in run.manifest()["outputs"]
     assert "hierarchy_coherence" in run.manifest()["outputs"]
     assert "hierarchy_contribution" in run.manifest()["outputs"]
     assert "best_practice_receipts" in run.manifest()["outputs"]
@@ -161,6 +173,68 @@ def test_hierarchy_contribution_allocates_parent_child_gap_by_child_share() -> N
     assert row["gap_contribution_formula"] == "parent_child_gap * child_value / immediate_child_sum"
 
 
+def test_hierarchy_rollup_surfaces_uneven_child_history_coverage() -> None:
+    history = pd.DataFrame(
+        {
+            "unique_id": ["Total", "Total", "region=NA", "region=NA", "region=EMEA"],
+            "ds": [
+                pd.Timestamp("2025-01-31"),
+                pd.Timestamp("2025-02-28"),
+                pd.Timestamp("2025-01-31"),
+                pd.Timestamp("2025-02-28"),
+                pd.Timestamp("2025-02-28"),
+            ],
+            "y": [80.0, 90.0, 30.0, 35.0, 55.0],
+            "hierarchy_level": ["total", "total", "region", "region", "region"],
+            "hierarchy_depth": [0, 0, 1, 1, 1],
+        }
+    )
+    run = ForecastRun(
+        history=history,
+        forecast=pd.DataFrame(),
+        all_models=pd.DataFrame(),
+        model_selection=pd.DataFrame(),
+        backtest_metrics=pd.DataFrame(),
+        profile=_hierarchy_profile(history),
+        spec=ForecastSpec(horizon=1, freq="ME", model_policy="baseline"),
+    )
+
+    rollup = build_hierarchy_rollup_frame(run)
+
+    total_jan = rollup[
+        (rollup["record_type"] == "history")
+        & (rollup["parent_unique_id"] == "Total")
+        & (pd.to_datetime(rollup["ds"]) == pd.Timestamp("2025-01-31"))
+    ].iloc[0]
+    total_feb = rollup[
+        (rollup["record_type"] == "history")
+        & (rollup["parent_unique_id"] == "Total")
+        & (pd.to_datetime(rollup["ds"]) == pd.Timestamp("2025-02-28"))
+    ].iloc[0]
+    assert total_jan["structural_child_count"] == 2
+    assert total_jan["observed_child_count"] == 1
+    assert total_jan["coverage_status"] == "partial"
+    assert abs(total_jan["child_coverage_pct"] - 0.5) < 1e-9
+    assert pd.isna(total_jan["gap"])
+    assert total_feb["observed_child_count"] == 2
+    assert total_feb["coverage_status"] == "complete"
+
+
+def test_hierarchy_rollup_not_written_for_flat_runs(tmp_path) -> None:
+    data = pd.DataFrame(
+        {
+            "unique_id": ["A", "A", "A"],
+            "ds": pd.to_datetime(["2025-01-31", "2025-02-28", "2025-03-31"]),
+            "y": [10.0, 11.0, 12.0],
+        }
+    )
+    run = run_forecast(data, ForecastSpec(horizon=1, freq="ME", model_policy="baseline"))
+    output_dir = run.to_directory(tmp_path / "flat")
+
+    assert "hierarchy_rollup" not in run.manifest()["outputs"]
+    assert not (output_dir / "appendix" / "hierarchy_rollup.csv").exists()
+
+
 def test_bottom_up_reconciliation_sums_bottom_level_forecasts() -> None:
     forecast = pd.DataFrame(
         {
@@ -183,6 +257,50 @@ def test_bottom_up_reconciliation_sums_bottom_level_forecasts() -> None:
     assert float(coherence["gap"].abs().max()) == 0.0
     assert summary["applied_method"].unique().tolist() == ["bottom_up"]
     assert any("hierarchy reconciliation applied" in warning for warning in warnings)
+
+
+def test_top_down_reconciliation_allocates_parent_forecasts_to_children() -> None:
+    forecast = pd.DataFrame(
+        {
+            "unique_id": ["Total", "region=NA", "region=EMEA"],
+            "ds": [pd.Timestamp("2025-03-31")] * 3,
+            "yhat": [120.0, 40.0, 80.0],
+            "model": ["Manual"] * 3,
+            "hierarchy_level": ["total", "region", "region"],
+            "hierarchy_depth": [0, 1, 1],
+            "region": [None, "NA", "EMEA"],
+        }
+    )
+
+    reconciled, summary, warnings = reconcile_hierarchy_forecast(forecast, method="top_down")
+    coherence = hierarchy_coherence(reconciled)
+
+    assert summary["applied_method"].unique().tolist() == ["top_down"]
+    assert pd.to_numeric(coherence["gap"], errors="coerce").abs().max() < 1e-8
+    assert reconciled.loc[reconciled["unique_id"] == "Total", "yhat"].iloc[0] == 120.0
+    assert any("hierarchy reconciliation applied" in warning for warning in warnings)
+
+
+def test_both_reconciliation_keeps_bottom_up_primary_and_saves_top_down_comparison() -> None:
+    forecast = pd.DataFrame(
+        {
+            "unique_id": ["Total", "region=NA", "region=EMEA", "Total", "region=NA", "region=EMEA"],
+            "ds": pd.to_datetime(["2025-03-31"] * 3 + ["2025-04-30"] * 3),
+            "yhat": [300.0, 130.0, 120.0, 330.0, 150.0, 135.0],
+            "hierarchy_level": ["total", "region", "region", "total", "region", "region"],
+            "hierarchy_depth": [0, 1, 1, 0, 1, 1],
+        }
+    )
+
+    reconciled, summary, comparison, warnings = reconcile_hierarchy_forecast_both(forecast)
+    coherence = hierarchy_coherence(reconciled)
+
+    assert pd.to_numeric(coherence["gap"], errors="coerce").abs().max() < 1e-8
+    assert set(summary["applied_method"]) == {"bottom_up", "top_down"}
+    assert set(summary["comparison_role"]) == {"primary_output", "comparison_only"}
+    assert set(comparison["reconciliation_method"]) == {"bottom_up", "top_down"}
+    assert comparison["comparison_role"].value_counts()["primary_output"] == 6
+    assert any("comparison requested" in warning for warning in warnings)
 
 
 def test_mint_ols_reconciliation_uses_hierarchicalforecast_when_available() -> None:
@@ -227,7 +345,7 @@ def test_forecast_hierarchy_reconciliation_writes_pre_post_artifacts(tmp_path) -
     assert not run.unreconciled_forecast.empty
     assert any("reconciliation applied" in warning for warning in run.warnings)
     assert not any("not reconciled" in warning for warning in run.warnings)
-    assert (output_dir / "hierarchy_reconciliation.csv").exists()
+    assert (output_dir / "appendix" / "hierarchy_reconciliation.csv").exists()
     assert (output_dir / "audit" / "hierarchy_unreconciled_forecast.csv").exists()
     assert (output_dir / "audit" / "hierarchy_backtest_comparison.csv").exists()
     assert (output_dir / "audit" / "hierarchy_coherence_pre.csv").exists()
@@ -243,6 +361,23 @@ def test_forecast_hierarchy_reconciliation_writes_pre_post_artifacts(tmp_path) -
     streamlit_app = (output_dir / "streamlit_app.py").read_text(encoding="utf-8")
     assert "Hierarchy reconciliation is enabled" in streamlit_app
     assert "Reconciled vs unreconciled backtest comparison" in streamlit_app
+
+
+def test_forecast_hierarchy_both_writes_method_comparison_artifact(tmp_path) -> None:
+    frame = aggregate_hierarchy_frame(
+        _leaf_data(),
+        hierarchy_cols=("region", "product"),
+        time_col="month",
+        target_col="revenue",
+    )
+    run = run_forecast(frame, ForecastSpec(horizon=1, freq="ME", model_policy="baseline", hierarchy_reconciliation="both"))
+    output_dir = run.to_directory(tmp_path / "run")
+
+    assert not run.hierarchy_reconciliation_comparison.empty
+    assert set(run.hierarchy_reconciliation["applied_method"]) == {"bottom_up", "top_down"}
+    assert set(run.hierarchy_reconciliation_comparison["reconciliation_method"]) == {"bottom_up", "top_down"}
+    assert "hierarchy_reconciliation_comparison" in run.manifest()["outputs"]
+    assert (output_dir / "appendix" / "hierarchy_reconciliation_comparison.csv").exists()
 
 
 def test_hierarchy_backtest_comparison_is_empty_when_reconciliation_is_none() -> None:
@@ -425,7 +560,7 @@ def test_cli_forecast_hierarchy_reconciliation_flag_writes_artifacts(tmp_path) -
     forecast = pd.read_csv(output_dir / "forecast.csv")
     coherence = hierarchy_coherence(forecast)
     assert pd.to_numeric(coherence["gap"], errors="coerce").abs().max() < 1e-8
-    assert (output_dir / "hierarchy_reconciliation.csv").exists()
+    assert (output_dir / "appendix" / "hierarchy_reconciliation.csv").exists()
     assert (output_dir / "audit" / "hierarchy_unreconciled_forecast.csv").exists()
     assert (output_dir / "audit" / "hierarchy_backtest_comparison.csv").exists()
     assert (output_dir / "audit" / "hierarchy_coherence_pre.csv").exists()

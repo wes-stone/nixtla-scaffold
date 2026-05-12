@@ -341,7 +341,7 @@ def test_compare_cli_missing_external_file_writes_failure_diagnostics(tmp_path, 
 
 def test_compare_cli_scaffold_model_uses_forecast_long_candidate(tmp_path, capsys) -> None:
     run_dir = _write_small_run(tmp_path)
-    forecast_long = pd.read_csv(run_dir / "forecast_long.csv")
+    forecast_long = pd.read_csv(run_dir / "appendix" / "forecast_long.csv")
     scaffold_model = str(forecast_long["model"].iloc[0])
     model_rows = forecast_long[forecast_long["model"].astype(str) == scaffold_model][["unique_id", "ds", "yhat"]].copy()
     external_path = tmp_path / "finance_plan.csv"
@@ -363,7 +363,7 @@ def test_compare_cli_scaffold_model_uses_forecast_long_candidate(tmp_path, capsy
 
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["inputs"]["scaffold_forecast_file"] == "forecast_long.csv"
+    assert payload["inputs"]["scaffold_forecast_file"] == "appendix/forecast_long.csv"
     assert payload["inputs"]["scaffold_model"] == scaffold_model
     comparison = pd.read_csv(tmp_path / "model_comparison" / "forecast_comparison.csv")
     assert set(comparison["scaffold_model"]) == {scaffold_model}

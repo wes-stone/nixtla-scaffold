@@ -46,7 +46,7 @@ def test_hierarchy_reconciliation_example_runs(tmp_path) -> None:
 
     output_dir = module.run_example(tmp_path / "hierarchy")
 
-    assert (output_dir / "hierarchy_reconciliation.csv").exists()
+    assert (output_dir / "appendix" / "hierarchy_reconciliation.csv").exists()
     post = pd.read_csv(output_dir / "audit" / "hierarchy_coherence_post.csv")
     assert pd.to_numeric(post["gap"], errors="coerce").abs().max() < 1e-8
 
@@ -66,11 +66,11 @@ def test_custom_finance_model_example_runs(tmp_path) -> None:
     output_dir = module.run_example(tmp_path / "custom_finance")
 
     assert (output_dir / "forecast.csv").exists()
-    assert (output_dir / "custom_model_contracts.csv").exists()
+    assert (output_dir / "appendix" / "custom_model_contracts.csv").exists()
     assert (output_dir / "audit" / "custom_model_invocations.csv").exists()
-    forecast_long = pd.read_csv(output_dir / "forecast_long.csv")
+    forecast_long = pd.read_csv(output_dir / "appendix" / "forecast_long.csv")
     assert "Custom_MoM_Growth_FY_Seasonal" in set(forecast_long["model"])
-    contracts = pd.read_csv(output_dir / "custom_model_contracts.csv")
+    contracts = pd.read_csv(output_dir / "appendix" / "custom_model_contracts.csv")
     assert contracts["status"].iloc[0] == "succeeded"
     invocations = pd.read_csv(output_dir / "audit" / "custom_model_invocations.csv")
     assert set(invocations["status"]) == {"succeeded"}
