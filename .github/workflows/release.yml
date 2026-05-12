@@ -1,0 +1,101 @@
+name: CI and Release
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate package
+    runs-on: windows-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --extra dev --extra ml --extra hierarchy --extra datasets
+
+      - name: Run tests
+        run: uv run pytest -q
+
+      - name: Run release gates
+        run: uv run nixtla-scaffold release-gates --output runs\release_gates_ci --no-live-streamlit --scenario-count 3
+
+      - name: Upload release gate artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-gates-${{ github.run_id }}
+          path: runs\release_gates_ci
+          if-no-files-found: ignore
+
+  release:
+    name: Create GitHub release
+    needs: validate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Read package version
+        run: |
+          $version = python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])"
+          "PACKAGE_VERSION=$version" >> $env:GITHUB_ENV
+          "RELEASE_TAG=v$version" >> $env:GITHUB_ENV
+
+      - name: Ensure release tag is new
+        run: |
+          git fetch --tags --force
+          if (git rev-parse -q --verify "refs/tags/$env:RELEASE_TAG") {
+            throw "Release tag $env:RELEASE_TAG already exists. Bump [project].version in pyproject.toml before merging to main."
+          }
+
+      - name: Build distributions
+        run: uv build
+
+      - name: Publish to PyPI
+        if: env.PYPI_API_TOKEN != ''
+        run: uv publish --token $env:PYPI_API_TOKEN --check-url https://pypi.org/simple/nixtla-scaffold/
+
+      - name: Create GitHub release
+        run: gh release create $env:RELEASE_TAG dist\* --target $env:GITHUB_SHA --title "nixtla-scaffold $env:PACKAGE_VERSION" --generate-notes --latest

@@ -480,7 +480,12 @@ def build_streamlit_app() -> str:
 
         @st.cache_data(show_spinner=False)
         def cached_read_csv(path_text: str, modified_ns: int, size_bytes: int) -> pd.DataFrame:
-            return pd.read_csv(path_text)
+            if size_bytes == 0:
+                return pd.DataFrame()
+            try:
+                return pd.read_csv(path_text)
+            except pd.errors.EmptyDataError:
+                return pd.DataFrame()
 
 
         def read_csv(name: str) -> pd.DataFrame:
@@ -5462,16 +5467,25 @@ def _records(frame: pd.DataFrame) -> list[dict[str, Any]]:
     return [{key: _safe_value(value) for key, value in row.items()} for row in frame.to_dict("records")]
 
 
+def _read_nonempty_csv(path: Path) -> pd.DataFrame:
+    if path.stat().st_size == 0:
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame()
+
+
 def _read_csv_records(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
-    return _records(pd.read_csv(path))
+    return _records(_read_nonempty_csv(path))
 
 
 def _read_artifact_records(run_dir: Path, name: str) -> list[dict[str, Any]]:
     for path in (run_dir / name, run_dir / "appendix" / name, run_dir / "audit" / name):
         if path.exists():
-            return _records(pd.read_csv(path))
+            return _records(_read_nonempty_csv(path))
     return []
 
 

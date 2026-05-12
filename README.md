@@ -520,6 +520,12 @@ How to read the gate:
 
 Thresholds are intentionally broad smoke gates rather than brittle exact-value snapshots: scenario lab requires zero crashes, at least `count - 2` scenarios passing, composite score >= 70, validity >= 85, and explainability >= 80; workbench QA requires no failed golden scenarios and minimum usability score >= 90; quick forecast requires finite bounded selected forecasts, valid interval containment when interval columns exist, a numeric trust score, and an executive headline. Exit codes are `0` for passed gates, `1` for gate failure, and `2` for CLI/runtime errors. The live Streamlit smoke proves the generated dashboard launches in the current Python environment.
 
+### Automated releases
+
+The GitHub Actions workflow in `.github\workflows\release.yml` runs on pull requests and on pushes to `main`. Pull requests run validation only. A push to `main` runs the same validation, reads `[project].version` from `pyproject.toml`, builds the package, creates a GitHub release tagged `v<version>`, and marks it latest.
+
+Release rule: every merge to `main` that should publish a release must bump `pyproject.toml` to a new version before merging. If the tag already exists, the release job fails with a clear version-bump message instead of overwriting an existing release. If the repository has a `PYPI_API_TOKEN` secret configured, the workflow publishes the built distributions to PyPI before creating the GitHub release; otherwise it creates the GitHub release only.
+
 Local outputs are intentionally ignored by git. `.gitignore` excludes `.intern`, `.venv`, `runs`, temporary validation folders, query artifacts, and local reports because user tests often contain sensitive data.
 
 ## What the scaffold does
