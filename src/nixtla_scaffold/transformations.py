@@ -9,7 +9,7 @@ from nixtla_scaffold.schema import DriverEvent, TargetTransform, TransformSpec
 
 
 def add_fiscal_calendar(frame: pd.DataFrame, *, fiscal_year_start_month: int = 2) -> pd.DataFrame:
-    """Add GitHub-style fiscal calendar fields without changing the grain."""
+    """Add Feb-start fiscal calendar fields without changing the grain."""
 
     if fiscal_year_start_month < 1 or fiscal_year_start_month > 12:
         raise ValueError("fiscal_year_start_month must be between 1 and 12")

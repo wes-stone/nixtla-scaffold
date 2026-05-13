@@ -1,0 +1,12 @@
+SalesFact
+| where DateKey between (datetime(2007-01-01) .. datetime(2009-12-31))
+| join kind=inner (
+    Products
+    | project ProductKey, ProductCategoryName
+) on ProductKey
+| summarize
+    Revenue = sum(SalesAmount),
+    TotalCost = sum(TotalCost),
+    Transactions = count()
+  by Month = startofmonth(DateKey), ProductCategoryName
+| order by Month asc, ProductCategoryName asc

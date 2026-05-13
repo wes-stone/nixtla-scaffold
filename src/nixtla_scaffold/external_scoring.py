@@ -462,7 +462,9 @@ def _prepare_external_for_scoring(external: pd.DataFrame) -> pd.DataFrame:
         "model_version",
         "notes",
     ]
-    return out[[column for column in keep if column in out.columns]]
+    keep_existing = [column for column in keep if column in out.columns]
+    passthrough = [column for column in out.columns if column not in keep_existing]
+    return out[keep_existing + passthrough]
 
 
 def _row_scales(scored_frame: pd.DataFrame, actuals: pd.DataFrame, *, season_length: int) -> pd.DataFrame:

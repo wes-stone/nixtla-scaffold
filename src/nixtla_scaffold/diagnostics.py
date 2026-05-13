@@ -19,6 +19,7 @@ def build_run_diagnostics(run: Any) -> dict[str, Any]:
         build_model_pareto_frontier,
         build_model_tradeoff_scores,
         build_residual_test_summary,
+        build_series_features,
         build_trust_summary,
     )
 
@@ -29,6 +30,7 @@ def build_run_diagnostics(run: Any) -> dict[str, Any]:
     model_tradeoffs = build_model_tradeoff_scores(run)
     pareto_frontier = build_model_pareto_frontier(run)
     feature_receipts = build_feature_selection_receipts(run)
+    series_features = build_series_features(run)
     executive_headline = build_executive_headline(run).to_dict()
     driver_audit_distribution = (
         run.driver_availability_audit["audit_status"].value_counts().sort_index().to_dict()
@@ -87,6 +89,7 @@ def build_run_diagnostics(run: Any) -> dict[str, Any]:
             "feature_selection_receipt_rows": int(len(feature_receipts)),
             "model_tradeoff_score_rows": int(len(model_tradeoffs)),
             "model_pareto_frontier_rows": int(len(pareto_frontier)),
+            "series_feature_rows": int(len(series_features)),
             "residual_test_rows": int(len(residual_tests)),
             "residual_test_distribution": residual_test_distribution,
             "hierarchy_backtest_comparison_rows": int(len(hierarchy_backtest)),
@@ -115,6 +118,7 @@ def build_run_diagnostics(run: Any) -> dict[str, Any]:
         "driver_model_features": _records(getattr(run, "driver_model_features", pd.DataFrame())),
         "driver_model_cv_delta": _records(getattr(run, "driver_model_cv_delta", pd.DataFrame())),
         "trust_summary": _records(trust_summary),
+        "series_features": _records(series_features),
         "reproducibility": manifest["reproducibility"],
         "best_practice_receipts": run.best_practice_receipts(),
         "outputs": manifest["outputs"],
@@ -131,6 +135,7 @@ def build_run_diagnostics(run: Any) -> dict[str, Any]:
             "Open appendix/known_future_regressors.csv and appendix/driver_availability_audit.csv when regressors are declared; model_candidate rows must pass future availability and leakage checks before future exogenous modeling work.",
             "Open appendix/driver_model_features.csv and appendix/driver_model_cv_delta.csv when train_known_future_regressors=True to see which audited drivers actually entered MLForecast and how they scored.",
             "Open appendix/feature_selection_receipts.csv for descriptive MLForecast feature evidence; it does not auto-prune features or override backtest selection.",
+            "Open appendix/series_features.csv for cheap forecastability signals and the next recommended experiment step per series; this artifact is advisory only.",
             "Check profile.json for inferred frequency, season length, short histories, and repaired gaps.",
             "Check appendix/series_summary.csv and appendix/model_audit.csv before trusting a selected model.",
             "Check appendix/model_win_rates.csv to see which models beat SeasonalNaive/Naive across series.",
@@ -147,7 +152,7 @@ def build_run_diagnostics(run: Any) -> dict[str, Any]:
             "Open interpretation.md for a human-readable backtesting and seasonality summary.",
             "Check audit/model_weights.csv when WeightedEnsemble is selected or present.",
             "Open report.html for the portable fixed-axis filmstrip report, or decode report_base64.txt for text-only handoff.",
-            "Run streamlit run streamlit_app.py inside the output folder for the interactive CV window player.",
+            "Run .\\run_streamlit.ps1 inside the output folder for the interactive CV window player, or use uv run --with-requirements streamlit_requirements.txt streamlit run .\\streamlit_app.py.",
             "Check appendix/forecast_long.csv for all future model predictions and forecast.csv for selected yhat, intervals, interval_status, scenario columns, and event_names.",
             "If hierarchy_depth exists, check appendix/hierarchy_coherence.csv before comparing parent and child forecasts.",
         ],
@@ -179,6 +184,7 @@ def build_llm_context(run: Any) -> dict[str, Any]:
         build_model_window_metrics,
         build_residual_diagnostics,
         build_residual_test_summary,
+        build_series_features,
         build_selected_forecast,
         build_series_summary,
         build_trust_summary,
@@ -190,6 +196,7 @@ def build_llm_context(run: Any) -> dict[str, Any]:
     trust_summary = build_trust_summary(run)
     model_selection = run.model_selection.copy()
     series_summary = build_series_summary(run)
+    series_features = build_series_features(run)
     residual_tests = build_residual_test_summary(run)
     interval_diagnostics = build_interval_diagnostics(run)
     seasonality_diagnostics = seasonality_diagnostics_frame(run)
@@ -235,6 +242,7 @@ def build_llm_context(run: Any) -> dict[str, Any]:
                 trust_summary=trust_summary,
                 model_selection=model_selection,
                 series_summary=series_summary,
+                series_features=series_features,
                 residual_tests=residual_tests,
                 interval_diagnostics=interval_diagnostics,
                 seasonality_diagnostics=seasonality_diagnostics,
@@ -247,6 +255,7 @@ def build_llm_context(run: Any) -> dict[str, Any]:
             "trust_summary": _records(trust_summary),
             "model_selection": _records(model_selection),
             "series_summary": _records(series_summary),
+            "series_features": _records(series_features),
             "model_audit_top_rows": _records(build_model_audit(run).head(200)),
             "model_win_rates": _records(build_model_win_rates(run)),
             "model_tradeoff_scores_top_rows": _records(model_tradeoffs.head(200)),
@@ -278,10 +287,11 @@ def build_llm_context(run: Any) -> dict[str, Any]:
             "Which series are High/Medium/Low trust, and what should I do first?",
             "Which forecast rows are horizon-validated versus directional?",
             "Do the selected models beat simple Naive or SeasonalNaive benchmarks?",
-            "Is the selected model Pareto-optimal across RMSE, MAE, WAPE, MASE/RMSSE, and absolute bias, or are there non-dominated alternatives to review?",
+            "Is the selected model Pareto-optimal across RMSE and MAE, or are there non-dominated alternatives to review while WAPE and scale-free metrics stay diagnostic?",
             "Are intervals calibrated enough for stakeholder ranges?",
             "Do residual tests show bias, autocorrelation, outliers, or structural breaks?",
             "Is seasonality credible, or is the series too short?",
+            "What does appendix/series_features.csv recommend as the next bounded experiment or driver-search step?",
             "If hierarchy reconciliation is enabled, what coherence/accuracy tradeoff did it create?",
             "What events, pricing changes, launches, contracts, or known-future drivers should be added before planning use?",
         ],
@@ -532,6 +542,7 @@ def _series_llm_review(
     trust_summary: pd.DataFrame,
     model_selection: pd.DataFrame,
     series_summary: pd.DataFrame,
+    series_features: pd.DataFrame,
     residual_tests: pd.DataFrame,
     interval_diagnostics: pd.DataFrame,
     seasonality_diagnostics: pd.DataFrame,
@@ -543,6 +554,7 @@ def _series_llm_review(
         "trust": _first_record(trust_summary, unique_id),
         "model_selection": _first_record(model_selection, unique_id),
         "series_summary": _first_record(series_summary, unique_id),
+        "series_features": _first_record(series_features, unique_id),
         "forecast_rows": _records(_filter_series(selected_forecast, unique_id)),
         "selected_model_forecast_long_rows": _records(_filter_series(forecast_long, unique_id, selected_only=True)),
         "residual_tests": _records(_filter_series(residual_tests, unique_id)),

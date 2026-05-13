@@ -84,7 +84,7 @@ def build_model_card(run: ForecastRun) -> str:
     lines.append("- Quote `diagnostics.json.executive_headline.paragraph` verbatim when summarizing this run; do not rewrite it into a stronger claim.")
     lines.append("- Start with `diagnostics.json` for machine-readable run context, warnings, model weights, and next checks.")
     lines.append("- Use `failure_diagnostics.json` if a CLI run fails before normal artifacts are produced.")
-    lines.append("- Use `appendix/forecast_long.csv`, `appendix/backtest_long.csv`, `appendix/series_summary.csv`, and `appendix/model_audit.csv` as the core feeder/review files.")
+    lines.append("- Use `appendix/forecast_long.csv`, `appendix/backtest_long.csv`, `appendix/series_summary.csv`, `appendix/series_features.csv`, and `appendix/model_audit.csv` as the core feeder/review files.")
     lines.append("- Use `audit/backtest_windows.csv` and `audit/backtest_predictions.csv` to inspect forecast-vs-actual holdouts by cutoff.")
     if run.spec.transform.enabled:
         lines.append("- Use `audit/target_transform_audit.csv` to trace raw y, normalized y, modeled target values, and output scale.")
@@ -93,7 +93,10 @@ def build_model_card(run: ForecastRun) -> str:
     lines.append("- Use `audit/seasonality_diagnostics.csv` and `audit/seasonality_decomposition.csv` to inspect cycle counts, credibility, trend/seasonal/remainder evidence, and seasonal warnings.")
     lines.append("- Open `interpretation.md` for a readable backtesting and seasonality walkthrough.")
     lines.append("- Open `report.html` for a portable visual report; `report_base64.txt` stores the same HTML for text-only handoff.")
-    lines.append("- Run `streamlit run streamlit_app.py` in the output folder for an editable local dashboard scaffold.")
+    lines.append(
+        "- Run `.\\run_streamlit.ps1` in the output folder for an editable local dashboard scaffold, "
+        "or use `uv run --with-requirements streamlit_requirements.txt streamlit run .\\streamlit_app.py`."
+    )
     if not run.model_weights.empty:
         lines.append("- `audit/model_weights.csv` shows inverse-error weights used by `WeightedEnsemble`.")
     else:

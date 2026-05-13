@@ -1,0 +1,51 @@
+schema_version: nixtla_scaffold.pipeline.v1
+name: contoso_kql_pipeline
+
+# Offline by default: reads the .kql files through a small Python scaffold and
+# emits deterministic ContosoSales-shaped results. Set KUSTO_MODE=live to query
+# https://help.kusto.windows.net/ContosoSales with azure-kusto-data credentials.
+extracts:
+  - name: revenue_actuals
+    script: scripts\run_kql_extract.py
+    query_file: queries\contoso_revenue_by_month.kql
+    output: raw\contoso_revenue.csv
+    args:
+      - --output
+      - "{output:revenue_actuals}"
+      - --query-file
+      - "{query_file}"
+
+  - name: product_dimension
+    script: scripts\run_kql_extract.py
+    query_file: queries\contoso_product_dimension.kql
+    output: raw\contoso_products.csv
+    args:
+      - --output
+      - "{output:product_dimension}"
+      - --query-file
+      - "{query_file}"
+
+transform:
+  script: scripts\build_forecast_input.py
+  output: prepared\joined_revenue.csv
+  args:
+    - --revenue
+    - "{output:revenue_actuals}"
+    - --products
+    - "{output:product_dimension}"
+    - --output
+    - "{output:forecast_input}"
+
+canonical:
+  output: prepared\forecast_input.csv
+  id_col: unique_id
+  time_col: ds
+  target_col: y
+
+forecast:
+  output: forecast
+  preset: finance
+  horizon: 6
+  freq: ME
+  model_policy: baseline
+  verbose: false

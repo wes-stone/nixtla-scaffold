@@ -1,0 +1,3 @@
+Products
+| project ProductKey, ProductName, ProductCategoryName, ProductSubcategoryName, Manufacturer
+| order by ProductCategoryName asc, ProductName asc

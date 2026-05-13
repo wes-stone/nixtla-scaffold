@@ -159,6 +159,12 @@ def test_driver_contract_outputs_reports_and_workbook_surfaces(tmp_path) -> None
     assert '"Assumptions & Drivers"' in streamlit_app
     assert 'read_csv("driver_availability_audit.csv")' in streamlit_app
     assert "Driver audit distribution" in streamlit_app
+    assert "Regressor visual evidence" in streamlit_app
+    assert "regressor_visual_files" in streamlit_app
+    assert "driver_feature_importance_plot" in streamlit_app
+    assert "How to read MLForecast explainability" in streamlit_app
+    assert "MLForecast's `SaveFeatures` callback" in streamlit_app
+    assert "does not persist trained model objects or SHAP outputs by default" in streamlit_app
     workbook = pd.ExcelFile(output_dir / "forecast.xlsx")
     assert "Scenario Assumptions" in workbook.sheet_names
     assert "Scenario Forecast" in workbook.sheet_names

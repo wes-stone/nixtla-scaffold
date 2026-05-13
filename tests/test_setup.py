@@ -32,14 +32,14 @@ def test_setup_questions_cover_agent_intake_topics() -> None:
 
 def test_create_forecast_setup_writes_agent_workspace(tmp_path) -> None:
     artifact = create_forecast_setup(
-        tmp_path / "premium_overage",
+        tmp_path / "usage_overage",
         SetupAnswers(
-            name="premium_overage",
+            name="usage_overage",
             data_source="kusto",
             series_count="single",
             target_name="ARR_30day_avg",
             time_col="day_dt",
-            id_value="Premium Overage ARR",
+            id_value="Usage Overage ARR",
             horizon=6,
             freq="ME",
             intervals="auto",

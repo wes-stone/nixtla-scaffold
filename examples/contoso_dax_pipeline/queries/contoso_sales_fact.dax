@@ -1,0 +1,5 @@
+EVALUATE
+Sales
+ORDER BY
+    Sales[DateKey],
+    Sales[ProductKey]

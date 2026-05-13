@@ -2,7 +2,8 @@
 
 MCP tools should hand this package either:
 1. a CSV/Excel file with unique_id, ds, y columns; or
-2. JSON-like records passed to dataframe_from_records().
+2. JSON-like records passed to dataframe_from_records(); or
+3. script-backed source pipeline extracts that collapse many queries into one canonical input.
 
 Keep connector-specific logic outside the forecasting engine until repeated
 workflows prove a local MCP server is necessary.
@@ -31,14 +32,26 @@ MCP_RECIPES = [
     {
         "name": "DAX query to forecast",
         "source": "dax-query-server",
-        "handoff": "Run a DAX query at the desired grain, export to CSV or JSON, ingest it into canonical unique_id/ds/y, then forecast. Keep fiscal period and metric definitions in the query file.",
+        "handoff": "Run a DAX query at the desired grain, export to CSV or JSON, ingest it into canonical unique_id/ds/y, then forecast. Live Power BI/Analysis Services connections require the Microsoft Analysis Services OLE DB Provider (MSOLAP); the Mock Contoso connection does not. Keep fiscal period and metric definitions in the query file.",
         "command": "nixtla-scaffold ingest --input dax_export.csv --source dax --query-file query.dax --id-col Product --time-col FiscalMonth --target-col ARR --output runs\\dax_input.csv --forecast-output runs\\dax_forecast --freq ME --horizon 6",
+    },
+    {
+        "name": "Multiple query extracts to one forecast",
+        "source": "dax-query-server, data-query, or azure-kusto",
+        "handoff": "Use a pipeline YAML when several DAX/Kusto/SQL/Python extracts feed one forecast. The bundled Contoso DAX example executes .dax files through a run_query.py-style scaffold against MOCK://contoso by default; live DAX extracts require MSOLAP and pywin32 installed. The bundled Contoso KQL example executes .kql files through a small Kusto scaffold against deterministic ContosoSales-shaped data by default; live Kusto extracts require azure-kusto-data and azure-identity. Each script writes declared outputs, an optional transform builds the canonical input, and the forecast run receives source-pipeline provenance.",
+        "command": "nixtla-scaffold pipeline run --config examples\\contoso_dax_pipeline\\pipeline.yaml --output runs\\contoso_dax_pipeline",
     },
     {
         "name": "Kusto query to forecast",
         "source": "data-query or azure-kusto",
         "handoff": "Aggregate telemetry or revenue data in KQL, export the result, then ingest with explicit time/target/id mapping. Do not pass event-level logs directly to the forecaster.",
-        "command": "nixtla-scaffold ingest --input kusto_export.json --source kusto --query-file query.kql --id-value \"Premium Overage ARR\" --time-col day_dt --target-col ARR_30day_avg --output runs\\premium_overage_arr_input.csv --forecast-output runs\\premium_overage_arr_demo --freq ME --horizon 6",
+        "command": "nixtla-scaffold ingest --input kusto_export.json --source kusto --query-file query.kql --id-value \"Usage Overage ARR\" --time-col day_dt --target-col ARR_30day_avg --output runs\\usage_overage_arr_input.csv --forecast-output runs\\usage_overage_arr_demo --freq ME --horizon 6",
+    },
+    {
+        "name": "Multiple Kusto queries to one forecast",
+        "source": "data-query or azure-kusto",
+        "handoff": "Use the Contoso KQL pipeline shape when a forecast needs several KQL extracts. The checked-in example forecasts ContosoSales monthly Revenue by ProductCategoryName from SalesFact joined to Products, stays offline by default, and can run live with KUSTO_MODE=live when azure-kusto-data and azure-identity are installed.",
+        "command": "nixtla-scaffold pipeline run --config examples\\contoso_kql_pipeline\\pipeline.yaml --output runs\\contoso_kql_pipeline",
     },
 ]
 

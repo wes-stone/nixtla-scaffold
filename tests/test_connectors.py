@@ -24,21 +24,21 @@ def test_ingest_columnar_mcp_result_to_canonical_csv(tmp_path) -> None:
         ),
         encoding="utf-8",
     )
-    query_path.write_text("database('copilot').copilot_revenue_daily\n", encoding="utf-8")
+    query_path.write_text("database('forecast').usage_revenue_daily\n", encoding="utf-8")
 
     metadata = ingest_query_result(
         result_path,
         output_path,
         source_kind="kusto",
         query_file=query_path,
-        id_value="Premium Overage ARR",
+        id_value="Usage Overage ARR",
         time_col="day_dt",
         target_col="ARR_30day_avg",
     )
 
     canonical = pd.read_csv(output_path)
     assert canonical.columns.tolist() == ["unique_id", "ds", "y"]
-    assert canonical["unique_id"].unique().tolist() == ["Premium Overage ARR"]
+    assert canonical["unique_id"].unique().tolist() == ["Usage Overage ARR"]
     assert metadata["rows"] == 3
     assert output_path.with_suffix(".source.json").exists()
     assert output_path.with_suffix(".kql").read_text(encoding="utf-8").startswith("database")
