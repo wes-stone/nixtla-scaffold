@@ -27,12 +27,13 @@ from nixtla_scaffold.interpretation import (
     seasonality_summary_frame,
 )
 from nixtla_scaffold.model_families import model_family
+from nixtla_scaffold.ops import write_operational_receipts
 from nixtla_scaffold.reports import write_report_artifacts
 from nixtla_scaffold.schema import ForecastRun
 
 
 APPENDIX_DIR = "appendix"
-PARETO_REVIEW_METRICS = ("rmse", "mae", "wape", "mase", "rmsse", "abs_bias")
+PARETO_REVIEW_METRICS = ("rmse", "mae")
 MODEL_TRADEOFF_SCORE_COLUMNS = [
     "unique_id",
     "model",
@@ -115,6 +116,7 @@ def write_run(run: ForecastRun, output_dir: str | Path) -> Path:
     forecast_long.to_csv(appendix / "forecast_long.csv", index=False)
     build_backtest_long(run).to_csv(appendix / "backtest_long.csv", index=False)
     build_series_summary(run).to_csv(appendix / "series_summary.csv", index=False)
+    build_series_features(run).to_csv(appendix / "series_features.csv", index=False)
     build_model_audit(run).to_csv(appendix / "model_audit.csv", index=False)
     build_model_win_rates(run).to_csv(appendix / "model_win_rates.csv", index=False)
     build_model_tradeoff_scores(run).to_csv(appendix / "model_tradeoff_scores.csv", index=False)
@@ -185,6 +187,7 @@ def write_run(run: ForecastRun, output_dir: str | Path) -> Path:
     write_report_artifacts(run, out)
     write_workbook(run, out / "forecast.xlsx")
     write_review_outputs(run, out, selected_forecast=selected_forecast, forecast_long=forecast_long)
+    write_operational_receipts(out)
     return out
 
 
@@ -222,6 +225,7 @@ def write_workbook(run: ForecastRun, output_path: str | Path) -> Path:
         forecast_long.to_excel(writer, sheet_name="Forecast Long", index=False)
         build_backtest_long(run).to_excel(writer, sheet_name="Backtest Long", index=False)
         build_series_summary(run).to_excel(writer, sheet_name="Series Summary", index=False)
+        build_series_features(run).to_excel(writer, sheet_name="Series Features", index=False)
         build_model_audit(run).to_excel(writer, sheet_name="Model Audit", index=False)
         build_model_win_rates(run).to_excel(writer, sheet_name="Model Win Rates", index=False)
         build_model_tradeoff_scores(run).to_excel(writer, sheet_name="Model Tradeoffs", index=False)
@@ -550,7 +554,7 @@ def build_review_forecast_brief(run: ForecastRun, selected_forecast: pd.DataFram
         ("Start here", "Executive headline", headline.paragraph),
         ("Start here", "Output workbook", "output/forecast_review.xlsx"),
         ("Start here", "Static report", "report.html"),
-        ("Start here", "Interactive app", "streamlit_app.py"),
+        ("Start here", "Interactive app", "run_streamlit.ps1 or streamlit_app.py"),
         ("Run context", "Series count", _series_count(selected_forecast)),
         ("Run context", "Forecast horizon", run.spec.horizon),
         ("Run context", "Frequency", run.spec.freq or run.profile.freq),
@@ -596,7 +600,7 @@ def build_review_forecast_brief_from_directory(
         ("Start here", "Executive headline", executive.get("paragraph") or "Executive headline unavailable for this run."),
         ("Start here", "Output workbook", "output/forecast_review.xlsx"),
         ("Start here", "Static report", "report.html"),
-        ("Start here", "Interactive app", "streamlit_app.py"),
+        ("Start here", "Interactive app", "run_streamlit.ps1 or streamlit_app.py"),
         ("Run context", "Series count", _series_count(selected_forecast) or profile.get("series_count", "")),
         ("Run context", "Forecast horizon", spec.get("horizon", "")),
         ("Run context", "Frequency", spec.get("freq") or profile.get("freq", "")),
@@ -627,9 +631,11 @@ def build_review_artifact_guide() -> pd.DataFrame:
         ("output", 1, "OPEN_ME_FIRST.html", "Start here. Simple file map and forecast headline."),
         ("output", 2, "output/forecast_review.xlsx", "Compact workbook with the forecast, decision summary, leaderboard, watchouts, and file guide."),
         ("output", 3, "report.html", "Portable static review with charts, decision evidence, and ledger preview when available."),
-        ("output", 4, "streamlit_app.py", "Interactive local workbench for deeper visual review."),
-        ("output", 5, "output/forecast_for_review.csv", "Selected forecast rows only, stripped down for finance review."),
-        ("output", 6, "output/decision_summary.csv", "Condensed trust/readiness table with caveats and next actions."),
+        ("output", 4, "run_streamlit.ps1", "Windows launcher that uses uv plus streamlit_requirements.txt to open the local workbench."),
+        ("output", 5, "streamlit_requirements.txt", "Minimal dashboard-only dependency list for running streamlit_app.py outside the package project."),
+        ("output", 6, "streamlit_app.py", "Interactive local workbench source for deeper visual review."),
+        ("output", 7, "output/forecast_for_review.csv", "Selected forecast rows only, stripped down for finance review."),
+        ("output", 8, "output/decision_summary.csv", "Condensed trust/readiness table with caveats and next actions."),
         ("appendix", 1, "output/appendix/model_leaderboard.csv", "Small top-model view behind the workbook leaderboard."),
         ("appendix", 2, "output/appendix/forecast_brief.csv", "One-page run brief used by OPEN_ME_FIRST.html and the workbook."),
         ("appendix", 3, "output/appendix/artifact_guide.csv", "This file map."),
@@ -681,6 +687,9 @@ def _update_manifest_review_outputs(path: Path) -> None:
             "output_model_leaderboard": "output/appendix/model_leaderboard.csv",
             "output_forecast_brief": "output/appendix/forecast_brief.csv",
             "output_artifact_guide": "output/appendix/artifact_guide.csv",
+            "streamlit_requirements": "streamlit_requirements.txt",
+            "streamlit_launcher_ps1": "run_streamlit.ps1",
+            "streamlit_launcher_cmd": "run_streamlit.cmd",
         }
     )
     path.write_text(_json(manifest), encoding="utf-8")
@@ -739,9 +748,9 @@ def _review_index_html(
             "Condensed trust, caveats, and next actions by series.",
         ),
         (
-            f"{root_prefix}streamlit_app.py",
+            f"{root_prefix}run_streamlit.ps1",
             "Interactive app",
-            "Run locally with `uv run streamlit run streamlit_app.py` when you need interactive drilldown.",
+            "Run locally with `.\\run_streamlit.ps1` or `uv run --with-requirements streamlit_requirements.txt streamlit run .\\streamlit_app.py`.",
         ),
         (
             f"{root_prefix}llm_context.json",
@@ -1291,6 +1300,201 @@ def build_series_summary(run: ForecastRun) -> pd.DataFrame:
         "selection_reason",
     ]
     return summary[[col for col in columns if col in summary.columns]]
+
+
+def build_series_features(run: ForecastRun) -> pd.DataFrame:
+    """Cheap deterministic forecastability features for agent review."""
+
+    if run.history.empty:
+        return pd.DataFrame(
+            columns=[
+                "unique_id",
+                "history_observations",
+                "history_depth_bucket",
+                "zero_fraction",
+                "nonzero_observations",
+                "coefficient_of_variation",
+                "recent_vs_prior_level_change",
+                "trend_strength_proxy",
+                "seasonal_strength_proxy",
+                "forecastability_score_0_100",
+                "recommended_experiment_next_step",
+            ]
+        )
+    history = run.history.copy().sort_values(["unique_id", "ds"])
+    season_length = int(run.spec.season_length or run.profile.season_length or 1)
+    horizon = max(int(run.spec.horizon), 1)
+    trust = build_trust_summary(run)
+    trust_scores: dict[str, float] = {}
+    if not trust.empty and {"unique_id", "trust_score_0_100"}.issubset(trust.columns):
+        trust_scores = dict(zip(trust["unique_id"].astype(str), pd.to_numeric(trust["trust_score_0_100"], errors="coerce")))
+    rows = []
+    for unique_id, group in history.groupby("unique_id", sort=True):
+        values = pd.to_numeric(group["y"], errors="coerce").dropna().astype(float).to_numpy()
+        observations = int(values.size)
+        zero_fraction = _safe_fraction(float((values == 0).sum()), observations)
+        nonzero = int((values != 0).sum()) if observations else 0
+        mean = float(np.mean(values)) if observations else math.nan
+        std = float(np.std(values, ddof=0)) if observations else math.nan
+        cv = _safe_divide(std, abs(mean)) if observations and abs(mean) > 1e-12 else (0.0 if observations and std == 0 else math.nan)
+        recent_change = _recent_vs_prior_change(values, horizon=horizon, season_length=season_length)
+        trend_strength = _trend_strength_proxy(values)
+        seasonal_strength = _seasonal_strength_proxy(values, season_length)
+        history_bucket = _history_depth_bucket(observations, horizon=horizon, season_length=season_length)
+        trust_score = trust_scores.get(str(unique_id))
+        score = _forecastability_score(
+            observations=observations,
+            horizon=horizon,
+            season_length=season_length,
+            zero_fraction=zero_fraction,
+            cv=cv,
+            recent_level_change=recent_change,
+            trend_strength=trend_strength,
+            trust_score=trust_score,
+        )
+        rows.append(
+            {
+                "unique_id": unique_id,
+                "history_observations": observations,
+                "history_depth_bucket": history_bucket,
+                "zero_fraction": zero_fraction,
+                "nonzero_observations": nonzero,
+                "coefficient_of_variation": cv,
+                "recent_vs_prior_level_change": recent_change,
+                "trend_strength_proxy": trend_strength,
+                "seasonal_strength_proxy": seasonal_strength,
+                "forecastability_score_0_100": score,
+                "is_intermittent": bool(zero_fraction is not None and zero_fraction >= 0.35 and np.nanmin(values) >= 0) if observations else False,
+                "recommended_experiment_next_step": _recommended_series_next_step(
+                    observations=observations,
+                    horizon=horizon,
+                    season_length=season_length,
+                    zero_fraction=zero_fraction,
+                    recent_level_change=recent_change,
+                    score=score,
+                    has_events=bool(run.spec.events),
+                    has_regressors=bool(run.spec.regressors),
+                    has_hierarchy="hierarchy_depth" in run.forecast.columns,
+                ),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _safe_fraction(numerator: float, denominator: float) -> float | None:
+    if denominator == 0:
+        return None
+    return float(numerator) / float(denominator)
+
+
+def _safe_divide(numerator: float, denominator: float) -> float | None:
+    if denominator == 0 or math.isnan(denominator):
+        return None
+    return float(numerator) / float(denominator)
+
+
+def _recent_vs_prior_change(values: np.ndarray, *, horizon: int, season_length: int) -> float | None:
+    if values.size < 4:
+        return None
+    window = max(1, min(horizon, season_length if season_length > 1 else horizon, values.size // 3))
+    if values.size < window * 2:
+        return None
+    recent = float(np.mean(values[-window:]))
+    prior = float(np.mean(values[-2 * window : -window]))
+    if abs(prior) <= 1e-12:
+        return None
+    return (recent - prior) / abs(prior)
+
+
+def _trend_strength_proxy(values: np.ndarray) -> float | None:
+    if values.size < 3 or float(np.std(values)) <= 1e-12:
+        return 0.0 if values.size >= 3 else None
+    index = np.arange(values.size, dtype=float)
+    corr = np.corrcoef(index, values.astype(float))[0, 1]
+    if np.isnan(corr):
+        return None
+    return float(corr**2)
+
+
+def _seasonal_strength_proxy(values: np.ndarray, season_length: int) -> float | None:
+    if season_length <= 1 or values.size < season_length * 2:
+        return None
+    left = values[:-season_length].astype(float)
+    right = values[season_length:].astype(float)
+    if left.size < 2 or float(np.std(left)) <= 1e-12 or float(np.std(right)) <= 1e-12:
+        return 0.0
+    corr = np.corrcoef(left, right)[0, 1]
+    if np.isnan(corr):
+        return None
+    return float(max(0.0, corr))
+
+
+def _history_depth_bucket(observations: int, *, horizon: int, season_length: int) -> str:
+    if observations < max(6, horizon * 2):
+        return "thin"
+    if season_length > 1 and observations < season_length * 2:
+        return "moderate_no_full_seasonality"
+    if observations < max(season_length * 3, horizon * 4):
+        return "moderate"
+    return "deep"
+
+
+def _forecastability_score(
+    *,
+    observations: int,
+    horizon: int,
+    season_length: int,
+    zero_fraction: float | None,
+    cv: float | None,
+    recent_level_change: float | None,
+    trend_strength: float | None,
+    trust_score: float | None,
+) -> float:
+    score = 100.0
+    if observations < horizon * 2:
+        score -= 30.0
+    elif observations < horizon * 4:
+        score -= 15.0
+    if season_length > 1 and observations < season_length * 2:
+        score -= 12.0
+    if zero_fraction is not None:
+        score -= min(25.0, zero_fraction * 35.0)
+    if cv is not None and not math.isnan(cv):
+        score -= min(20.0, max(0.0, cv - 1.0) * 8.0)
+    if recent_level_change is not None:
+        score -= min(18.0, abs(recent_level_change) * 20.0)
+    if trend_strength is not None and trend_strength > 0.8 and observations < horizon * 4:
+        score -= 6.0
+    if trust_score is not None and not math.isnan(float(trust_score)):
+        score = (score * 0.7) + (float(trust_score) * 0.3)
+    return round(float(max(0.0, min(100.0, score))), 3)
+
+
+def _recommended_series_next_step(
+    *,
+    observations: int,
+    horizon: int,
+    season_length: int,
+    zero_fraction: float | None,
+    recent_level_change: float | None,
+    score: float,
+    has_events: bool,
+    has_regressors: bool,
+    has_hierarchy: bool,
+) -> str:
+    if observations < horizon * 2:
+        return "shorten_horizon_or_add_history"
+    if season_length > 1 and observations < season_length * 2:
+        return "avoid_seasonality_claim_until_more_history"
+    if zero_fraction is not None and zero_fraction >= 0.35:
+        return "review_intermittent_baselines_and_zero_rate"
+    if recent_level_change is not None and abs(recent_level_change) >= 0.25 and not has_events:
+        return "add_event_or_regime_context"
+    if has_hierarchy:
+        return "compare_hierarchy_reconciliation"
+    if not has_regressors and score < 75:
+        return "search_for_known_future_drivers"
+    return "validate_against_plan_or_run_bounded_experiment"
 
 
 def build_model_audit(run: ForecastRun) -> pd.DataFrame:

@@ -1,0 +1,4 @@
+EVALUATE
+Products
+ORDER BY
+    Products[ProductKey]

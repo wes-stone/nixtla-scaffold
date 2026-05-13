@@ -54,6 +54,7 @@ REQUIRED_RUN_OUTPUTS = (
     "appendix/forecast_long.csv",
     "appendix/backtest_long.csv",
     "appendix/series_summary.csv",
+    "appendix/series_features.csv",
     "appendix/model_audit.csv",
     "appendix/model_tradeoff_scores.csv",
     "appendix/model_pareto_frontier.csv",
@@ -66,6 +67,9 @@ REQUIRED_RUN_OUTPUTS = (
     "report.html",
     "report_base64.txt",
     "streamlit_app.py",
+    "streamlit_requirements.txt",
+    "run_streamlit.ps1",
+    "run_streamlit.cmd",
     "forecast.xlsx",
     "appendix/best_practice_receipts.csv",
     "OPEN_ME_FIRST.html",
@@ -967,7 +971,7 @@ def _remediation_for(gate: str) -> str:
         "artifact_hygiene": "Restore missing required outputs and remove temporary, bytecode, backup, or failure_diagnostics artifacts from generated runs.",
         "optional_extras": "Install required extras in the active environment, for example uv pip install -e .[ml,hierarchy], or do not require that extra for this release.",
         "workbench_qa": "Open workbench_qa_summary.csv/json, then fix missing artifacts, Streamlit compile/AppTest failures, or usability score regressions.",
-        "live_streamlit": "Run uv run streamlit run streamlit_app.py from the quick_forecast folder and inspect the captured Streamlit logs.",
+        "live_streamlit": "Run .\\run_streamlit.ps1 from the quick_forecast folder, or run uv run --with-requirements streamlit_requirements.txt streamlit run .\\streamlit_app.py, then inspect the captured Streamlit logs.",
     }.get(gate, "Inspect this gate's details and rerun release-gates after fixing the failure.")
 
 

@@ -22,6 +22,12 @@ MLFORECAST_MODELS = {
     "LightGBM_Robust",
 }
 
+STATS_SKLEARN_MODELS = (
+    "StatsSklearn_LinearRegression",
+    "StatsSklearn_Ridge",
+    "StatsSklearn_Lasso",
+)
+
 BASELINE_MODELS = {
     "Naive",
     "HistoricAverage",
@@ -33,6 +39,7 @@ BASELINE_MODELS = {
 }
 
 STATSFORECAST_MODELS = {
+    *STATS_SKLEARN_MODELS,
     "SES",
     "SeasonalExpSmoothing",
     "AutoETS",
@@ -45,6 +52,7 @@ STATSFORECAST_MODELS = {
     "DynamicOptimizedTheta",
     "MSTL",
     "MSTL_AutoARIMA",
+    "AutoARIMA_MSTLFeatures",
     "MFLES",
     "AutoMFLES",
     "CrostonClassic",
@@ -77,6 +85,32 @@ _MODEL_ALIASES = {
     "arimamstl": "MSTL_AutoARIMA",
     "mstlautoarima": "MSTL_AutoARIMA",
     "autoarimamstl": "MSTL_AutoARIMA",
+    "arimamstlfeatures": "AutoARIMA_MSTLFeatures",
+    "autoarimamstlfeatures": "AutoARIMA_MSTLFeatures",
+    "mstlfeaturesarima": "AutoARIMA_MSTLFeatures",
+    "mstlfeaturesautoarima": "AutoARIMA_MSTLFeatures",
+    "autoarimaxmstl": "AutoARIMA_MSTLFeatures",
+    "arimaxmstl": "AutoARIMA_MSTLFeatures",
+    "statssklearnlinear": "StatsSklearn_LinearRegression",
+    "statssklearnlinearregression": "StatsSklearn_LinearRegression",
+    "statsforecastlinear": "StatsSklearn_LinearRegression",
+    "statsforecastlinearregression": "StatsSklearn_LinearRegression",
+    "statsforecastsklearnlinear": "StatsSklearn_LinearRegression",
+    "statsforecastsklearnlinearregression": "StatsSklearn_LinearRegression",
+    "sklearnlinear": "StatsSklearn_LinearRegression",
+    "sklearnlinearregression": "StatsSklearn_LinearRegression",
+    "sflinear": "StatsSklearn_LinearRegression",
+    "sflinearregression": "StatsSklearn_LinearRegression",
+    "statssklearnridge": "StatsSklearn_Ridge",
+    "statsforecastridge": "StatsSklearn_Ridge",
+    "statsforecastsklearnridge": "StatsSklearn_Ridge",
+    "sklearnridge": "StatsSklearn_Ridge",
+    "sfridge": "StatsSklearn_Ridge",
+    "statssklearnlasso": "StatsSklearn_Lasso",
+    "statsforecastlasso": "StatsSklearn_Lasso",
+    "statsforecastsklearnlasso": "StatsSklearn_Lasso",
+    "sklearnlasso": "StatsSklearn_Lasso",
+    "sflasso": "StatsSklearn_Lasso",
     "ses": "SES",
     "simpleexponentialsmoothing": "SES",
     "seasonalexponentialsmoothing": "SeasonalExpSmoothing",

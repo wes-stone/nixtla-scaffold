@@ -218,7 +218,7 @@
   "transformations": [
     {
       "name": "Fiscal calendar features",
-      "use": "Add fiscal_year, fiscal_quarter, fiscal_month, and fiscal_period for finance review. Default GitHub-style year starts Feb 1.",
+      "use": "Add fiscal_year, fiscal_quarter, fiscal_month, and fiscal_period for finance review. Default fiscal year starts Feb 1.",
       "apis": "add_fiscal_calendar(frame, fiscal_year_start_month=2)",
       "caveat": "Fiscal fields are explanatory features in the MVP; they do not change the forecast model unless a future MLForecast path uses them.",
       "source": "Project finance standards"
@@ -275,14 +275,14 @@
     {
       "name": "DAX MCP handoff",
       "source": "dax-query-server",
-      "steps": "Use list_connections and get_connection_context, query at forecast grain, export CSV/JSON, then run ingest so the scaffold writes canonical unique_id/ds/y plus query metadata before forecasting.",
+      "steps": "Use list_connections and get_connection_context, query at forecast grain, export CSV/JSON, then run ingest so the scaffold writes canonical unique_id/ds/y plus query metadata before forecasting. For multi-query pipelines, mirror the DAX MCP run_query.py scaffold pattern: the Contoso example executes .dax files against MOCK://contoso by default, while live Power BI/Analysis Services connections require the Microsoft Analysis Services OLE DB Provider (MSOLAP) plus pywin32.",
       "command": "nixtla-scaffold ingest --input dax_export.csv --source dax --query-file query.dax --id-col Product --time-col FiscalMonth --target-col ARR --output runs\\dax_input.csv --forecast-output runs\\dax_forecast --freq ME --horizon 6"
     },
     {
       "name": "Kusto MCP handoff",
       "source": "data-query or azure-kusto",
-      "steps": "Aggregate logs or finance telemetry in KQL, export CSV/JSON/columnar MCP output, then run ingest with explicit time/target/id mapping and optional immediate forecast.",
-      "command": "nixtla-scaffold ingest --input kusto_export.json --source kusto --query-file query.kql --id-value \"Premium Overage ARR\" --time-col day_dt --target-col ARR_30day_avg --output runs\\premium_overage_arr_input.csv --forecast-output runs\\premium_overage_arr_demo --freq ME --horizon 6"
+      "steps": "Aggregate logs or finance telemetry in KQL, export CSV/JSON/columnar MCP output, then run ingest with explicit time/target/id mapping and optional immediate forecast. For multi-query pipelines, use examples\\contoso_kql_pipeline: it forecasts ContosoSales monthly Revenue by ProductCategoryName from .kql files, runs offline by default with deterministic ContosoSales-shaped data, and can run live against https://help.kusto.windows.net/ContosoSales with KUSTO_MODE=live plus azure-kusto-data and azure-identity.",
+      "command": "nixtla-scaffold ingest --input kusto_export.json --source kusto --query-file query.kql --id-value \"Usage Overage ARR\" --time-col day_dt --target-col ARR_30day_avg --output runs\\usage_overage_arr_input.csv --forecast-output runs\\usage_overage_arr_demo --freq ME --horizon 6"
     }
   ]
 }

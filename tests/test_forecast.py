@@ -11,6 +11,7 @@ from nixtla_scaffold.citations import FPPY_CITATION
 from nixtla_scaffold.cli import _coerce_sheet, main
 from nixtla_scaffold.drivers import DriverFeatureBundle
 from nixtla_scaffold.forecast import _apply_shrinkage_toward_last_actual
+from nixtla_scaffold.model_families import canonical_model_name
 from nixtla_scaffold.models import (
     ModelResult,
     _add_weighted_ensemble_to_cv,
@@ -26,6 +27,7 @@ from nixtla_scaffold.outputs import (
     build_model_tradeoff_scores,
     build_residual_test_summary,
     build_selected_forecast,
+    build_series_features,
     build_trust_summary,
 )
 from nixtla_scaffold.profile import profile_dataset
@@ -86,6 +88,27 @@ def test_baseline_forecast_smoke() -> None:
     assert all(FPPY_CITATION in item["source"] for item in run.best_practice_receipts())
 
 
+def test_series_features_handle_short_constant_and_intermittent_series() -> None:
+    df = pd.DataFrame(
+        {
+            "unique_id": ["constant"] * 8 + ["intermittent"] * 8 + ["short"] * 3,
+            "ds": list(pd.date_range("2025-01-31", periods=8, freq="ME")) * 2
+            + list(pd.date_range("2025-01-31", periods=3, freq="ME")),
+            "y": [10] * 8 + [0, 0, 5, 0, 0, 8, 0, 0] + [3, 4, 5],
+        }
+    )
+    run = run_forecast(df, ForecastSpec(horizon=2, model_policy="baseline"))
+
+    features = build_series_features(run)
+
+    assert set(features["unique_id"]) == {"constant", "intermittent", "short"}
+    indexed = features.set_index("unique_id")
+    assert indexed.loc["constant", "coefficient_of_variation"] == 0
+    assert bool(indexed.loc["intermittent", "is_intermittent"]) is True
+    assert indexed.loc["short", "history_depth_bucket"] == "thin"
+    assert "recommended_experiment_next_step" in features.columns
+
+
 def test_weighted_ensemble_is_audited_and_can_be_selected() -> None:
     df = pd.DataFrame(
         {
@@ -119,6 +142,129 @@ def test_long_statsforecast_ladder_includes_mstl_autoarima() -> None:
     assert "AutoARIMA" in run.all_models.columns
     assert "MSTL" in run.all_models.columns
     assert "MSTL_AutoARIMA" in run.all_models.columns
+    assert "AutoARIMA_MSTLFeatures" in run.all_models.columns
+
+
+def test_long_statsforecast_ladder_includes_stats_sklearn_models() -> None:
+    pytest.importorskip("sklearn")
+    df = pd.DataFrame(
+        {
+            "unique_id": ["Revenue"] * 36,
+            "ds": pd.date_range("2022-01-01", periods=36, freq="MS"),
+            "y": [100 + i * 5 + (15 if i % 12 in {10, 11} else 0) for i in range(36)],
+        }
+    )
+
+    run = run_forecast(df, ForecastSpec(horizon=6, freq="MS", model_policy="statsforecast", weighted_ensemble=False, verbose=False))
+    models = set(model_module.model_columns(run.all_models))
+
+    assert {"StatsSklearn_LinearRegression", "StatsSklearn_Ridge", "StatsSklearn_Lasso"}.issubset(models)
+    assert {"StatsSklearn_LinearRegression", "StatsSklearn_Ridge", "StatsSklearn_Lasso"}.issubset(set(run.backtest_metrics["model"]))
+
+
+def test_model_allowlist_accepts_stats_sklearn_alias_and_keeps_plain_ridge_mlforecast() -> None:
+    pytest.importorskip("sklearn")
+    assert canonical_model_name("ridge") == "Ridge"
+    assert canonical_model_name("stats sklearn ridge") == "StatsSklearn_Ridge"
+    df = pd.DataFrame(
+        {
+            "unique_id": ["Revenue"] * 36,
+            "ds": pd.date_range("2022-01-01", periods=36, freq="MS"),
+            "y": [100 + i * 5 + (15 if i % 12 in {10, 11} else 0) for i in range(36)],
+        }
+    )
+
+    stats_run = run_forecast(
+        df,
+        ForecastSpec(
+            horizon=6,
+            freq="MS",
+            levels=(),
+            model_policy="statsforecast",
+            model_allowlist=("stats sklearn ridge",),
+            weighted_ensemble=False,
+            verbose=False,
+        ),
+    )
+    assert set(model_module.model_columns(stats_run.all_models)) == {"StatsSklearn_Ridge"}
+    assert stats_run.spec.model_allowlist == ("StatsSklearn_Ridge",)
+    assert "StatsSklearn_Ridge" in set(stats_run.backtest_metrics["model"])
+
+    pytest.importorskip("mlforecast")
+    ml_run = run_forecast(
+        df,
+        ForecastSpec(
+            horizon=6,
+            freq="MS",
+            levels=(),
+            model_policy="auto",
+            model_allowlist=("ridge",),
+            weighted_ensemble=False,
+            verbose=False,
+        ),
+    )
+    assert set(model_module.model_columns(ml_run.all_models)) == {"Ridge"}
+    assert ml_run.spec.model_allowlist == ("Ridge",)
+
+
+def test_stats_sklearn_manual_cv_cutoffs_align_with_statsforecast_candidates() -> None:
+    pytest.importorskip("sklearn")
+    df = pd.DataFrame(
+        {
+            "unique_id": ["Revenue"] * 36,
+            "ds": pd.date_range("2022-01-01", periods=36, freq="MS"),
+            "y": [100 + i * 5 + (15 if i % 12 in {10, 11} else 0) for i in range(36)],
+        }
+    )
+
+    run = run_forecast(
+        df,
+        ForecastSpec(
+            horizon=6,
+            freq="MS",
+            levels=(),
+            model_policy="statsforecast",
+            model_allowlist=("naive", "stats sklearn ridge"),
+            weighted_ensemble=False,
+            verbose=False,
+        ),
+    )
+    backtest = run.backtest_predictions
+    naive_cutoffs = set(pd.to_datetime(backtest.loc[backtest["Naive"].notna(), "cutoff"]))
+    sklearn_cutoffs = set(pd.to_datetime(backtest.loc[backtest["StatsSklearn_Ridge"].notna(), "cutoff"]))
+
+    assert naive_cutoffs
+    assert sklearn_cutoffs == naive_cutoffs
+
+
+def test_stats_sklearn_intervals_smoke() -> None:
+    pytest.importorskip("sklearn")
+    df = pd.DataFrame(
+        {
+            "unique_id": ["Revenue"] * 42,
+            "ds": pd.date_range("2021-07-01", periods=42, freq="MS"),
+            "y": [100 + i * 5 + (15 if i % 12 in {10, 11} else 0) for i in range(42)],
+        }
+    )
+
+    run = run_forecast(
+        df,
+        ForecastSpec(
+            horizon=6,
+            freq="MS",
+            levels=(80,),
+            model_policy="statsforecast",
+            model_allowlist=("stats sklearn ridge",),
+            weighted_ensemble=False,
+            verbose=False,
+        ),
+    )
+
+    if {"StatsSklearn_Ridge-lo-80", "StatsSklearn_Ridge-hi-80"}.issubset(run.all_models.columns):
+        assert (run.all_models["StatsSklearn_Ridge-lo-80"] <= run.all_models["StatsSklearn_Ridge"]).all()
+        assert (run.all_models["StatsSklearn_Ridge"] <= run.all_models["StatsSklearn_Ridge-hi-80"]).all()
+    else:
+        assert any("StatsForecast sklearn feature models could not produce conformal intervals" in warning for warning in run.warnings)
 
 
 def test_model_allowlist_accepts_friendly_arima_aliases_and_filters_tournament() -> None:
@@ -155,6 +301,67 @@ def test_model_allowlist_accepts_friendly_arima_aliases_and_filters_tournament()
     ml_family = next(row for row in resolution["families"] if row["family"] == "mlforecast")
     assert ml_family["ran"] is False
     assert ml_family["reason_if_not_ran"] == "skipped_by_model_allowlist"
+
+
+def test_model_allowlist_accepts_mstl_feature_arima_alias() -> None:
+    df = pd.DataFrame(
+        {
+            "unique_id": ["Revenue"] * 36,
+            "ds": pd.date_range("2023-01-31", periods=36, freq="ME"),
+            "y": [100 + i * 4 + (18 if i % 12 == 11 else 0) - (8 if i % 12 == 6 else 0) for i in range(36)],
+        }
+    )
+
+    run = run_forecast(
+        df,
+        ForecastSpec(
+            horizon=3,
+            freq="ME",
+            levels=(),
+            model_policy="statsforecast",
+            model_allowlist=("arima mstl features",),
+            weighted_ensemble=False,
+            verbose=False,
+        ),
+    )
+
+    models = set(model_module.model_columns(run.all_models))
+    assert models == {"AutoARIMA_MSTLFeatures"}
+    assert run.spec.model_allowlist == ("AutoARIMA_MSTLFeatures",)
+    assert run.manifest()["spec"]["model_allowlist"] == ["AutoARIMA_MSTLFeatures"]
+    assert "AutoARIMA_MSTLFeatures" in set(run.backtest_metrics["model"])
+
+
+def test_mstl_feature_arima_runs_for_eligible_series_in_mixed_history_panel() -> None:
+    long_values = [100 + i * 4 + (18 if i % 12 == 11 else 0) - (8 if i % 12 == 6 else 0) for i in range(36)]
+    short_values = [50 + i * 2 for i in range(10)]
+    df = pd.concat(
+        [
+            pd.DataFrame(
+                {
+                    "unique_id": ["Long"] * len(long_values),
+                    "ds": pd.date_range("2023-01-31", periods=len(long_values), freq="ME"),
+                    "y": long_values,
+                }
+            ),
+            pd.DataFrame(
+                {
+                    "unique_id": ["Short"] * len(short_values),
+                    "ds": pd.date_range("2025-03-31", periods=len(short_values), freq="ME"),
+                    "y": short_values,
+                }
+            ),
+        ],
+        ignore_index=True,
+    )
+
+    run = run_forecast(df, ForecastSpec(horizon=3, freq="ME", levels=(), model_policy="statsforecast", verbose=False))
+
+    assert "AutoARIMA_MSTLFeatures" in run.all_models.columns
+    assert run.all_models.loc[run.all_models["unique_id"] == "Long", "AutoARIMA_MSTLFeatures"].notna().all()
+    assert run.all_models.loc[run.all_models["unique_id"] == "Short", "AutoARIMA_MSTLFeatures"].isna().all()
+    assert "AutoARIMA_MSTLFeatures" in set(run.backtest_metrics["model"])
+    assert any("skipped for series" in warning and "Short" in warning for warning in run.warnings)
 
 
 def test_model_allowlist_rejects_unknown_names() -> None:
@@ -352,7 +559,7 @@ def test_model_pareto_frontier_marks_tradeoffs_without_changing_selection() -> N
     assert by_model.loc["RMSEWinner", "selection_alignment"] == "selected_pareto"
     assert by_model.loc["LowBias", "selection_alignment"] == "pareto_alternative"
     assert by_model.loc["Dominated", "selection_alignment"] == "dominated_challenger"
-    assert by_model.loc["RMSEWinner", "metrics_considered"] == "rmse|mae|wape|mase|rmsse|abs_bias"
+    assert by_model.loc["RMSEWinner", "metrics_considered"] == "rmse|mae"
     assert set(frontier["dominance_scope"]) == {"within_unique_id"}
 
 
@@ -600,7 +807,15 @@ def test_statsforecast_candidate_failure_does_not_drop_classical_family() -> Non
         if col not in {"unique_id", "ds"} and "-lo-" not in col and "-hi-" not in col
     }
     assert run.engine == "statsforecast"
-    assert {"AutoETS", "AutoARIMA", "MSTL", "MSTL_AutoARIMA", "MFLES", "AutoMFLES"}.issubset(model_cols)
+    assert {
+        "AutoETS",
+        "AutoARIMA",
+        "MSTL",
+        "MSTL_AutoARIMA",
+        "AutoARIMA_MSTLFeatures",
+        "MFLES",
+        "AutoMFLES",
+    }.issubset(model_cols)
     assert "WeightedEnsemble" in model_cols
     assert set(run.model_selection["selection_horizon"]) == {16}
     assert not any("StatsForecast failed; used baseline engine" in warning for warning in run.warnings)
@@ -656,12 +871,76 @@ def test_auto_policy_uses_shared_cv_windows_for_statsforecast_and_mlforecast() -
     assert ml_cutoffs == stats_cutoffs
 
 
-def test_model_policy_all_discloses_mlforecast_history_gate() -> None:
+def test_auto_policy_attempts_mlforecast_when_cv_feasible_below_regressor_gate(monkeypatch) -> None:
     df = pd.DataFrame(
         {
             "unique_id": ["Revenue"] * 12,
             "ds": pd.date_range("2025-01-01", periods=12, freq="MS"),
             "y": [100 + i * 3 for i in range(12)],
+        }
+    )
+    calls: list[int] = []
+
+    def fake_mlforecast(history, profile, spec):
+        calls.append(profile.min_obs_per_series)
+        future = pd.date_range("2026-01-01", periods=spec.horizon, freq="MS")
+        return ModelResult(
+            forecast=pd.DataFrame({"unique_id": "Revenue", "ds": future, "LinearRegression": [140.0, 143.0]}),
+            backtest_metrics=model_module._empty_backtest_metrics(),
+            backtest_predictions=model_module._empty_backtest_predictions(),
+            engine="mlforecast",
+            model_weights=pd.DataFrame(),
+            warnings=("fake MLForecast ran",),
+        )
+
+    monkeypatch.setattr(model_module, "forecast_with_statsforecast", model_module.forecast_with_baselines)
+    monkeypatch.setattr(model_module, "forecast_with_mlforecast", fake_mlforecast)
+
+    run = run_forecast(
+        df,
+        ForecastSpec(horizon=2, freq="MS", levels=(), model_policy="auto", weighted_ensemble=False, verbose=False),
+    )
+
+    assert calls == [12]
+    families = {row["family"]: row for row in run.model_policy_resolution["families"]}
+    assert families["mlforecast"]["eligible"]
+    assert families["mlforecast"]["ran"]
+    assert families["mlforecast"]["contributed_models"] == ["LinearRegression"]
+    assert "LinearRegression" in run.all_models.columns
+    assert not any("MLForecast skipped for model_policy='auto'" in warning for warning in run.warnings)
+
+
+def test_auto_policy_discloses_mlforecast_feasibility_skip(monkeypatch) -> None:
+    df = pd.DataFrame(
+        {
+            "unique_id": ["Revenue"] * 6,
+            "ds": pd.date_range("2025-01-01", periods=6, freq="MS"),
+            "y": [100 + i * 3 for i in range(6)],
+        }
+    )
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("MLForecast should not be called when auto feasibility fails")
+
+    monkeypatch.setattr(model_module, "forecast_with_statsforecast", model_module.forecast_with_baselines)
+    monkeypatch.setattr(model_module, "forecast_with_mlforecast", fail_if_called)
+
+    run = run_forecast(df, ForecastSpec(horizon=2, freq="MS", model_policy="auto", verbose=False))
+
+    families = {row["family"]: row for row in run.model_policy_resolution["families"]}
+    assert families["mlforecast"]["requested"]
+    assert not families["mlforecast"]["eligible"]
+    assert not families["mlforecast"]["ran"]
+    assert "min_history_below_auto_threshold" in families["mlforecast"]["reason_if_not_ran"]
+    assert any("MLForecast skipped for model_policy='auto'" in warning for warning in run.warnings)
+
+
+def test_model_policy_all_discloses_mlforecast_history_gate() -> None:
+    df = pd.DataFrame(
+        {
+            "unique_id": ["Revenue"] * 6,
+            "ds": pd.date_range("2025-01-01", periods=6, freq="MS"),
+            "y": [100 + i * 3 for i in range(6)],
         }
     )
 
@@ -673,7 +952,7 @@ def test_model_policy_all_discloses_mlforecast_history_gate() -> None:
     assert families["mlforecast"]["requested"]
     assert not families["mlforecast"]["eligible"]
     assert not families["mlforecast"]["ran"]
-    assert "min_history_below_threshold" in families["mlforecast"]["reason_if_not_ran"]
+    assert "min_history_below_auto_threshold" in families["mlforecast"]["reason_if_not_ran"]
     assert any("MLForecast skipped for model_policy='all'" in warning for warning in run.warnings)
 
 
@@ -1411,6 +1690,7 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert (appendix / "model_tradeoff_scores.csv").exists()
     assert (appendix / "model_pareto_frontier.csv").exists()
     assert (appendix / "feature_selection_receipts.csv").exists()
+    assert (appendix / "series_features.csv").exists()
     assert (appendix / "model_window_metrics.csv").exists()
     assert (appendix / "residual_diagnostics.csv").exists()
     assert (appendix / "interval_diagnostics.csv").exists()
@@ -1426,6 +1706,9 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert (output_dir / "report.html").exists()
     assert (output_dir / "report_base64.txt").exists()
     assert (output_dir / "streamlit_app.py").exists()
+    assert (output_dir / "streamlit_requirements.txt").exists()
+    assert (output_dir / "run_streamlit.ps1").exists()
+    assert (output_dir / "run_streamlit.cmd").exists()
     assert (output_dir / "OPEN_ME_FIRST.html").exists()
     assert (output_dir / "output" / "index.html").exists()
     assert (output_dir / "output" / "forecast_review.xlsx").exists()
@@ -1447,6 +1730,7 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert diagnostics["llm_triage_summary"]["model_tradeoff_score_rows"] > 0
     assert diagnostics["llm_triage_summary"]["model_pareto_frontier_rows"] > 0
     assert "feature_selection_receipt_rows" in diagnostics["llm_triage_summary"]
+    assert diagnostics["llm_triage_summary"]["series_feature_rows"] > 0
     assert "model_weights" in diagnostics
     assert "trust_summary" in diagnostics
     assert "reproducibility" in diagnostics
@@ -1461,6 +1745,7 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert "model_tradeoff_scores_top_rows" in llm_context["portfolio_tables"]
     assert "model_pareto_frontier_top_rows" in llm_context["portfolio_tables"]
     assert "feature_selection_receipts_top_rows" in llm_context["portfolio_tables"]
+    assert "series_features" in llm_context["portfolio_tables"]
     assert "recommended_questions" in llm_context
     manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
     assert len(manifest["reproducibility"]["data_hash_sha256"]) == 64
@@ -1470,8 +1755,12 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert manifest["outputs"]["model_tradeoff_scores"] == "appendix/model_tradeoff_scores.csv"
     assert manifest["outputs"]["model_pareto_frontier"] == "appendix/model_pareto_frontier.csv"
     assert manifest["outputs"]["feature_selection_receipts"] == "appendix/feature_selection_receipts.csv"
+    assert manifest["outputs"]["series_features"] == "appendix/series_features.csv"
     assert manifest["outputs"]["trust_summary"] == "appendix/trust_summary.csv"
     assert manifest["outputs"]["llm_context"] == "llm_context.json"
+    assert manifest["outputs"]["streamlit_requirements"] == "streamlit_requirements.txt"
+    assert manifest["outputs"]["streamlit_launcher_ps1"] == "run_streamlit.ps1"
+    assert manifest["outputs"]["streamlit_launcher_cmd"] == "run_streamlit.cmd"
     assert manifest["outputs"]["output_open_first"] == "OPEN_ME_FIRST.html"
     assert manifest["outputs"]["output_workbook"] == "output/forecast_review.xlsx"
     assert manifest["outputs"]["output_forecast"] == "output/forecast_for_review.csv"
@@ -1485,9 +1774,11 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert policy_families["statsforecast"]["reason_if_not_ran"] == "not_requested"
     assert "audit/backtest_windows.csv" in "\n".join(diagnostics["next_diagnostic_steps"])
     assert "OPEN_ME_FIRST.html" in "\n".join(diagnostics["next_diagnostic_steps"])
+    assert "streamlit_requirements.txt" in "\n".join(diagnostics["next_diagnostic_steps"])
     assert "appendix/model_win_rates.csv" in "\n".join(diagnostics["next_diagnostic_steps"])
     assert "appendix/model_pareto_frontier.csv" in "\n".join(diagnostics["next_diagnostic_steps"])
     assert "appendix/feature_selection_receipts.csv" in "\n".join(diagnostics["next_diagnostic_steps"])
+    assert "appendix/series_features.csv" in "\n".join(diagnostics["next_diagnostic_steps"])
     assert "appendix/trust_summary.csv" in "\n".join(diagnostics["next_diagnostic_steps"])
     assert "audit/seasonality_diagnostics.csv" in "\n".join(diagnostics["next_diagnostic_steps"])
     assert "executive_headline.paragraph" in "\n".join(diagnostics["next_diagnostic_steps"])
@@ -1681,6 +1972,20 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert 'if active_section == "Forecast review" and headline_text:' in streamlit_app
     assert 'if active_section == "Forecast review" and not trust_summary.empty:' in streamlit_app
     assert "Forecast review owns the executive headline" in streamlit_app
+    assert "Copy/paste wide summary" in streamlit_app
+    assert "wide_summary_table" in streamlit_app
+    assert "Date columns stay clean" in streamlit_app
+    assert "Wide summary values" in streamlit_app
+    assert "Forecast model" in streamlit_app
+    assert "Display units" in streamlit_app
+    assert "Prediction intervals" in streamlit_app
+    assert "Adds indented lo/hi rows" in streamlit_app
+    assert '"measure": "Forecast"' in streamlit_app
+    assert "Actuals + forecast" in streamlit_app
+    assert "Active champion by series" in streamlit_app
+    assert "Currency (millions)" in streamlit_app
+    assert "forecast_model" in streamlit_app
+    assert "forecast_wide_summary.csv" in streamlit_app
     assert '"Forecast ledger"' in streamlit_app
     assert 'read_json("ledger_context.json")' in streamlit_app
     assert "official forecast locks" in streamlit_app
@@ -1717,6 +2022,9 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert "future_model_frame" in streamlit_app
     assert "ordered_model_feed_columns" in streamlit_app
     assert "Model feed columns keep `yhat`, `yhat_lo_80`, `yhat_hi_80`, `yhat_lo_95`, and `yhat_hi_95` adjacent" in streamlit_app
+    assert "Regressor visual evidence" in streamlit_app
+    assert "regressor_visual_files" in streamlit_app
+    assert "driver_feature_importance_plot" in streamlit_app
     assert '"Prediction intervals"' in streamlit_app
     assert "Prediction interval focus" in streamlit_app
     assert "st.cache_data" in streamlit_app
@@ -1814,6 +2122,11 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert "add_period_shading" in streamlit_app
     assert "add_cutoff_marker" in streamlit_app
     assert "MLForecast interpretability" in streamlit_app
+    assert "How to read MLForecast explainability" in streamlit_app
+    assert "https://nixtlaverse.nixtla.io/mlforecast/docs/how-to-guides/analyzing_models.html" in streamlit_app
+    assert "`preprocess` to rebuild training features" in streamlit_app
+    assert "MLForecast's `SaveFeatures` callback" in streamlit_app
+    assert "does not persist trained model objects or SHAP outputs by default" in streamlit_app
     assert "Win rate vs benchmark" in streamlit_app
     assert "benchmark_win_rate_chart" in streamlit_app
     assert "residual_horizon_chart" in streamlit_app
@@ -1936,10 +2249,15 @@ def test_report_regeneration_handles_missing_executive_headline_for_old_runs(tmp
     assert "Executive forecast headline" in decoded_report
     assert "Executive headline unavailable for this run." in decoded_report
     assert refreshed_paths["output_open_first"] == output_dir / "OPEN_ME_FIRST.html"
+    assert refreshed_paths["streamlit_requirements"] == output_dir / "streamlit_requirements.txt"
+    assert refreshed_paths["streamlit_launcher_ps1"] == output_dir / "run_streamlit.ps1"
     assert (output_dir / "OPEN_ME_FIRST.html").exists()
+    assert (output_dir / "streamlit_requirements.txt").exists()
+    assert (output_dir / "run_streamlit.ps1").exists()
     assert (output_dir / "output" / "forecast_review.xlsx").exists()
     assert "Executive headline unavailable for this run." in (output_dir / "OPEN_ME_FIRST.html").read_text(encoding="utf-8")
     refreshed_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert refreshed_manifest["outputs"]["streamlit_launcher_ps1"] == "run_streamlit.ps1"
     assert refreshed_manifest["outputs"]["output_workbook"] == "output/forecast_review.xlsx"
     assert not any(key.startswith("human_") for key in refreshed_manifest["outputs"])
 

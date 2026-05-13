@@ -1,0 +1,51 @@
+schema_version: nixtla_scaffold.pipeline.v1
+name: contoso_dax_pipeline
+
+# Offline by default: executes the .dax files through a small Python scaffold
+# matching the dax-query MCP run_query.py pattern. It uses MOCK://contoso unless
+# DAX_CONNECTION_STRING points at a live Power BI/Analysis Services model.
+extracts:
+  - name: sales_actuals
+    script: scripts\run_dax_extract.py
+    query_file: queries\contoso_sales_fact.dax
+    output: raw\contoso_sales.csv
+    args:
+      - --output
+      - "{output:sales_actuals}"
+      - --query-file
+      - "{query_file}"
+
+  - name: product_dimension
+    script: scripts\run_dax_extract.py
+    query_file: queries\contoso_product_dimension.dax
+    output: raw\contoso_products.csv
+    args:
+      - --output
+      - "{output:product_dimension}"
+      - --query-file
+      - "{query_file}"
+
+transform:
+  script: scripts\build_forecast_input.py
+  output: prepared\joined_sales.csv
+  args:
+    - --sales
+    - "{output:sales_actuals}"
+    - --products
+    - "{output:product_dimension}"
+    - --output
+    - "{output:forecast_input}"
+
+canonical:
+  output: prepared\forecast_input.csv
+  id_col: unique_id
+  time_col: ds
+  target_col: y
+
+forecast:
+  output: forecast
+  preset: quick
+  horizon: 3
+  freq: ME
+  model_policy: baseline
+  verbose: false

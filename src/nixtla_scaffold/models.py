@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any
 import warnings
 
@@ -9,11 +10,13 @@ import numpy as np
 import pandas as pd
 
 from nixtla_scaffold.drivers import DriverFeatureBundle, prepare_mlforecast_regressor_features
-from nixtla_scaffold.model_families import model_family
+from nixtla_scaffold.model_families import STATS_SKLEARN_MODELS, model_family
 from nixtla_scaffold.schema import DataProfile, ForecastSpec
 
 
 MLFORECAST_MIN_OBS = 30
+MLFORECAST_AUTO_MIN_OBS = 8
+MSTL_FEATURE_ARIMA_MODEL = "AutoARIMA_MSTLFeatures"
 
 
 @dataclass(frozen=True)
@@ -42,6 +45,12 @@ class MLForecastIntervalPlan:
     dropped_lags: tuple[int, ...]
 
 
+@dataclass(frozen=True)
+class MLForecastFeasibility:
+    eligible: bool
+    reason: str = ""
+
+
 def forecast_with_policy(
     history: pd.DataFrame,
     profile: DataProfile,
@@ -68,56 +77,55 @@ def forecast_with_policy(
                 "reason_if_not_ran": "skipped_by_model_allowlist",
                 "contributed_models": [],
             }
-        elif profile.min_obs_per_series < MLFORECAST_MIN_OBS:
-            reason = f"min_history_below_threshold: min observations {profile.min_obs_per_series} < {MLFORECAST_MIN_OBS}"
-            ml_override = {"eligible": False, "ran": False, "reason_if_not_ran": reason, "contributed_models": []}
-            if spec.model_policy == "all":
-                sf_result = _append_warnings(
-                    sf_result,
-                    (
-                        "MLForecast skipped for model_policy='all' because "
-                        f"min history {profile.min_obs_per_series} < {MLFORECAST_MIN_OBS}"
-                    ),
-                )
         else:
-            try:
-                ml_result = forecast_with_mlforecast(history, profile, spec)
-            except ImportError as exc:
-                if spec.model_policy == "all":
-                    raise ImportError(f"MLForecast requested by model_policy='all' but unavailable: {exc}") from exc
+            feasibility = _mlforecast_auto_feasibility(profile, spec)
+            if not feasibility.eligible:
                 ml_override = {
-                    "eligible": True,
+                    "eligible": False,
                     "ran": False,
-                    "reason_if_not_ran": f"not_installed: {exc}",
+                    "reason_if_not_ran": feasibility.reason,
                     "contributed_models": [],
                 }
-                sf_result = _append_warnings(sf_result, f"MLForecast unavailable; continuing without MLForecast ({exc})")
-            except Exception as exc:
-                if spec.model_policy == "all":
-                    raise RuntimeError(f"MLForecast requested by model_policy='all' but failed: {exc}") from exc
-                ml_override = {
-                    "eligible": True,
-                    "ran": False,
-                    "reason_if_not_ran": f"runtime_failure: {exc}",
-                    "contributed_models": [],
-                }
-                sf_result = _append_warnings(sf_result, f"MLForecast failed; continuing without MLForecast ({exc})")
+                sf_result = _append_warnings(sf_result, _mlforecast_skip_warning(spec.model_policy, feasibility.reason))
             else:
-                if ml_result.engine == "mlforecast":
-                    sf_result = _merge_model_results(sf_result, ml_result, history=history, profile=profile, spec=spec)
-                    ml_models = _non_ensemble_model_columns(ml_result.forecast)
-                    if not ml_models:
-                        reason = "produced_no_candidates"
-                        if spec.model_policy == "all":
-                            raise RuntimeError("MLForecast requested by model_policy='all' but produced no candidate models")
-                        ml_override = {"eligible": True, "ran": False, "reason_if_not_ran": reason, "contributed_models": []}
-                        sf_result = _append_warnings(sf_result, "MLForecast produced no candidate models; continuing without MLForecast")
-                else:
-                    reason = f"runtime_failure: unexpected engine {ml_result.engine}"
+                try:
+                    ml_result = forecast_with_mlforecast(history, profile, spec)
+                except ImportError as exc:
                     if spec.model_policy == "all":
-                        raise RuntimeError(f"MLForecast requested by model_policy='all' but returned {ml_result.engine}")
-                    ml_override = {"eligible": True, "ran": False, "reason_if_not_ran": reason, "contributed_models": []}
-                    sf_result = _append_warnings(sf_result, f"MLForecast returned {ml_result.engine}; continuing without MLForecast")
+                        raise ImportError(f"MLForecast requested by model_policy='all' but unavailable: {exc}") from exc
+                    ml_override = {
+                        "eligible": True,
+                        "ran": False,
+                        "reason_if_not_ran": f"not_installed: {exc}",
+                        "contributed_models": [],
+                    }
+                    sf_result = _append_warnings(sf_result, f"MLForecast unavailable; continuing without MLForecast ({exc})")
+                except Exception as exc:
+                    if spec.model_policy == "all":
+                        raise RuntimeError(f"MLForecast requested by model_policy='all' but failed: {exc}") from exc
+                    ml_override = {
+                        "eligible": True,
+                        "ran": False,
+                        "reason_if_not_ran": f"runtime_failure: {exc}",
+                        "contributed_models": [],
+                    }
+                    sf_result = _append_warnings(sf_result, f"MLForecast failed; continuing without MLForecast ({exc})")
+                else:
+                    if ml_result.engine == "mlforecast":
+                        sf_result = _merge_model_results(sf_result, ml_result, history=history, profile=profile, spec=spec)
+                        ml_models = _non_ensemble_model_columns(ml_result.forecast)
+                        if not ml_models:
+                            reason = "produced_no_candidates"
+                            if spec.model_policy == "all":
+                                raise RuntimeError("MLForecast requested by model_policy='all' but produced no candidate models")
+                            ml_override = {"eligible": True, "ran": False, "reason_if_not_ran": reason, "contributed_models": []}
+                            sf_result = _append_warnings(sf_result, "MLForecast produced no candidate models; continuing without MLForecast")
+                    else:
+                        reason = f"runtime_failure: unexpected engine {ml_result.engine}"
+                        if spec.model_policy == "all":
+                            raise RuntimeError(f"MLForecast requested by model_policy='all' but returned {ml_result.engine}")
+                        ml_override = {"eligible": True, "ran": False, "reason_if_not_ran": reason, "contributed_models": []}
+                        sf_result = _append_warnings(sf_result, f"MLForecast returned {ml_result.engine}; continuing without MLForecast")
 
     return _with_policy_resolution(sf_result, profile, spec, {"mlforecast": ml_override} if ml_override else None)
 
@@ -308,6 +316,60 @@ def _model_allowlist_warning(spec: ForecastSpec) -> str | None:
     return f"model allowlist applied: {', '.join(spec.model_allowlist)}"
 
 
+def _mlforecast_auto_feasibility(profile: DataProfile, spec: ForecastSpec) -> MLForecastFeasibility:
+    min_obs = int(profile.min_obs_per_series)
+    if min_obs < MLFORECAST_AUTO_MIN_OBS:
+        return MLForecastFeasibility(
+            False,
+            f"min_history_below_auto_threshold: min observations {min_obs} < {MLFORECAST_AUTO_MIN_OBS}",
+        )
+
+    h, n_windows, step_size = _adaptive_cv_params(
+        min_obs,
+        spec.horizon,
+        profile.season_length,
+        strict=spec.strict_cv_horizon,
+    )
+    if h < 1 or n_windows < 1:
+        strict_note = " under strict full-horizon CV" if spec.strict_cv_horizon else ""
+        return MLForecastFeasibility(
+            False,
+            "cv_not_feasible: "
+            f"min observations {min_obs} cannot support one MLForecast rolling-origin window "
+            f"for requested horizon {spec.horizon}{strict_note}",
+        )
+
+    shortest_train = min_obs - h - step_size * max(0, n_windows - 1)
+    usable_lags = tuple(lag for lag in _mlforecast_default_lags(min_obs, profile.season_length) if lag <= max(0, shortest_train - 1))
+    if not usable_lags:
+        return MLForecastFeasibility(
+            False,
+            "lag_history_insufficient: "
+            f"shortest rolling-origin training fold has {shortest_train} observations and cannot support lag features",
+        )
+    return MLForecastFeasibility(True)
+
+
+def _mlforecast_skip_warning(policy: str, reason: str) -> str:
+    message = f"MLForecast skipped for model_policy='{policy}' because {reason}"
+    if policy == "auto":
+        message += (
+            ". Add history, shorten the strict horizon, or use --model-policy mlforecast for "
+            "exploratory forced ML; forced ML may fail or lack validation."
+        )
+    return message
+
+
+def _mlforecast_default_lags(min_obs: int, season_length: int) -> tuple[int, ...]:
+    lags = list(range(1, min(13, min_obs // 2) + 1))
+    if season_length > 1:
+        lags.extend([season_length, 2 * season_length])
+    lags = sorted(set(lag for lag in lags if lag < min_obs))
+    if not lags:
+        lags = [1]
+    return tuple(lags)
+
+
 def _filter_factories_by_allowlist(
     factories: list[tuple[str, Callable[[], Any]]],
     spec: ForecastSpec,
@@ -454,6 +516,7 @@ def _build_model_policy_resolution(
     overrides: dict[str, dict[str, Any] | None],
 ) -> dict[str, Any]:
     policy = spec.model_policy
+    ml_feasibility = _mlforecast_auto_feasibility(profile, spec)
     requested = {
         "baseline": policy == "baseline",
         "statsforecast": policy in {"auto", "all", "statsforecast"},
@@ -462,7 +525,7 @@ def _build_model_policy_resolution(
     eligible = {
         "baseline": requested["baseline"] or result.engine == "baseline",
         "statsforecast": requested["statsforecast"],
-        "mlforecast": (policy == "mlforecast") or (requested["mlforecast"] and profile.min_obs_per_series >= MLFORECAST_MIN_OBS),
+        "mlforecast": (policy == "mlforecast") or (requested["mlforecast"] and ml_feasibility.eligible),
     }
     contributed = _contributed_models_by_family(result.forecast)
     families: list[dict[str, Any]] = []
@@ -482,7 +545,7 @@ def _build_model_policy_resolution(
             if not requested[family]:
                 reason = "not_requested"
             elif not family_eligible and family == "mlforecast":
-                reason = f"min_history_below_threshold: min observations {profile.min_obs_per_series} < {MLFORECAST_MIN_OBS}"
+                reason = ml_feasibility.reason
             elif not ran:
                 reason = "produced_no_candidates"
             else:
@@ -542,11 +605,7 @@ def forecast_with_statsforecast(
 ) -> ModelResult:
     from statsforecast.utils import ConformalIntervals
 
-    models = _filter_factories_by_allowlist(
-        _statsforecast_model_factories(history, profile, spec),
-        spec,
-        family_label="StatsForecast/classical",
-    )
+    models, include_mstl_feature_arima, sklearn_aliases = _statsforecast_models_for_spec(history, profile, spec)
 
     interval_kwargs: dict[str, Any] = {}
     interval_windows = _interval_windows(profile.min_obs_per_series, spec.horizon, profile.season_length)
@@ -554,26 +613,93 @@ def forecast_with_statsforecast(
     allowlist_warning = _model_allowlist_warning(spec)
     if allowlist_warning:
         run_warnings.append(allowlist_warning)
-    run_warnings.append(f"StatsForecast ladder: {len(models)} models ({', '.join(alias for alias, _ in models)})")
+    ladder_aliases = [alias for alias, _ in models]
+    if include_mstl_feature_arima:
+        ladder_aliases.append(MSTL_FEATURE_ARIMA_MODEL)
+        run_warnings.append("StatsForecast MSTL feature AutoARIMA enabled: MSTL trend/seasonal components are passed as exogenous features to AutoARIMA")
+    elif profile.season_length > 1 and _allowlist_allows_model(spec, MSTL_FEATURE_ARIMA_MODEL):
+        run_warnings.append(
+            f"StatsForecast MSTL feature AutoARIMA skipped: needs at least {2 * profile.season_length} rows "
+            f"in at least one series for MSTL decomposition; longest series has {profile.max_obs_per_series}"
+        )
+    if sklearn_aliases:
+        ladder_aliases.extend(sklearn_aliases)
+        run_warnings.append(
+            "StatsForecast sklearn feature models enabled: per-series trend/Fourier regressions "
+            "via SklearnModel (no lag features; use MLForecast for global lag/date models)"
+        )
+    elif profile.season_length > 1 and _statsforecast_sklearn_allowed_aliases(spec):
+        sklearn_import_error = _statsforecast_sklearn_import_error()
+        if _statsforecast_sklearn_eligible(profile) and sklearn_import_error is not None:
+            run_warnings.append(
+                "StatsForecast sklearn feature models skipped because required dependencies are unavailable "
+                f"({sklearn_import_error})"
+            )
+        else:
+            run_warnings.append(
+                f"StatsForecast sklearn feature models skipped: needs at least {_statsforecast_sklearn_min_train_rows(profile.season_length)} "
+                f"rows in at least one seasonal series; longest series has {profile.max_obs_per_series}"
+            )
+    run_warnings.append(f"StatsForecast ladder: {len(ladder_aliases)} models ({', '.join(ladder_aliases)})")
     if spec.levels and interval_windows >= 2:
         interval_kwargs["level"] = list(spec.levels)
         interval_kwargs["prediction_intervals"] = ConformalIntervals(h=spec.horizon, n_windows=interval_windows)
     elif spec.levels:
         run_warnings.append("prediction intervals skipped because history is too short for conformal windows")
 
-    forecast, forecast_warnings = _statsforecast_forecast_resilient(
-        models,
-        history=history,
-        freq=profile.freq,
-        horizon=spec.horizon,
-        verbose=spec.verbose,
-        interval_kwargs=interval_kwargs,
-    )
+    forecast_frames: list[pd.DataFrame] = []
+    forecast_warnings: list[str] = []
+    if models:
+        forecast, regular_warnings = _statsforecast_forecast_resilient(
+            models,
+            history=history,
+            freq=profile.freq,
+            horizon=spec.horizon,
+            verbose=spec.verbose,
+            interval_kwargs=interval_kwargs,
+        )
+        forecast_frames.append(forecast)
+        forecast_warnings.extend(regular_warnings)
+    if include_mstl_feature_arima:
+        forecast, mstl_warnings = _statsforecast_mstl_feature_arima_forecast_resilient(
+            history=history,
+            freq=profile.freq,
+            season_length=profile.season_length,
+            horizon=spec.horizon,
+            verbose=spec.verbose,
+            interval_kwargs=interval_kwargs,
+        )
+        if not forecast.empty:
+            forecast_frames.append(forecast)
+        forecast_warnings.extend(mstl_warnings)
+    if sklearn_aliases:
+        forecast, sklearn_warnings = _statsforecast_sklearn_forecast_resilient(
+            aliases=sklearn_aliases,
+            history=history,
+            freq=profile.freq,
+            season_length=profile.season_length,
+            horizon=spec.horizon,
+            verbose=spec.verbose,
+            interval_kwargs=interval_kwargs,
+        )
+        if not forecast.empty:
+            forecast_frames.append(forecast)
+        forecast_warnings.extend(sklearn_warnings)
+    if not forecast_frames:
+        raise RuntimeError("no StatsForecast candidate model able to be fitted")
+    forecast = _merge_statsforecast_frames(forecast_frames, keys=["unique_id", "ds"])
     run_warnings.extend(forecast_warnings)
     if _allowlist_allows_model(spec, "ZeroForecast"):
         forecast = _add_zero_forecast_for_intermittent(forecast, history)
 
-    metrics, backtest_warnings, backtest_predictions = _statsforecast_backtest(models, history, profile, spec)
+    metrics, backtest_warnings, backtest_predictions = _statsforecast_backtest(
+        models,
+        history,
+        profile,
+        spec,
+        include_mstl_feature_arima=include_mstl_feature_arima,
+        sklearn_aliases=sklearn_aliases,
+    )
     model_weights = _model_weights_from_metrics(metrics) if spec.weighted_ensemble else _empty_model_weights()
     forecast = _add_weighted_ensemble_forecast(forecast, model_weights)
     run_warnings.extend(backtest_warnings)
@@ -587,6 +713,88 @@ def forecast_with_statsforecast(
         model_explainability=_empty_model_explainability(),
         warnings=tuple(run_warnings),
     )
+
+
+def _statsforecast_models_for_spec(
+    history: pd.DataFrame,
+    profile: DataProfile,
+    spec: ForecastSpec,
+) -> tuple[list[StatsForecastFactory], bool, list[str]]:
+    factories = _statsforecast_model_factories(history, profile, spec)
+    include_mstl_feature_arima = _mstl_feature_arima_eligible(profile) and _allowlist_allows_model(spec, MSTL_FEATURE_ARIMA_MODEL)
+    sklearn_aliases = _statsforecast_sklearn_aliases_for_spec(profile, spec)
+    if not spec.model_allowlist:
+        return factories, include_mstl_feature_arima, sklearn_aliases
+
+    allowed = set(spec.model_allowlist)
+    filtered = [(alias, factory) for alias, factory in factories if alias in allowed]
+    sklearn_aliases = [alias for alias in sklearn_aliases if alias in allowed]
+    if filtered or include_mstl_feature_arima or sklearn_aliases:
+        return filtered, include_mstl_feature_arima, sklearn_aliases
+
+    available_models = [alias for alias, _ in factories]
+    if _mstl_feature_arima_eligible(profile):
+        available_models.append(MSTL_FEATURE_ARIMA_MODEL)
+    if _statsforecast_sklearn_eligible(profile):
+        available_models.extend(STATS_SKLEARN_MODELS)
+    available = ", ".join(available_models) or "none"
+    requested = ", ".join(spec.model_allowlist)
+    raise ValueError(
+        f"model_allowlist requested {requested}, but no StatsForecast/classical candidates are eligible for this data. "
+        f"Eligible StatsForecast/classical candidates after history/dependency gates: {available}"
+    )
+
+
+def _mstl_feature_arima_eligible(profile: DataProfile) -> bool:
+    return profile.season_length > 1 and profile.max_obs_per_series >= 2 * profile.season_length
+
+
+def _statsforecast_sklearn_aliases_for_spec(profile: DataProfile, spec: ForecastSpec) -> list[str]:
+    aliases = _statsforecast_sklearn_allowed_aliases(spec)
+    if not aliases or not _statsforecast_sklearn_eligible(profile):
+        return []
+    import_error = _statsforecast_sklearn_import_error()
+    if import_error is not None:
+        requested = [alias for alias in aliases if alias in set(spec.model_allowlist)]
+        if requested:
+            raise ImportError(
+                "model_allowlist requested StatsForecast sklearn feature models, but required dependencies are unavailable: "
+                f"{import_error}"
+            )
+        return []
+    return aliases
+
+
+def _statsforecast_sklearn_allowed_aliases(spec: ForecastSpec) -> list[str]:
+    if not spec.model_allowlist:
+        return list(STATS_SKLEARN_MODELS)
+    allowed = set(spec.model_allowlist)
+    return [alias for alias in STATS_SKLEARN_MODELS if alias in allowed]
+
+
+def _statsforecast_sklearn_eligible(profile: DataProfile) -> bool:
+    return profile.season_length > 1 and profile.max_obs_per_series >= _statsforecast_sklearn_min_train_rows(profile.season_length)
+
+
+def _statsforecast_sklearn_import_error() -> str | None:
+    try:
+        from statsforecast.models import SklearnModel  # noqa: F401
+        from sklearn.linear_model import Lasso, LinearRegression, Ridge  # noqa: F401
+        from utilsforecast.feature_engineering import fourier, pipeline, trend  # noqa: F401
+    except ImportError as exc:
+        return str(exc)
+    return None
+
+
+def _statsforecast_sklearn_min_train_rows(season_length: int) -> int:
+    k = _statsforecast_sklearn_fourier_k(season_length)
+    return max(8, 2 * k + 5)
+
+
+def _statsforecast_sklearn_fourier_k(season_length: int) -> int:
+    if season_length <= 1:
+        return 0
+    return max(1, min(3, season_length // 2))
 
 
 def _statsforecast_model_factories(
@@ -851,6 +1059,266 @@ def _forecast_candidate_resilient(
             return pd.DataFrame(), warnings_out
 
 
+def _statsforecast_mstl_feature_arima_forecast_resilient(
+    *,
+    history: pd.DataFrame,
+    freq: str,
+    season_length: int,
+    horizon: int,
+    verbose: bool,
+    interval_kwargs: dict[str, Any],
+) -> tuple[pd.DataFrame, list[str]]:
+    warnings_out: list[str] = []
+    try:
+        forecast = _statsforecast_mstl_feature_arima_forecast_core(
+            history=history,
+            freq=freq,
+            season_length=season_length,
+            horizon=horizon,
+            verbose=verbose,
+            interval_kwargs=interval_kwargs,
+        )
+        return forecast, warnings_out
+    except Exception as full_exc:
+        series_count = history["unique_id"].nunique()
+        if series_count > 1:
+            frames: list[pd.DataFrame] = []
+            skipped: list[str] = []
+            min_rows = 2 * season_length
+            for uid, grp in history.groupby("unique_id", sort=True):
+                if len(grp) < min_rows:
+                    skipped.append(f"{uid} ({len(grp)} rows)")
+                    continue
+                frame, group_warnings = _statsforecast_mstl_feature_arima_forecast_resilient(
+                    history=grp,
+                    freq=freq,
+                    season_length=season_length,
+                    horizon=horizon,
+                    verbose=verbose,
+                    interval_kwargs=interval_kwargs,
+                )
+                if frame.empty:
+                    skipped.append(str(uid))
+                else:
+                    frames.append(frame)
+                warnings_out.extend(group_warnings)
+            if frames:
+                warnings_out.append(
+                    f"StatsForecast candidate {MSTL_FEATURE_ARIMA_MODEL} failed on full panel; "
+                    f"kept series-level successes ({full_exc})"
+                )
+                if skipped:
+                    warnings_out.append(
+                        f"StatsForecast candidate {MSTL_FEATURE_ARIMA_MODEL} skipped for series {skipped}; "
+                        f"needs at least {min_rows} rows for MSTL feature decomposition"
+                    )
+                return _merge_statsforecast_frames(frames, keys=["unique_id", "ds"]), sorted(set(warnings_out))
+            warnings_out.append(f"StatsForecast candidate {MSTL_FEATURE_ARIMA_MODEL} failed and was skipped for all series ({full_exc})")
+            return pd.DataFrame(), sorted(set(warnings_out))
+
+        if not interval_kwargs:
+            warnings_out.append(f"StatsForecast candidate {MSTL_FEATURE_ARIMA_MODEL} failed and was skipped ({full_exc})")
+            return pd.DataFrame(), warnings_out
+        try:
+            forecast = _statsforecast_mstl_feature_arima_forecast_core(
+                history=history,
+                freq=freq,
+                season_length=season_length,
+                horizon=horizon,
+                verbose=verbose,
+                interval_kwargs={},
+            )
+            warnings_out.append(
+                f"StatsForecast candidate {MSTL_FEATURE_ARIMA_MODEL} could not produce conformal intervals; kept point forecast only ({full_exc})"
+            )
+            return forecast, warnings_out
+        except Exception as point_exc:
+            warnings_out.append(f"StatsForecast candidate {MSTL_FEATURE_ARIMA_MODEL} failed and was skipped ({point_exc})")
+            return pd.DataFrame(), warnings_out
+
+
+def _statsforecast_mstl_feature_arima_forecast_core(
+    *,
+    history: pd.DataFrame,
+    freq: str,
+    season_length: int,
+    horizon: int,
+    verbose: bool,
+    interval_kwargs: dict[str, Any],
+) -> pd.DataFrame:
+    from statsforecast import StatsForecast
+    from statsforecast.feature_engineering import mstl_decomposition
+    from statsforecast.models import AutoARIMA, MSTL
+
+    df = history[["unique_id", "ds", "y"]].copy()
+    min_rows = int(df.groupby("unique_id", sort=False).size().min()) if not df.empty else 0
+    if min_rows < 2 * season_length:
+        raise ValueError(
+            f"MSTL feature decomposition requires at least {2 * season_length} rows per fitted series; "
+            f"shortest series has {min_rows}"
+        )
+    transformed_df, x_df = mstl_decomposition(
+        df,
+        model=MSTL(season_length=season_length),
+        freq=freq,
+        h=horizon,
+    )
+    forecast = StatsForecast(
+        models=[AutoARIMA(season_length=season_length, alias=MSTL_FEATURE_ARIMA_MODEL)],
+        freq=freq,
+        n_jobs=1,
+        verbose=verbose,
+    ).forecast(df=transformed_df, X_df=x_df, h=horizon, **interval_kwargs)
+    return _normalize_statsforecast_output(forecast)
+
+
+def _statsforecast_sklearn_forecast_resilient(
+    *,
+    aliases: list[str],
+    history: pd.DataFrame,
+    freq: str,
+    season_length: int,
+    horizon: int,
+    verbose: bool,
+    interval_kwargs: dict[str, Any],
+) -> tuple[pd.DataFrame, list[str]]:
+    warnings_out: list[str] = []
+    try:
+        forecast = _statsforecast_sklearn_forecast_core(
+            aliases=aliases,
+            history=history,
+            freq=freq,
+            season_length=season_length,
+            horizon=horizon,
+            verbose=verbose,
+            interval_kwargs=interval_kwargs,
+        )
+        return forecast, warnings_out
+    except Exception as full_exc:
+        series_count = history["unique_id"].nunique()
+        if series_count > 1:
+            frames: list[pd.DataFrame] = []
+            skipped: list[str] = []
+            min_rows = _statsforecast_sklearn_min_train_rows(season_length)
+            for uid, grp in history.groupby("unique_id", sort=True):
+                if len(grp) < min_rows:
+                    skipped.append(f"{uid} ({len(grp)} rows)")
+                    continue
+                frame, group_warnings = _statsforecast_sklearn_forecast_resilient(
+                    aliases=aliases,
+                    history=grp,
+                    freq=freq,
+                    season_length=season_length,
+                    horizon=horizon,
+                    verbose=verbose,
+                    interval_kwargs=interval_kwargs,
+                )
+                if frame.empty:
+                    skipped.append(str(uid))
+                else:
+                    frames.append(frame)
+                warnings_out.extend(group_warnings)
+            if frames:
+                warnings_out.append(
+                    "StatsForecast sklearn feature models failed on full panel; "
+                    f"kept series-level successes ({full_exc})"
+                )
+                if skipped:
+                    warnings_out.append(
+                        f"StatsForecast sklearn feature models skipped for series {skipped}; "
+                        f"needs at least {min_rows} rows for trend/Fourier regression features"
+                    )
+                return _merge_statsforecast_frames(frames, keys=["unique_id", "ds"]), sorted(set(warnings_out))
+            warnings_out.append(f"StatsForecast sklearn feature models failed and were skipped for all series ({full_exc})")
+            return pd.DataFrame(), sorted(set(warnings_out))
+
+        if not interval_kwargs:
+            warnings_out.append(f"StatsForecast sklearn feature models failed and were skipped ({full_exc})")
+            return pd.DataFrame(), warnings_out
+        try:
+            forecast = _statsforecast_sklearn_forecast_core(
+                aliases=aliases,
+                history=history,
+                freq=freq,
+                season_length=season_length,
+                horizon=horizon,
+                verbose=verbose,
+                interval_kwargs={},
+            )
+            warnings_out.append(
+                "StatsForecast sklearn feature models could not produce conformal intervals; "
+                f"kept point forecasts only ({full_exc})"
+            )
+            return forecast, warnings_out
+        except Exception as point_exc:
+            warnings_out.append(f"StatsForecast sklearn feature models failed and were skipped ({point_exc})")
+            return pd.DataFrame(), warnings_out
+
+
+def _statsforecast_sklearn_forecast_core(
+    *,
+    aliases: list[str],
+    history: pd.DataFrame,
+    freq: str,
+    season_length: int,
+    horizon: int,
+    verbose: bool,
+    interval_kwargs: dict[str, Any],
+) -> pd.DataFrame:
+    from statsforecast import StatsForecast
+
+    transformed_df, x_df = _statsforecast_sklearn_feature_frames(
+        history=history,
+        freq=freq,
+        season_length=season_length,
+        horizon=horizon,
+    )
+    forecast = StatsForecast(
+        models=[factory() for _, factory in _statsforecast_sklearn_model_factories(aliases)],
+        freq=freq,
+        n_jobs=1,
+        verbose=verbose,
+    ).forecast(df=transformed_df, X_df=x_df, h=horizon, **interval_kwargs)
+    return _normalize_statsforecast_output(forecast)
+
+
+def _statsforecast_sklearn_feature_frames(
+    *,
+    history: pd.DataFrame,
+    freq: str,
+    season_length: int,
+    horizon: int,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    from utilsforecast.feature_engineering import fourier, pipeline, trend
+
+    if season_length <= 1:
+        raise ValueError("StatsForecast sklearn feature models require a seasonal frequency so Fourier features are meaningful")
+    df = history[["unique_id", "ds", "y"]].copy()
+    min_rows = int(df.groupby("unique_id", sort=False).size().min()) if not df.empty else 0
+    required_rows = _statsforecast_sklearn_min_train_rows(season_length)
+    if min_rows < required_rows:
+        raise ValueError(
+            "StatsForecast sklearn feature models require enough rows for trend/Fourier regression; "
+            f"need at least {required_rows}, shortest series has {min_rows}"
+        )
+    k = _statsforecast_sklearn_fourier_k(season_length)
+    features = [trend, partial(fourier, season_length=season_length, k=k)]
+    transformed_df, x_df = pipeline(df, features=features, freq=freq, h=horizon)
+    return transformed_df, x_df
+
+
+def _statsforecast_sklearn_model_factories(aliases: list[str]) -> list[StatsForecastFactory]:
+    from statsforecast.models import SklearnModel
+    from sklearn.linear_model import Lasso, LinearRegression, Ridge
+
+    factories: dict[str, Callable[[], Any]] = {
+        "StatsSklearn_LinearRegression": lambda: SklearnModel(LinearRegression(), alias="StatsSklearn_LinearRegression"),
+        "StatsSklearn_Ridge": lambda: SklearnModel(Ridge(alpha=1.0), alias="StatsSklearn_Ridge"),
+        "StatsSklearn_Lasso": lambda: SklearnModel(Lasso(alpha=0.001, max_iter=10000), alias="StatsSklearn_Lasso"),
+    }
+    return [(alias, factories[alias]) for alias in aliases if alias in factories]
+
+
 def forecast_with_mlforecast(
     history: pd.DataFrame,
     profile: DataProfile,
@@ -862,12 +1330,7 @@ def forecast_with_mlforecast(
     min_obs = profile.min_obs_per_series
 
     # Build lag list: recent lags + seasonal lags
-    lags = list(range(1, min(13, min_obs // 2) + 1))
-    if season > 1:
-        lags.extend([season, 2 * season])
-    lags = sorted(set(lag for lag in lags if lag < min_obs))
-    if not lags:
-        lags = [1]
+    lags = list(_mlforecast_default_lags(min_obs, season))
 
     h, n_windows, step_size = _adaptive_cv_params(min_obs, spec.horizon, season, strict=spec.strict_cv_horizon)
     cv_lag_plan = _mlforecast_cv_lag_plan(
@@ -1769,7 +2232,11 @@ def _statsforecast_backtest(
     history: pd.DataFrame,
     profile: DataProfile,
     spec: ForecastSpec,
+    *,
+    include_mstl_feature_arima: bool = False,
+    sklearn_aliases: list[str] | None = None,
 ) -> tuple[pd.DataFrame, list[str], pd.DataFrame]:
+    sklearn_aliases = sklearn_aliases or []
     metric_frames: list[pd.DataFrame] = []
     prediction_frames: list[pd.DataFrame] = []
     all_warnings: list[str] = []
@@ -1801,20 +2268,77 @@ def _statsforecast_backtest(
                     f"{uid}: StatsForecast CV interval diagnostics skipped because the shortest rolling-origin "
                     "training fold cannot support two conformal windows"
                 )
-        try:
-            cv, cv_warnings = _statsforecast_cross_validation_resilient(
-                models,
-                history=grp,
-                freq=profile.freq,
-                horizon=h,
-                step_size=step_size,
-                n_windows=n_windows,
-                verbose=spec.verbose,
-                interval_kwargs=interval_kwargs,
-            )
-        except Exception as exc:
-            all_warnings.append(f"{uid}: StatsForecast backtest failed for all candidate models ({exc})")
+        cv_frames: list[pd.DataFrame] = []
+        cv_warnings: list[str] = []
+        if models:
+            try:
+                cv, regular_cv_warnings = _statsforecast_cross_validation_resilient(
+                    models,
+                    history=grp,
+                    freq=profile.freq,
+                    horizon=h,
+                    step_size=step_size,
+                    n_windows=n_windows,
+                    verbose=spec.verbose,
+                    interval_kwargs=interval_kwargs,
+                )
+                cv_frames.append(cv)
+                cv_warnings.extend(regular_cv_warnings)
+            except Exception as exc:
+                all_warnings.append(f"{uid}: StatsForecast backtest failed for regular candidate models ({exc})")
+        if include_mstl_feature_arima:
+            shortest_train = n - h - step_size * max(0, n_windows - 1)
+            if shortest_train < 2 * season:
+                all_warnings.append(
+                    f"{uid}: {MSTL_FEATURE_ARIMA_MODEL} backtest skipped because the shortest rolling-origin "
+                    f"training fold has {shortest_train} rows, below the {2 * season} rows needed for MSTL decomposition"
+                )
+            else:
+                mstl_cv, mstl_cv_warnings = _statsforecast_mstl_feature_arima_cross_validation_resilient(
+                    history=grp,
+                    freq=profile.freq,
+                    season_length=season,
+                    horizon=h,
+                    step_size=step_size,
+                    n_windows=n_windows,
+                    verbose=spec.verbose,
+                    interval_kwargs=interval_kwargs,
+                )
+                if not mstl_cv.empty:
+                    cv_frames.append(mstl_cv)
+                cv_warnings.extend(mstl_cv_warnings)
+        if sklearn_aliases:
+            shortest_train = n - h - step_size * max(0, n_windows - 1)
+            min_train = _statsforecast_sklearn_min_train_rows(season)
+            if season <= 1:
+                all_warnings.append(
+                    f"{uid}: StatsForecast sklearn feature backtest skipped because season_length={season} "
+                    "does not support Fourier features"
+                )
+            elif shortest_train < min_train:
+                all_warnings.append(
+                    f"{uid}: StatsForecast sklearn feature backtest skipped because the shortest rolling-origin "
+                    f"training fold has {shortest_train} rows, below the {min_train} rows needed for trend/Fourier features"
+                )
+            else:
+                sklearn_cv, sklearn_cv_warnings = _statsforecast_sklearn_cross_validation_resilient(
+                    aliases=sklearn_aliases,
+                    history=grp,
+                    freq=profile.freq,
+                    season_length=season,
+                    horizon=h,
+                    step_size=step_size,
+                    n_windows=n_windows,
+                    verbose=spec.verbose,
+                    interval_kwargs=interval_kwargs,
+                )
+                if not sklearn_cv.empty:
+                    cv_frames.append(sklearn_cv)
+                cv_warnings.extend(sklearn_cv_warnings)
+        if not cv_frames:
+            all_warnings.append(f"{uid}: StatsForecast backtest failed for all candidate models")
             continue
+        cv = _merge_statsforecast_frames(cv_frames, keys=["unique_id", "ds", "cutoff"])
         if _allowlist_allows_model(spec, "ZeroForecast"):
             cv = _add_zero_forecast_to_cv(cv, grp)
         if spec.weighted_ensemble:
@@ -1929,6 +2453,109 @@ def _statsforecast_cross_validation_resilient(
     if not frames:
         raise RuntimeError("no StatsForecast candidate model able to be backtested")
     return _merge_statsforecast_frames(frames, keys=["unique_id", "ds", "cutoff"]), sorted(set(warnings_out))
+
+
+def _statsforecast_mstl_feature_arima_cross_validation_resilient(
+    *,
+    history: pd.DataFrame,
+    freq: str,
+    season_length: int,
+    horizon: int,
+    step_size: int,
+    n_windows: int,
+    verbose: bool,
+    interval_kwargs: dict[str, Any] | None = None,
+) -> tuple[pd.DataFrame, list[str]]:
+    warnings_out: list[str] = []
+    interval_kwargs = interval_kwargs or {}
+    rows: list[pd.DataFrame] = []
+    for train, test in _manual_cv_folds(history, horizon=horizon, step_size=step_size, n_windows=n_windows):
+        if train.empty or len(train) < 2 * season_length or test.empty:
+            continue
+        forecast, forecast_warnings = _statsforecast_mstl_feature_arima_forecast_resilient(
+            history=train,
+            freq=freq,
+            season_length=season_length,
+            horizon=len(test),
+            verbose=verbose,
+            interval_kwargs=interval_kwargs,
+        )
+        warnings_out.extend(forecast_warnings)
+        if forecast.empty:
+            continue
+        actual = test[["unique_id", "ds", "y"]].copy()
+        fold = forecast.merge(actual, on=["unique_id", "ds"], how="inner")
+        if fold.empty:
+            continue
+        fold["cutoff"] = train["ds"].max()
+        rows.append(fold)
+    if not rows:
+        warnings_out.append(f"StatsForecast candidate {MSTL_FEATURE_ARIMA_MODEL} backtest failed and was skipped")
+        return pd.DataFrame(), sorted(set(warnings_out))
+    return pd.concat(rows, ignore_index=True).sort_values(["unique_id", "cutoff", "ds"]).reset_index(drop=True), sorted(set(warnings_out))
+
+
+def _statsforecast_sklearn_cross_validation_resilient(
+    *,
+    aliases: list[str],
+    history: pd.DataFrame,
+    freq: str,
+    season_length: int,
+    horizon: int,
+    step_size: int,
+    n_windows: int,
+    verbose: bool,
+    interval_kwargs: dict[str, Any] | None = None,
+) -> tuple[pd.DataFrame, list[str]]:
+    warnings_out: list[str] = []
+    interval_kwargs = interval_kwargs or {}
+    rows: list[pd.DataFrame] = []
+    min_rows = _statsforecast_sklearn_min_train_rows(season_length)
+    for train, test in _manual_cv_folds(history, horizon=horizon, step_size=step_size, n_windows=n_windows):
+        if train.empty or len(train) < min_rows or test.empty:
+            continue
+        forecast, forecast_warnings = _statsforecast_sklearn_forecast_resilient(
+            aliases=aliases,
+            history=train,
+            freq=freq,
+            season_length=season_length,
+            horizon=len(test),
+            verbose=verbose,
+            interval_kwargs=interval_kwargs,
+        )
+        warnings_out.extend(forecast_warnings)
+        if forecast.empty:
+            continue
+        actual = test[["unique_id", "ds", "y"]].copy()
+        fold = forecast.merge(actual, on=["unique_id", "ds"], how="inner")
+        if fold.empty:
+            continue
+        fold["cutoff"] = train["ds"].max()
+        rows.append(fold)
+    if not rows:
+        warnings_out.append("StatsForecast sklearn feature model backtest failed and was skipped")
+        return pd.DataFrame(), sorted(set(warnings_out))
+    return pd.concat(rows, ignore_index=True).sort_values(["unique_id", "cutoff", "ds"]).reset_index(drop=True), sorted(set(warnings_out))
+
+
+def _manual_cv_folds(
+    history: pd.DataFrame,
+    *,
+    horizon: int,
+    step_size: int,
+    n_windows: int,
+) -> list[tuple[pd.DataFrame, pd.DataFrame]]:
+    grp = history.sort_values("ds").reset_index(drop=True)
+    n = len(grp)
+    folds: list[tuple[pd.DataFrame, pd.DataFrame]] = []
+    for window in range(n_windows, 0, -1):
+        cutoff_idx = n - 1 - window * step_size - (horizon - step_size)
+        if cutoff_idx < 0:
+            cutoff_idx = max(0, n - 1 - window * horizon)
+        train = grp.iloc[: cutoff_idx + 1]
+        test = grp.iloc[cutoff_idx + 1 : cutoff_idx + 1 + horizon]
+        folds.append((train, test))
+    return folds
 
 
 def _baseline_backtest(

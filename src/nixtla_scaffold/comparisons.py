@@ -610,7 +610,21 @@ def _prepare_external_frame(frame: pd.DataFrame) -> pd.DataFrame:
         "model_version",
         "notes",
     ]
-    return out[[column for column in keep if column in out.columns]]
+    keep_existing = [column for column in keep if column in out.columns]
+    reserved = {
+        "model",
+        "yhat",
+        "source_id",
+        "source_file",
+        "sheet",
+        "cutoff",
+        "horizon_step",
+        "status_message",
+        "is_backtested",
+        "backtest_status",
+    }
+    passthrough = [column for column in out.columns if column not in keep_existing and column not in reserved]
+    return out[keep_existing + passthrough]
 
 
 def _load_run_metadata(run_path: Path) -> dict[str, Any]:

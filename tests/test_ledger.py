@@ -44,10 +44,10 @@ def test_ledger_register_lock_actuals_adjustments_compare_and_export(tmp_path) -
     assert initialized["schema_version"] == "1.0"
     assert (ledger / "ledger.sqlite").exists()
 
-    march = register_run(ledger, march_dir, forecast_key="Actions ARR", version_label="March refresh").to_dict()
-    april = register_run(ledger, april_dir, forecast_key="Actions ARR", version_label="April refresh").to_dict()
+    march = register_run(ledger, march_dir, forecast_key="Product ARR", version_label="March refresh").to_dict()
+    april = register_run(ledger, april_dir, forecast_key="Product ARR", version_label="April refresh").to_dict()
     assert march["forecast_version_id"] != april["forecast_version_id"]
-    assert json.loads((march_dir / "ledger_context.json").read_text(encoding="utf-8"))["forecast_key"] == "Actions ARR"
+    assert json.loads((march_dir / "ledger_context.json").read_text(encoding="utf-8"))["forecast_key"] == "Product ARR"
 
     lock = lock_version(
         ledger,
@@ -66,7 +66,7 @@ def test_ledger_register_lock_actuals_adjustments_compare_and_export(tmp_path) -
     actual_result = ingest_actuals(
         ledger,
         actuals_path,
-        forecast_key="Actions ARR",
+        forecast_key="Product ARR",
         source_kind="kusto",
         source_id="unit-test-refresh",
         revision_label="actuals refresh 1",
@@ -92,13 +92,13 @@ def test_ledger_register_lock_actuals_adjustments_compare_and_export(tmp_path) -
     )
     adjustments_path = tmp_path / "adjustments.csv"
     adjustments.to_csv(adjustments_path, index=False)
-    adjustment_result = ingest_adjustments(ledger, adjustments_path, forecast_key="Actions ARR").to_dict()
+    adjustment_result = ingest_adjustments(ledger, adjustments_path, forecast_key="Product ARR").to_dict()
     assert adjustment_result["rows"] == 2
     assert adjustment_result["regime_changes"] == 1
 
     comparison = compare_versions(
         ledger,
-        forecast_key="Actions ARR",
+        forecast_key="Product ARR",
         against_lock="March lock",
         latest_version_id=april["forecast_version_id"],
         call_up_pct=0.02,
@@ -122,7 +122,7 @@ def test_ledger_register_lock_actuals_adjustments_compare_and_export(tmp_path) -
     assert corrected_actuals["applied_adjustment_ids"].astype(str).str.len().max() > 0
     assert regime_changes["metric_mapping"].tolist() == ["seat_to_token"]
     assert deltas["comparison_id"].notna().all()
-    assert deltas["forecast_key"].eq("Actions ARR").all()
+    assert deltas["forecast_key"].eq("Product ARR").all()
     assert deltas["base_version_id"].eq(march["forecast_version_id"]).all()
     assert deltas["comparison_version_id"].eq(april["forecast_version_id"]).all()
     assert deltas["base_lock_label"].eq("March lock").all()
@@ -152,7 +152,7 @@ def test_ledger_cli_registers_forecast_and_official_lock(tmp_path) -> None:
             "--ledger",
             str(ledger),
             "--forecast-key",
-            "Actions ARR",
+            "Product ARR",
             "--version-label",
             "March refresh",
             "--lock-official",

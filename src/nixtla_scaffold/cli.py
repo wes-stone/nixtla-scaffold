@@ -7,11 +7,13 @@ from pathlib import Path
 import sys
 from typing import Any
 
+from nixtla_scaffold.byo_model import write_byo_model_comparison, write_byo_model_ingest, write_byo_model_scores
 from nixtla_scaffold.comparisons import write_forecast_comparison
 from nixtla_scaffold.connectors import ingest_query_result
 from nixtla_scaffold.data import load_forecast_dataset
 from nixtla_scaffold.diagnostics import write_failure_diagnostics
 from nixtla_scaffold.drivers import parse_driver_events, parse_known_future_regressors
+from nixtla_scaffold.experiments import EXPERIMENT_VARIANTS, compare_models, run_experiment
 from nixtla_scaffold.external_scoring import write_external_forecast_scores
 from nixtla_scaffold.forecast import run_forecast
 from nixtla_scaffold.hierarchy import aggregate_hierarchy_frame, hierarchy_summary
@@ -26,6 +28,15 @@ from nixtla_scaffold.ledger import (
     lock_version,
     register_run,
 )
+from nixtla_scaffold.ops import (
+    build_doctor_payload,
+    build_status_payload,
+    run_operating_loop,
+    write_doctor_outputs,
+    write_drift_report,
+    write_status_outputs,
+)
+from nixtla_scaffold.pipelines import refresh_pipeline, run_pipeline
 from nixtla_scaffold.presets import PRESET_NAMES, forecast_spec_preset, preset_catalog
 from nixtla_scaffold.profile import profile_dataset
 from nixtla_scaffold.release_gates import OPTIONAL_EXTRAS, format_release_gate_console_summary, run_release_gates
@@ -46,7 +57,7 @@ from nixtla_scaffold.workbench_qa import GOLDEN_SCENARIOS, WORKBENCH_QA_SCENARIO
 
 MODEL_POLICY_CHOICES = ["auto", "baseline", "statsforecast", "mlforecast", "all"]
 MODEL_POLICY_HELP = (
-    "Model family policy: auto runs StatsForecast plus MLForecast when eligible; "
+    "Model family policy: auto runs StatsForecast and attempts MLForecast when the data can support ML CV; "
     "baseline runs only simple benchmarks; statsforecast runs classical/open-source statistical models; "
     "mlforecast runs MLForecast only and raises if unavailable; all runs every eligible open-source family "
     "and raises on eligible MLForecast failure."
@@ -169,6 +180,76 @@ def main(argv: list[str] | None = None) -> int:
     forecast_cmd.add_argument("--custom-arg", action="append", default=[], help="Extra argument passed through to --custom-script; repeat as needed")
     forecast_cmd.add_argument("--output", default="runs/latest")
     _add_ledger_registration_args(forecast_cmd)
+
+    compare_models_cmd = sub.add_parser("compare-models", help="Write a clean advisory leaderboard for the existing model tournament")
+    _add_input_args(compare_models_cmd)
+    compare_models_cmd.add_argument("--preset", choices=PRESET_NAMES, default=None)
+    compare_models_cmd.add_argument("--horizon", type=int, default=12)
+    compare_models_cmd.add_argument("--freq", default=None)
+    compare_models_cmd.add_argument("--season-length", type=int, default=None)
+    compare_models_cmd.add_argument("--levels", nargs="+", type=int, default=[80, 95])
+    compare_models_cmd.add_argument("--unit-label", default=None)
+    compare_models_cmd.add_argument("--fill-method", choices=["ffill", "zero", "interpolate", "drop"], default="ffill")
+    compare_models_cmd.add_argument("--model-policy", choices=MODEL_POLICY_CHOICES, default="auto", help=MODEL_POLICY_HELP)
+    _add_model_allowlist_args(compare_models_cmd)
+    compare_models_cmd.add_argument("--target-transform", choices=["none", "log", "log1p"], default="none")
+    compare_models_cmd.add_argument("--normalization-factor-col", default=None)
+    compare_models_cmd.add_argument("--normalization-label", default="")
+    compare_models_cmd.add_argument(
+        "--hierarchy-reconciliation",
+        choices=["none", "bottom_up", "top_down", "both", "mint_ols", "mint_wls_struct"],
+        default="none",
+    )
+    compare_models_cmd.add_argument("--train-known-future-regressors", action=argparse.BooleanOptionalAction, default=False)
+    compare_models_cmd.add_argument("--mlforecast-feature-policy", choices=["basic", "rolling"], default="basic")
+    compare_models_cmd.add_argument("--require-backtest", action=argparse.BooleanOptionalAction, default=False)
+    compare_models_cmd.add_argument("--strict-cv-horizon", action=argparse.BooleanOptionalAction, default=False)
+    compare_models_cmd.add_argument("--weighted-ensemble", action=argparse.BooleanOptionalAction, default=True)
+    compare_models_cmd.add_argument("--verbose", action=argparse.BooleanOptionalAction, default=True)
+    compare_models_cmd.add_argument("--event", action="append", default=[])
+    compare_models_cmd.add_argument("--event-file", action="append", default=[])
+    compare_models_cmd.add_argument("--regressor", action="append", default=[])
+    compare_models_cmd.add_argument("--regressor-file", action="append", default=[])
+    compare_models_cmd.add_argument("--output", default="runs/compare_models")
+
+    experiment_cmd = sub.add_parser("experiment", help="Run bounded advisory forecast variants and recommend the next agent iteration")
+    _add_input_args(experiment_cmd)
+    experiment_cmd.add_argument("--preset", choices=PRESET_NAMES, default=None)
+    experiment_cmd.add_argument("--horizon", type=int, default=12)
+    experiment_cmd.add_argument("--freq", default=None)
+    experiment_cmd.add_argument("--season-length", type=int, default=None)
+    experiment_cmd.add_argument("--levels", nargs="+", type=int, default=[80, 95])
+    experiment_cmd.add_argument("--unit-label", default=None)
+    experiment_cmd.add_argument("--fill-method", choices=["ffill", "zero", "interpolate", "drop"], default="ffill")
+    experiment_cmd.add_argument("--model-policy", choices=MODEL_POLICY_CHOICES, default="auto", help=MODEL_POLICY_HELP)
+    _add_model_allowlist_args(experiment_cmd)
+    experiment_cmd.add_argument("--target-transform", choices=["none", "log", "log1p"], default="none")
+    experiment_cmd.add_argument("--normalization-factor-col", default=None)
+    experiment_cmd.add_argument("--normalization-label", default="")
+    experiment_cmd.add_argument(
+        "--hierarchy-reconciliation",
+        choices=["none", "bottom_up", "top_down", "both", "mint_ols", "mint_wls_struct"],
+        default="none",
+    )
+    experiment_cmd.add_argument("--train-known-future-regressors", action=argparse.BooleanOptionalAction, default=False)
+    experiment_cmd.add_argument("--mlforecast-feature-policy", choices=["basic", "rolling"], default="basic")
+    experiment_cmd.add_argument("--require-backtest", action=argparse.BooleanOptionalAction, default=False)
+    experiment_cmd.add_argument("--strict-cv-horizon", action=argparse.BooleanOptionalAction, default=False)
+    experiment_cmd.add_argument("--weighted-ensemble", action=argparse.BooleanOptionalAction, default=True)
+    experiment_cmd.add_argument("--verbose", action=argparse.BooleanOptionalAction, default=True)
+    experiment_cmd.add_argument("--event", action="append", default=[])
+    experiment_cmd.add_argument("--event-file", action="append", default=[])
+    experiment_cmd.add_argument("--regressor", action="append", default=[])
+    experiment_cmd.add_argument("--regressor-file", action="append", default=[])
+    experiment_cmd.add_argument(
+        "--variants",
+        nargs="+",
+        choices=sorted((*EXPERIMENT_VARIANTS, "all")),
+        default=None,
+        help="Named advisory variants to test. Defaults to a small data-aware set.",
+    )
+    experiment_cmd.add_argument("--max-variants", type=int, default=4, help="Safety cap for requested variants")
+    experiment_cmd.add_argument("--output", default="runs/experiment")
 
     refresh_cmd = sub.add_parser("refresh", help="Refresh a forecast by reusing a previous run's persisted setup")
     refresh_cmd.add_argument("--previous-run", required=True, help="Prior run directory with manifest.json")
@@ -296,6 +377,35 @@ def main(argv: list[str] | None = None) -> int:
     score_external_cmd.add_argument("--season-length", type=int, default=1, help="Seasonal period for leakage-safe MASE/RMSSE scales")
     score_external_cmd.add_argument("--horizon", type=int, default=None, help="Optional business horizon to record in scoring metrics")
 
+    byo_cmd = sub.add_parser("byo-model", help="Import, compare, and score Excel-owned finance model outputs")
+    byo_sub = byo_cmd.add_subparsers(dest="byo_command", required=True)
+
+    byo_ingest = byo_sub.add_parser("ingest", help="Convert one or more BYO workbook sheets to canonical external forecasts")
+    _add_byo_model_args(byo_ingest)
+    byo_ingest.add_argument("--output", required=True, help="Output folder for BYO model artifacts")
+
+    byo_compare = byo_sub.add_parser("compare", help="Compare BYO workbook forecasts against an existing forecast run")
+    byo_compare.add_argument("--run", required=True, help="Forecast run directory produced by forecast")
+    _add_byo_model_args(byo_compare)
+    byo_compare.add_argument("--scaffold-model", default=None, help="Optional scaffold model from appendix/forecast_long.csv; defaults to selected forecast.csv")
+    byo_compare.add_argument(
+        "--main-model-preference",
+        default=None,
+        help="Optional display-only BYO model/scenario label to store in the manifest; does not overwrite forecast.csv",
+    )
+    byo_compare.add_argument("--output", default=None, help="Output folder; defaults to <run>\\byo_model")
+
+    byo_score = byo_sub.add_parser("score", help="Score cutoff-labeled BYO snapshots against actuals")
+    _add_byo_model_args(byo_score)
+    byo_score.add_argument("--actuals", required=True, help="Actuals file with unique_id/ds/y or matching group columns")
+    byo_score.add_argument("--actuals-sheet", default=None, help="Excel sheet name/index for actuals")
+    byo_score.add_argument("--actual-id-col", default="unique_id", help="Series identifier column in the actuals file")
+    byo_score.add_argument("--actual-time-col", default="ds", help="Date column in the actuals file")
+    byo_score.add_argument("--actual-target-col", default="y", help="Actual value column")
+    byo_score.add_argument("--season-length", type=int, default=1, help="Seasonal period for leakage-safe MASE/RMSSE scales")
+    byo_score.add_argument("--horizon", type=int, default=None, help="Optional business horizon to record in scoring metrics")
+    byo_score.add_argument("--output", required=True, help="Output folder for BYO scoring artifacts")
+
     lab_cmd = sub.add_parser("scenario-lab", help="Run synthetic forecast scenarios and score accuracy/ease/validity")
     lab_cmd.add_argument("--count", type=int, default=100)
     lab_cmd.add_argument("--output", default="runs/scenario_lab")
@@ -344,7 +454,7 @@ def main(argv: list[str] | None = None) -> int:
     ledger_register = ledger_sub.add_parser("register", help="Register an existing forecast run directory as a ledger version")
     ledger_register.add_argument("--ledger", default=str(DEFAULT_LEDGER_PATH))
     ledger_register.add_argument("--run", required=True, help="Run directory produced by forecast")
-    ledger_register.add_argument("--forecast-key", required=True, help="Business forecast key, e.g. Actions ARR")
+    ledger_register.add_argument("--forecast-key", required=True, help="Business forecast key, e.g. Product ARR")
     ledger_register.add_argument("--version-label", default="", help="Friendly label such as March refresh")
     ledger_register.add_argument("--created-by", default="")
     ledger_register.add_argument("--notes", default="")
@@ -396,6 +506,44 @@ def main(argv: list[str] | None = None) -> int:
     ledger_export.add_argument("--ledger", default=str(DEFAULT_LEDGER_PATH))
     ledger_export.add_argument("--output", default=None)
 
+    status_cmd = sub.add_parser("status", help="Summarize local forecast runs without opening Streamlit")
+    status_cmd.add_argument("--runs", default="runs", help="Root folder to scan for forecast run manifests")
+    status_cmd.add_argument("--run", default=None, help="Single forecast run folder to summarize")
+    status_cmd.add_argument("--output", default=None, help="Optional output folder for run_status_summary.csv/json")
+
+    doctor_cmd = sub.add_parser("doctor", help="Check a local forecast run for missing artifacts and operational next actions")
+    doctor_cmd.add_argument("--run", required=True, help="Forecast run folder to inspect")
+    doctor_cmd.add_argument("--output", default=None, help="Optional output folder for doctor_checks.csv/json")
+
+    drift_cmd = sub.add_parser("drift", help="Roll up local forecast drift from refresh deltas and ledger exports")
+    drift_cmd.add_argument("--ledger", default=None, help="Forecast ledger folder with exports")
+    drift_cmd.add_argument("--previous-run", default=None, help="Previous run path for refresh-pair context")
+    drift_cmd.add_argument("--refreshed-run", default=None, help="Refreshed run path containing appendix\\refresh_delta.csv")
+    drift_cmd.add_argument("--output", required=True, help="Output folder for drift_summary.csv/json/md")
+
+    operate_cmd = sub.add_parser("operate", help="Run a hard-capped linear local operating loop from a small YAML config")
+    operate_cmd.add_argument("--config", required=True, help="YAML config with a top-level steps list")
+    operate_cmd.add_argument("--output", required=True, help="Output folder for operate_manifest.json")
+
+    pipeline_cmd = sub.add_parser("pipeline", help="Run or refresh a script-backed source pipeline into one canonical forecast input")
+    pipeline_sub = pipeline_cmd.add_subparsers(dest="pipeline_command", required=True)
+
+    pipeline_run = pipeline_sub.add_parser("run", help="Run extracts/transforms from pipeline YAML and optionally forecast")
+    pipeline_run.add_argument("--config", required=True, help="Pipeline YAML config")
+    pipeline_run.add_argument("--output", default=None, help="Pipeline output folder; defaults to runs\\pipeline_<name>_<timestamp>")
+    pipeline_run.add_argument(
+        "--no-forecast",
+        dest="forecast",
+        action="store_false",
+        default=True,
+        help="Prepare the canonical input and provenance only; skip forecast execution",
+    )
+
+    pipeline_refresh = pipeline_sub.add_parser("refresh", help="Rerun pipeline YAML and refresh from a previous forecast run manifest")
+    pipeline_refresh.add_argument("--config", required=True, help="Pipeline YAML config")
+    pipeline_refresh.add_argument("--previous-run", required=True, help="Prior forecast run directory with manifest.json")
+    pipeline_refresh.add_argument("--output", default=None, help="Pipeline output folder; defaults to runs\\pipeline_<name>_<timestamp>")
+
     guide_cmd = sub.add_parser("guide", help="Search Nixtla/FPPy best-practice guidance")
     guide_cmd.add_argument("query", nargs="?", default=None, help="Optional search term, e.g. intervals or hierarchy")
 
@@ -443,10 +591,35 @@ def _run(args: argparse.Namespace) -> int:
         output_dir = run.to_directory(args.output)
         ledger_result = _maybe_register_ledger(args, output_dir)
         print(f"Forecast written to {output_dir}")
+        policy_line = _model_policy_summary_line(run)
+        if policy_line:
+            print(policy_line)
         if ledger_result:
             print(f"Ledger version registered: {ledger_result['forecast_version_id']}")
         print()
         print(run.explanation())
+        return 0
+
+    if args.command == "compare-models":
+        spec = _spec_from_args(args)
+        leaderboard = compare_models(args.input, spec, sheet=_coerce_sheet(args.sheet), output_dir=args.output)
+        print(f"Compare-models run written to {Path(args.output)}")
+        print(leaderboard.head(20).to_string(index=False))
+        return 0
+
+    if args.command == "experiment":
+        spec = _spec_from_args(args)
+        result = run_experiment(
+            args.input,
+            spec,
+            output_dir=args.output,
+            variants=args.variants,
+            max_variants=args.max_variants,
+            sheet=_coerce_sheet(args.sheet),
+        )
+        print(f"Experiment written to {result.output_dir}")
+        print(f"Variants: {len(result.summary)}")
+        print("Recommendation: review experiment_recommendation.md")
         return 0
 
     if args.command == "refresh":
@@ -556,6 +729,11 @@ def _run(args: argparse.Namespace) -> int:
         print(json.dumps(result.manifest, indent=2, default=str))
         return 0
 
+    if args.command == "byo-model":
+        result = _run_byo_model_command(args)
+        print(json.dumps(result.manifest, indent=2, default=str))
+        return 0
+
     if args.command == "scenario-lab":
         payload = run_scenario_lab(count=args.count, output_dir=args.output, model_policy=args.model_policy, seed=args.seed)
         print(json.dumps(payload, indent=2, default=str))
@@ -599,6 +777,35 @@ def _run(args: argparse.Namespace) -> int:
         print(json.dumps(result, indent=2, default=str))
         return 0
 
+    if args.command == "status":
+        payload = build_status_payload(run=args.run, runs=args.runs)
+        if args.output:
+            payload["paths"] = write_status_outputs(payload, args.output)
+        print(json.dumps(payload, indent=2, default=str))
+        return 0
+
+    if args.command == "doctor":
+        payload = build_doctor_payload(args.run)
+        if args.output:
+            payload["paths"] = write_doctor_outputs(payload, args.output)
+        print(json.dumps(payload, indent=2, default=str))
+        return 0 if payload["overall_status"] != "fail" else 1
+
+    if args.command == "drift":
+        paths = write_drift_report(args.output, ledger=args.ledger, previous_run=args.previous_run, refreshed_run=args.refreshed_run)
+        print(json.dumps(paths, indent=2, default=str))
+        return 0
+
+    if args.command == "operate":
+        payload = run_operating_loop(args.config, args.output)
+        print(json.dumps(payload, indent=2, default=str))
+        return 0 if payload["status"] != "failed" else 1
+
+    if args.command == "pipeline":
+        payload = _run_pipeline_command(args)
+        print(json.dumps(payload, indent=2, default=str))
+        return 0
+
     if args.command == "guide":
         if args.query in {"skill", "agent-skill", "nixtla-forecast"}:
             print(load_agent_skill())
@@ -612,12 +819,69 @@ def _run(args: argparse.Namespace) -> int:
     raise ValueError(f"unknown command: {args.command}")
 
 
+def _run_pipeline_command(args: argparse.Namespace) -> dict[str, Any]:
+    if args.pipeline_command == "run":
+        return run_pipeline(args.config, args.output, forecast=args.forecast)
+    if args.pipeline_command == "refresh":
+        return refresh_pipeline(args.config, args.previous_run, args.output)
+    raise ValueError(f"unknown pipeline command: {args.pipeline_command}")
+
+
+def _run_byo_model_command(args: argparse.Namespace) -> Any:
+    kwargs = _byo_model_kwargs_from_args(args)
+    if args.byo_command == "ingest":
+        return write_byo_model_ingest(args.file, args.output, sheets=_coerce_sheets(args.sheet), **kwargs)
+    if args.byo_command == "compare":
+        return write_byo_model_comparison(
+            args.run,
+            args.file,
+            output_dir=args.output,
+            sheets=_coerce_sheets(args.sheet),
+            scaffold_model=args.scaffold_model,
+            main_model_preference=args.main_model_preference,
+            **kwargs,
+        )
+    if args.byo_command == "score":
+        return write_byo_model_scores(
+            args.file,
+            args.actuals,
+            args.output,
+            sheets=_coerce_sheets(args.sheet),
+            actuals_sheet=_coerce_sheet(args.actuals_sheet),
+            actual_id_col=args.actual_id_col,
+            actual_time_col=args.actual_time_col,
+            actual_value_col=args.actual_target_col,
+            season_length=args.season_length,
+            requested_horizon=args.horizon,
+            **kwargs,
+        )
+    raise ValueError(f"unknown byo-model command: {args.byo_command}")
+
+
 def _add_input_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--input", required=True, help="CSV, XLSX, or XLSM file")
     parser.add_argument("--sheet", default=None, help="Excel sheet name/index")
     parser.add_argument("--id-col", default="unique_id", help="Series identifier column, e.g. Product or Account")
     parser.add_argument("--time-col", default="ds", help="Date/time column, e.g. Month or Week")
     parser.add_argument("--target-col", default="y", help="Numeric value to forecast, e.g. Revenue or ARR")
+
+
+def _add_byo_model_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--file", required=True, help="Excel/CSV file with BYO finance model forecast outputs")
+    parser.add_argument("--sheet", nargs="+", default=None, help="One or more Excel sheets; omit to read all workbook sheets")
+    parser.add_argument("--format", choices=["auto", "long", "wide"], default="auto", help="BYO forecast shape; use wide for date-column finance workbooks")
+    parser.add_argument("--model-name", default=None, help="BYO model label; inferred from the file stem when omitted")
+    parser.add_argument("--source-id", default=None, help="BYO source identifier; inferred from the file stem when omitted")
+    parser.add_argument("--id-col", default="unique_id", help="Series identifier column; generated from --group-cols when absent")
+    parser.add_argument("--time-col", default="ds", help="Date column for long-form BYO forecasts")
+    parser.add_argument("--target-col", default="yhat", help="Forecast value column")
+    parser.add_argument("--model-col", default="model", help="BYO model column")
+    parser.add_argument("--cutoff-col", default="cutoff", help="Forecast-origin/cutoff column for historical snapshots")
+    parser.add_argument("--scenario-col", default="scenario_name", help="Scenario/version column; sheet name is used when absent")
+    parser.add_argument("--version-col", default="version", help="Optional version column to mirror into model_version")
+    parser.add_argument("--group-cols", nargs="*", default=[], help="Ordered rollup columns, e.g. ProductGroup ProductLine Product")
+    parser.add_argument("--rollups", action=argparse.BooleanOptionalAction, default=True, help="Create explicit Total/prefix rollup rows from --group-cols")
+    parser.add_argument("--total-label", default="Total", help="Unique ID label for the derived total rollup")
 
 
 def _add_model_allowlist_args(parser: argparse.ArgumentParser) -> None:
@@ -767,6 +1031,35 @@ def _maybe_register_ledger(
     return result
 
 
+def _model_policy_summary_line(run: Any) -> str | None:
+    resolution = getattr(run, "model_policy_resolution", {}) or {}
+    if not isinstance(resolution, dict):
+        return None
+    families = resolution.get("families", [])
+    if not isinstance(families, list):
+        return None
+    parts: list[str] = []
+    for row in families:
+        if not isinstance(row, dict):
+            continue
+        family = str(row.get("family", "unknown"))
+        ran = bool(row.get("ran", False))
+        if ran:
+            models = row.get("contributed_models", [])
+            model_count = len(models) if isinstance(models, list) else 0
+            parts.append(f"{family}=ran({model_count})")
+        elif row.get("requested"):
+            reason = str(row.get("reason_if_not_ran") or "not_available")
+            parts.append(f"{family}=skipped({_compact_policy_reason(reason)})")
+    if not parts:
+        return None
+    return "Model families: " + "; ".join(parts)
+
+
+def _compact_policy_reason(reason: str) -> str:
+    return reason.split(":", 1)[0].strip() or "not_available"
+
+
 def _refresh_report_after_ledger_update(result: dict[str, Any] | None) -> None:
     if not result:
         return
@@ -807,6 +1100,32 @@ def _coerce_sheet(sheet: str | None) -> str | int | None:
     if sheet is None:
         return None
     return int(sheet) if sheet.isdigit() else sheet
+
+
+def _coerce_sheets(sheets: list[str] | None) -> tuple[str | int, ...] | None:
+    if not sheets:
+        return None
+    if len(sheets) == 1 and sheets[0].strip().lower() == "all":
+        return None
+    return tuple(_coerce_sheet(sheet) for sheet in sheets if sheet is not None)
+
+
+def _byo_model_kwargs_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "format": args.format,
+        "model_name": args.model_name,
+        "source_id": args.source_id,
+        "id_col": args.id_col,
+        "time_col": args.time_col,
+        "value_col": args.target_col,
+        "model_col": args.model_col,
+        "forecast_origin_col": args.cutoff_col,
+        "scenario_col": args.scenario_col,
+        "version_col": args.version_col,
+        "group_cols": tuple(args.group_cols or ()),
+        "include_rollups": args.rollups,
+        "total_label": args.total_label,
+    }
 
 
 def _spec_from_args(args: argparse.Namespace) -> ForecastSpec:

@@ -551,5 +551,5 @@ def test_scenario_manifest_completeness():
                      "model_weights", "diagnostics", "model_card", "workbook",
                      "html_report", "streamlit_app", "interpretation"}
     assert expected_keys.issubset(manifest["outputs"].keys())
-    assert manifest["engine"] in {"baseline", "statsforecast"}
+    assert manifest["engine"] in {"baseline", "statsforecast", "statsforecast+mlforecast"}
     assert manifest["best_practice_receipts"]

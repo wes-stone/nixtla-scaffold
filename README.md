@@ -37,6 +37,7 @@ Open these first:
 | `llm_context.json`                                                     | One-attachment LLM handoff packet with the headline, trust/horizon/interval/residual/seasonality/hierarchy/driver context, artifact index, guardrails, and questions to ask.                                                                                                            |
 | `forecast.csv`                                                         | Selected forecast only. Start with `row_horizon_status` to identify beyond-validated-horizon rows; `planning_eligible=True` means the row passed the horizon-validation gate, not global planning approval. Pair it with trust, interval, residual, hierarchy, and data-quality review. |
 | `appendix\forecast_long.csv`                                           | Primary model-feed output with every future series/model/date row, selected-model flag, intervals when available, interval status, row-level horizon validation, and `planning_eligibility_scope`.                                                                                      |
+| `appendix\run_receipt.json` / `appendix\validation_receipt.csv`        | Local operations receipts: reproducibility/provenance plus pass/warn/fail data and artifact checks for agents that need to rerun or inspect the run without opening Streamlit.                                                                                                        |
 
 Trust rubric: **High >=75**, **Medium 40-74**, **Low <40**. A High score still means "statistical baseline with evidence," not a plan or guarantee. `planning_eligible=True` in `forecast.csv` / `appendix\forecast_long.csv` only means the row passed the horizon-validation gate (`planning_eligibility_scope=horizon_validation_only`); it does not override Low trust, interval issues, residual warnings, hierarchy tradeoffs, or data-quality caveats. Agents should quote `diagnostics.json.executive_headline.paragraph` verbatim rather than rewriting it into a stronger claim. The generated Streamlit app also shows a copy-safe headline code block with a copy icon so the deterministic headline can be pasted without paraphrasing.
 
@@ -122,6 +123,34 @@ nixtla-scaffold score-external --external finance_snapshots.csv --actuals actual
 
 This writes `external_backtest_long.csv`, `external_model_metrics.csv`, and `external_scoring_manifest.json`. Scoring joins on `unique_id` + `ds`, requires `cutoff < ds`, and fails closed for future-only forecasts, non-positive `--season-length` / `--horizon`, duplicate actual `unique_id`/`ds` rows, or zero matched actuals. Missing actuals are kept as `missing_actual` diagnostics in the long file but excluded from metrics. MASE/RMSSE scales are computed only from actual history available at each row's cutoff; rows disclose `scale_basis` / `effective_season_length`, and metrics include `scale_basis_distribution`. Bias is `sum(yhat - y_actual) / sum(abs(y_actual))`, so positive bias means the external model overstated actuals.
 
+### BYO Excel finance models
+
+Use `byo-model` when the external forecast lives in an Excel driver model with multiple versions such as Base/Bull/Bear and product rollups. BYO Excel forecasts are still imported forecast outputs for triangulation; they do not become training data and do not override `forecast.csv` or champion selection.
+
+Preferred long-form sheet shape:
+
+| Required | Recommended | Optional |
+| -------- | ----------- | -------- |
+| `ds`, `yhat` | ordered grouping columns such as `ProductGroup`, `ProductLine`, `Product` | `cutoff`, `owner`, `currency`, `unit_label`, `model_version`, `notes` |
+
+If `unique_id` is absent and `--group-cols` is supplied, IDs are generated from the ordered grouping columns and explicit derived-sum rollups are added for `Total` and each prefix level. Workbook subtotal rows with labels such as `Total` or `Subtotal` are rejected so rollups are not double counted.
+
+```powershell
+# Create a small synthetic Base/Bull/Bear workbook, cutoff snapshots, actuals, and a minimal scaffold run.
+uv run python examples\byo_excel_model\create_example_inputs.py --output runs\byo_excel_example
+
+# Import one or more workbook sheets into the canonical external forecast contract.
+uv run nixtla-scaffold byo-model ingest --file runs\byo_excel_example\finance_model.xlsx --sheet Base Bull Bear --group-cols ProductGroup ProductLine Product --output runs\byo_excel_example\ingest
+
+# Compare BYO versions side by side against a scaffold run. Defaults to <run>\byo_model when --output is omitted.
+uv run nixtla-scaffold byo-model compare --run runs\byo_excel_example\scaffold_run --file runs\byo_excel_example\finance_model.xlsx --sheet Base Bull Bear --group-cols ProductGroup ProductLine Product --main-model-preference Base
+
+# Score only cutoff-labeled historical snapshots after actuals land.
+uv run nixtla-scaffold byo-model score --file runs\byo_excel_example\finance_snapshots.xlsx --actuals runs\byo_excel_example\actuals.csv --sheet Base Bull Bear --group-cols ProductGroup ProductLine Product --output runs\byo_excel_example\scores
+```
+
+The compare workflow writes `byo_model_forecasts.csv`, `byo_model_contract.csv`, `forecast_comparison.csv`, `forecast_comparison_summary.csv`, `byo_model_comparison_summary.csv`, and `byo_model_manifest.json`. Generated Streamlit reports discover a sibling `byo_model` folder and add a **BYO / Finance model** section with scenario filters, hierarchy-level filters, a scaffold-vs-BYO line chart, delta table, contract lineage, and score summaries when available.
+
 Executable custom models are also supported as **optional challengers** in the normal forecast tournament. The default refresh path does not change; custom models only run when supplied explicitly:
 
 ```powershell
@@ -167,7 +196,7 @@ The public `ExecutiveHeadline` Python object supports stable direct attribute ac
 Use `setup` when the user has a broad request like "forecast this Kusto/DAX/workbook metric" and the agent needs to ask the right intake questions before touching models:
 
 ```powershell
-nixtla-scaffold setup --workspace runs\premium_overage_setup --data-source kusto --preset finance --series-count single --target-name ARR_30day_avg --time-col day_dt --id-value "Premium Overage ARR" --freq ME --horizon 6 --intervals auto --model-families statsforecast mlforecast --exploration-mode --mcp-regressor-search --outputs all
+nixtla-scaffold setup --workspace runs\usage_overage_setup --data-source kusto --preset finance --series-count single --target-name ARR_30day_avg --time-col day_dt --id-value "Usage Overage ARR" --freq ME --horizon 6 --intervals auto --model-families statsforecast mlforecast --exploration-mode --mcp-regressor-search --outputs all
 ```
 
 The setup workspace includes:
@@ -224,10 +253,14 @@ Use these when a new analyst or agent needs a concrete starting point:
 
 | Path                                                  | What it teaches                                                                                             | Command                                                                                                             |
 | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `examples\feature_tour\forecast_feature_tour.ipynb`   | Notebook walkthrough of the full feature map: profile, forecast, compare, hierarchy, experiments, workbench | `uv run --with jupyter jupyter lab examples\feature_tour\forecast_feature_tour.ipynb`                               |
 | `examples\quickstart_csv`                             | Smallest CSV-to-forecast flow using `preset="quick"`                                                        | `uv run python examples\quickstart_csv\forecast_quick.py`                                                           |
 | `examples\serious_finance_forecast`                   | Finance target normalization plus an auditable future event overlay                                         | `uv run python examples\serious_finance_forecast\forecast_finance.py`                                               |
 | `examples\custom_finance_model`                       | Opt-in custom challenger: recent MoM growth to annual run-rate, allocated by historical monthly seasonality | `uv run python examples\custom_finance_model\forecast_custom.py`                                                    |
+| `examples\byo_excel_model`                            | BYO Excel model outputs: Base/Bull/Bear sheets, product rollups, compare, and cutoff scoring                | `uv run python examples\byo_excel_model\create_example_inputs.py --output runs\byo_excel_example`                   |
 | `examples\hierarchy_reconciliation`                   | Leaf data -> hierarchy nodes -> coherent bottom-up planning forecast                                        | `uv run python examples\hierarchy_reconciliation\forecast_hierarchy.py`                                             |
+| `examples\contoso_dax_pipeline\pipeline.yaml`         | DAX-style multi-query source pipeline using the Mock Contoso shape: extracts + transform -> canonical forecast input + run provenance | `uv run nixtla-scaffold pipeline run --config examples\contoso_dax_pipeline\pipeline.yaml --output runs\contoso_dax_pipeline` |
+| `examples\contoso_kql_pipeline\pipeline.yaml`         | KQL-style multi-query source pipeline using the public ContosoSales revenue shape: KQL files + transform -> canonical forecast input + provenance | `uv run nixtla-scaffold pipeline run --config examples\contoso_kql_pipeline\pipeline.yaml --output runs\contoso_kql_pipeline` |
 | `examples\datasetsforecast_tourism_small`             | Optional public real-data validation using Nixtla DatasetsForecast TourismSmall quarterly hierarchy         | `uv run --extra datasets python examples\datasetsforecast_tourism_small\forecast_tourism_small.py --allow-download` |
 | `examples\python_api_templates\dataframe_forecast.py` | Minimal DataFrame API template for agents and notebooks                                                     | import `run_example(...)` or adapt the function                                                                     |
 
@@ -254,7 +287,7 @@ The example uses TourismSmall bottom-level public data, rebuilds scaffold-compat
 Model-family posture:
 
 - `baseline`: always-on sanity methods such as Naive, HistoricAverage, RandomWalkWithDrift, WindowAverage, and SeasonalNaive.
-- `statsforecast`: active production classical engine with AutoARIMA, AutoETS, AutoTheta, MSTL, MFLES/AutoMFLES when available, benchmarks, cross-validation, and intervals when supported. The runner retries candidate-by-candidate so one model failure does not collapse the full family.
+- `statsforecast`: active production classical engine with AutoARIMA, AutoETS, AutoTheta, MSTL, MSTL-driven AutoARIMA variants, per-series StatsForecast `SklearnModel` trend/Fourier regressions, MFLES/AutoMFLES when available, benchmarks, cross-validation, and intervals when supported. The runner retries candidate-by-candidate so one model failure does not collapse the full family.
 - `mlforecast`: active ML engine when optional dependencies are installed; uses lag/date features across sklearn and LightGBM candidate families, with Nixtla `PredictionIntervals` conformal bands when history/horizon/lag requirements allow. The default feature policy is deliberately small; `--mlforecast-feature-policy rolling` adds a conservative rolling-transform set, and `--train-known-future-regressors` lets audited known-future drivers enter MLForecast only after leakage/future-value checks pass.
 - `hierarchicalforecast`: optional reconciliation path for hierarchy nodes; the scaffold can emit diagnostic-only independent forecasts or coherent planning forecasts with BottomUp / TopDown / MinTrace-style reconciliation when the optional dependency is installed. The built-in `top_down` method is local and transparent; MinTrace variants require the optional hierarchy extra.
 - `neuralforecast_research`: research-only because dependency weight and explainability need extra scrutiny.
@@ -263,13 +296,19 @@ Model-policy semantics are explicit and audited in `manifest.json` under `model_
 
 | Policy          | What it means                                                                                                                                         | Failure/skipping behavior                                                                                                                                                                                                         |
 | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `auto`          | Run StatsForecast/classical models and add MLForecast when the panel has at least 30 observations per series and optional dependencies are available. | MLForecast import/runtime/no-candidate failures are warnings; the run continues with eligible classical/baseline models.                                                                                                          |
-| `all`           | Run every eligible open-source family. "All" means all families that are valid for the data, not every model regardless of history.                   | If MLForecast is eligible but unavailable, fails, or produces no candidates, the run raises instead of silently downgrading. If history is below the 30-observation ML gate, the skip is disclosed and classical models continue. |
+| `auto`          | Run StatsForecast/classical models and attempt MLForecast when the panel can support a short rolling-origin ML validation with lag features and optional dependencies are available. | MLForecast import/runtime/no-candidate failures are warnings; the run continues with eligible classical/baseline models. If ML is not feasible, the skip reason is disclosed in warnings and `model_policy_resolution`. |
+| `all`           | Run every eligible open-source family. "All" means all families that are valid for the data, not every model regardless of history.                   | If MLForecast is eligible but unavailable, fails, or produces no candidates, the run raises instead of silently downgrading. If history/horizon cannot support ML validation, the skip is disclosed and classical models continue. |
 | `statsforecast` | Run the classical/open-source statistical ladder only.                                                                                                | StatsForecast failures are surfaced rather than hidden behind MLForecast.                                                                                                                                                         |
 | `mlforecast`    | Run MLForecast only.                                                                                                                                  | Missing dependencies, runtime failures, or no candidates raise because this policy explicitly requested ML.                                                                                                                       |
 | `baseline`      | Run simple benchmark models only.                                                                                                                     | Always available for usable history; useful for smoke tests and short-series fallbacks.                                                                                                                                           |
 
-Use `--model` when a team wants a favorite-model tournament instead of the full ladder. Friendly aliases are canonicalized, so `--model arima --model "arima mstl"` runs only `AutoARIMA` and `MSTL_AutoARIMA`; MLForecast is skipped under `auto` unless an MLForecast model is also allowlisted. The same values can be passed in one grouped flag with `--model-allowlist arima "arima mstl"`. If weighted ensembles stay enabled, `WeightedEnsemble` is derived only from the allowlisted candidates; add `--no-weighted-ensemble` when the output should contain literal model columns only.
+Use `--model` when a team wants a favorite-model tournament instead of the full ladder. Friendly aliases are canonicalized, so `--model arima --model "arima mstl"` runs only `AutoARIMA` and `MSTL_AutoARIMA`; add `--model "arima mstl features"` to run the Nixtla `mstl_decomposition` pattern that feeds MSTL trend/seasonal features into AutoARIMA as exogenous regressors (`AutoARIMA_MSTLFeatures`). Add aliases such as `--model "stats sklearn ridge"` for the StatsForecast `SklearnModel` per-series trend/Fourier regressions; plain `--model ridge` remains the MLForecast lag/date `Ridge` candidate. MLForecast is skipped under `auto` unless an MLForecast model is also allowlisted. The same values can be passed in one grouped flag with `--model-allowlist arima "arima mstl" "arima mstl features" "stats sklearn ridge"`. If weighted ensembles stay enabled, `WeightedEnsemble` is derived only from the allowlisted candidates; add `--no-weighted-ensemble` when the output should contain literal model columns only.
+
+The two MSTL + AutoARIMA options are intentionally different. `MSTL_AutoARIMA` is a StatsForecast MSTL model whose trend forecaster is non-seasonal AutoARIMA. `AutoARIMA_MSTLFeatures` first decomposes each eligible series with MSTL, then passes the generated trend/seasonal feature columns into AutoARIMA as exogenous regressors. Default `auto` / `statsforecast` runs include both when the data can support them; in mixed-history panels, long-enough series get the MSTL-feature candidate while shorter series are skipped with a warning instead of disabling the candidate globally.
+
+The StatsForecast sklearn candidates are also intentionally separate from MLForecast sklearn models. `StatsSklearn_LinearRegression`, `StatsSklearn_Ridge`, and `StatsSklearn_Lasso` train one sklearn estimator per series through StatsForecast using trend plus Fourier features from `utilsforecast.feature_engineering`; MLForecast candidates train global lag/date models across series. Default `auto` / `statsforecast` runs include the StatsForecast sklearn candidates when sklearn is installed and at least one seasonal series has enough rows; shorter mixed-panel children are skipped with explicit warnings.
+
+The 30-observation gate remains for ML-only allowlist runs and opt-in known-future regressor training, because those paths need a deeper history contract. The normal `auto`/`finance` path uses a smaller feasibility check instead: enough rows for at least one ML rolling-origin window and usable lag features. The CLI prints a compact `Model families:` line after each forecast, and the full audited details live in `manifest.json -> model_policy_resolution`.
 
 ```powershell
 nixtla-scaffold forecast --input examples\monthly_finance_csv\input.csv --preset finance --horizon 6 --model arima --model "arima mstl" --no-weighted-ensemble --output runs\arima_favorites
@@ -314,10 +353,23 @@ Hierarchy column order matters: `region product` creates Total -> region -> regi
 For Kusto, DAX, or other MCP-backed data, export the query result and let `ingest` create the forecast-ready input plus source metadata:
 
 ```powershell
-nixtla-scaffold ingest --input kusto_export.json --source kusto --query-file premium_overage_arr.kql --id-value "Premium Overage ARR" --time-col day_dt --target-col ARR_30day_avg --output runs\premium_overage_arr_input.csv --forecast-output runs\premium_overage_arr_demo --freq ME --horizon 6
+nixtla-scaffold ingest --input kusto_export.json --source kusto --query-file usage_overage_arr.kql --id-value "Usage Overage ARR" --time-col day_dt --target-col ARR_30day_avg --output runs\usage_overage_arr_input.csv --forecast-output runs\usage_overage_arr_demo --freq ME --horizon 6
 ```
 
 `ingest` accepts CSV, Excel, row-oriented JSON/JSONL, and MCP-style columnar JSON. It writes the canonical `unique_id,ds,y` CSV, a `.source.json` metadata file, and a copied `.kql`/`.dax` query artifact when provided.
+
+When one forecast needs several source queries, use the lightweight source pipeline instead of hand-running a pile of scripts. A pipeline YAML declares extract scripts, query files, optional transform logic, canonical column mapping, and the forecast spec. The runner writes a `pipeline_manifest.json`, validates every declared output, hashes config/scripts/queries/results, writes a `pipeline_summary.md` with a Mermaid flowchart, and attaches `appendix\source_pipeline_manifest.json` plus `appendix\source_pipeline_summary.md` to the forecast run.
+
+```powershell
+uv run nixtla-scaffold pipeline run --config examples\contoso_dax_pipeline\pipeline.yaml --output runs\contoso_dax_pipeline
+uv run nixtla-scaffold pipeline run --config examples\contoso_kql_pipeline\pipeline.yaml --output runs\contoso_kql_pipeline
+uv run nixtla-scaffold pipeline run --config examples\contoso_dax_pipeline\pipeline.yaml --output runs\contoso_dax_prepared --no-forecast
+uv run nixtla-scaffold pipeline refresh --config examples\contoso_dax_pipeline\pipeline.yaml --previous-run runs\contoso_dax_pipeline\forecast --output runs\contoso_dax_refresh
+```
+
+The Contoso DAX example follows the Mock Contoso Sales connection shape (`MOCK://contoso`) and actually executes the `.dax` files through `scripts\run_dax_extract.py`, a small Python scaffold that mirrors the DAX MCP `run_query.py` output pattern. It stays deterministic/offline by default, but a real DAX/Power BI workflow can point `DAX_CONNECTION_STRING` at a semantic model. Live Power BI/Analysis Services DAX extracts require the Microsoft Analysis Services OLE DB Provider (`MSOLAP`) and `pywin32` in the Python environment running the script. Keep the YAML contract and swap only the connection/query details so each extract still writes the same declared CSV outputs. This keeps many Kusto/DAX/SQL/Python steps collapsible into one canonical `unique_id,ds,y` input without adding a DAG engine.
+
+The Contoso KQL example mirrors the same pipeline pattern for Azure Data Explorer. Its checked-in query targets the public help cluster shape (`https://help.kusto.windows.net`, database `ContosoSales`, tables `SalesFact` and `Products`) and forecasts monthly `Revenue` by `ProductCategoryName`. It runs offline by default through `scripts\run_kql_extract.py` with deterministic ContosoSales-shaped data; set `KUSTO_MODE=live` after installing `azure-kusto-data` and `azure-identity` to query the live help cluster or swap in your own `KUSTO_CLUSTER_URL` / `KUSTO_DATABASE`.
 
 Add auditable event/scenario overlays when finance knows something the history cannot know:
 
@@ -348,6 +400,23 @@ nixtla-scaffold forecast --input examples\monthly_finance_csv\input.csv --horizo
 
 Regressor declarations produce `appendix\known_future_regressors.csv`, `appendix\driver_availability_audit.csv`, and `appendix\driver_experiment_summary.csv`. Opt-in MLForecast driver modeling also writes `appendix\driver_model_features.csv`, `appendix\driver_model_cv_delta.csv`, and `appendix\feature_selection_receipts.csv`. The feature receipts are descriptive evidence only; they do not auto-prune features or override backtested model selection.
 
+Run bounded advisory experiments when you want agent-friendly iteration without turning the scaffold into an AutoML model zoo. MCP-connected data sources make this much less manual: pull a candidate slice from Kusto, DAX/Power BI, Excel, SQL, or an API; canonicalize it with the target; then test one driver family or event hypothesis at a time.
+
+```powershell
+# Clean leaderboard over the existing model tournament; writes a normal run plus compare_models_leaderboard.csv.
+nixtla-scaffold compare-models --input examples\monthly_finance_csv\input.csv --preset finance --horizon 6 --output runs\compare_models_demo
+
+# Data-aware bounded variants: baseline, all_models, plus events/regressors/hierarchy when inputs exist.
+nixtla-scaffold experiment --input examples\monthly_finance_csv\input.csv --preset finance --horizon 6 --output runs\experiment_demo
+
+# Explicit variants stay capped unless you raise --max-variants.
+nixtla-scaffold experiment --input examples\monthly_finance_csv\input.csv --preset finance --horizon 6 --variants baseline all_models rolling_features --max-variants 3 --output runs\experiment_rolling
+```
+
+`compare-models` is a thin advisory surface over the standard run; it does not change champion selection or `forecast.csv`. `experiment` writes normal child run folders under `variants\`, plus `experiment_manifest.json`, `experiment_summary.csv`, `experiment_recommendation.md`, and `experiment_llm_context.json`. The recommendation includes an `autoresearch_next_iteration` block so agents can test one next hypothesis with one metric, one executor, and a fixed budget. MCPs make it cheap to run many experiments, but the design stays bounded: cap variants, change one assumption at a time, stop when metric/trust improvement stalls, and avoid broad feature stuffing. Keep/discard decisions are still human/agent review steps; experiment ranking never mutates child forecasts.
+
+Experiments also inspect preserved extra input columns for undeclared numeric driver candidates such as `rolling_minutes`, `usage`, `seats`, `pipeline`, or `plan` signals. These detections are advisory only: they appear in `candidate_drivers`, `human_context_questions`, and `autoresearch_hypotheses` inside `experiment_llm_context.json` and in the recommendation markdown, but they are not trained unless you explicitly declare one as an audited regressor and opt in with `--train-known-future-regressors`.
+
 Use first-class target transforms when the modeling target should differ from the raw reported actuals:
 
 ```powershell
@@ -362,7 +431,7 @@ nixtla-scaffold forecast --input plan.csv --horizon 6 --normalization-factor-col
 The transform audit trail is explicit: `audit\target_transform_audit.csv` records raw `y`, the normalization factor, adjusted `y`, transformed/modeling values, output scale, and notes. Log/log1p forecasts are inverse-transformed for reporting; factor-normalized forecasts stay in normalized units by design so analysts do not confuse raw reported actuals with adjusted economics.
 
 Weighted forecasts are on by default. When rolling-origin metrics exist, the run adds `WeightedEnsemble` as an auditable candidate model and writes `audit\model_weights.csv`. WeightedEnsemble is point-only in this slice: if no calibrated interval bounds exist for the ensemble, long forecast rows disclose that through `interval_status` instead of implying ensemble intervals.
-Model selection uses backtested RMSE when available (MAE if RMSE is missing), tie-broken by MAE and absolute bias, so large misses are penalized more heavily than percentage-only scoring. MASE, RMSSE, WAPE, and bias are still reported in `appendix\series_summary.csv`, `appendix\model_audit.csv`, and `appendix\trust_summary.csv` for scale-free and business-readable review. Runs also write `appendix\model_tradeoff_scores.csv` and `appendix\model_pareto_frontier.csv` as a non-authoritative Pareto review lens when metrics disagree; non-dominated alternatives do not override the official selected model or `forecast.csv`.
+Model selection uses backtested RMSE when available (MAE if RMSE is missing), tie-broken by MAE and absolute bias, so large misses are penalized more heavily than percentage-only scoring. MASE, RMSSE, WAPE, and bias are still reported in `appendix\series_summary.csv`, `appendix\model_audit.csv`, and `appendix\trust_summary.csv` for scale-free and business-readable review. Runs also write `appendix\model_tradeoff_scores.csv` and `appendix\model_pareto_frontier.csv` as a non-authoritative RMSE/MAE Pareto review lens when metrics disagree; WAPE stays diagnostic and non-dominated alternatives do not override the official selected model or `forecast.csv`.
 Selection outputs also record the CV horizon contract: `selection_horizon`, `requested_horizon`, `cv_windows`, `cv_step_size`, and `cv_horizon_matches_requested`. If adaptive CV uses a shorter horizon than the requested forecast horizon, the run emits a warning, caps trust, and labels future rows after the validated horizon as directional. Use `--strict-cv-horizon` when a high-stakes decision requires champion selection to be validated at the full requested horizon.
 
 Row-level horizon fields use `row_horizon_status` as the clearest per-row status. `horizon_trust_state` and `forecast_horizon_status` remain backward-compatible aliases in `forecast.csv` / `appendix\forecast_long.csv`. `planning_eligible=True` only means the row passes the horizon-validation gate (`planning_eligibility_scope=horizon_validation_only`); it is not a global approval to ignore Low trust, interval issues, residual warnings, hierarchy tradeoffs, or data-quality caveats.
@@ -398,7 +467,7 @@ Verbose diagnostics are also on by default. Successful runs write `diagnostics.j
 
 The manifest includes a reproducibility block with a SHA-256 hash of canonical history, forecast origin, frequency, season length, Python/platform details, package versions, and git SHA when available.
 
-Forecast runs keep the output root intentionally small. The primary decision artifacts stay at the run root (`forecast.csv`, `forecast.xlsx`, `report.html`, `streamlit_app.py`, `model_card.md`, diagnostics, and manifest files); detailed feeder tables live under `appendix\` and raw wide audit traces live under `audit\`.
+Forecast runs keep the output root intentionally small. The primary decision artifacts stay at the run root (`forecast.csv`, `forecast.xlsx`, `report.html`, `streamlit_app.py`, `run_streamlit.ps1`, `streamlit_requirements.txt`, `model_card.md`, diagnostics, and manifest files); detailed feeder tables live under `appendix\` and raw wide audit traces live under `audit\`.
 
 Forecast runs now write three classes of artifacts:
 
@@ -413,13 +482,14 @@ Forecast runs now write three classes of artifacts:
    - `forecast.csv`: selected forecast rows only, enriched with `interval_status`, `interval_method`, `interval_evidence`, `row_horizon_status`, `horizon_trust_state`, `validated_through_horizon`, `planning_eligible`, `planning_eligibility_scope`, and CV horizon metadata so analyst-facing interval bounds and far-horizon rows carry their provenance.
    - `llm_context.json`: single LLM feeder packet with executive headline, run summary, per-series review, trust/horizon/interval/residual/seasonality/hierarchy/driver context, artifact index, guardrails, and recommended questions.
    - `forecast.xlsx`: a curated workbook with the consolidated outputs plus audit sheets.
-   - `report.html` / `streamlit_app.py`: human review surfaces.
+   - `report.html` / `streamlit_app.py`: human review surfaces. Use `run_streamlit.ps1` or `streamlit_requirements.txt` to open the app from a standalone run folder.
 
 3. **Appendix feeder outputs** for downstream models, analysts, and LLM evidence packs:
-   - `appendix\forecast_long.csv`: future predictions in long format, one row per series/model/date with `family`, horizon step, `yhat`, intervals, model weight, `interval_status`, `interval_method`, row-level horizon validation, `planning_eligibility_reason`, CV horizon metadata, and selected-model flag.
-   - `appendix\backtest_long.csv`: rolling-origin validation predictions in long format with actuals, cutoff, horizon step, forecast error, squared error, interval bounds, and coverage flags when available.
-   - `appendix\series_summary.csv`: one row per series with selected model, RMSE/MAE/MASE/RMSSE/WAPE, CV horizon contract, seasonality, and top weighted alternatives.
-   - `appendix\model_audit.csv`, `appendix\model_win_rates.csv`, `appendix\model_tradeoff_scores.csv`, `appendix\model_pareto_frontier.csv`, `appendix\feature_selection_receipts.csv`, and `appendix\model_window_metrics.csv`: model leaderboard, naive benchmark win rates, Pareto tradeoff review, descriptive feature evidence, and per-cutoff metrics.
+    - `appendix\forecast_long.csv`: future predictions in long format, one row per series/model/date with `family`, horizon step, `yhat`, intervals, model weight, `interval_status`, `interval_method`, row-level horizon validation, `planning_eligibility_reason`, CV horizon metadata, and selected-model flag.
+    - `appendix\backtest_long.csv`: rolling-origin validation predictions in long format with actuals, cutoff, horizon step, forecast error, squared error, interval bounds, and coverage flags when available.
+    - `appendix\series_summary.csv`: one row per series with selected model, RMSE/MAE/MASE/RMSSE/WAPE, CV horizon contract, seasonality, and top weighted alternatives.
+   - `appendix\series_features.csv`: deterministic forecastability features such as zero fraction, nonzero observations, coefficient of variation, recent level change, trend/seasonal proxies, forecastability score, and the recommended next experiment step. It is advisory only and does not change model selection.
+    - `appendix\model_audit.csv`, `appendix\model_win_rates.csv`, `appendix\model_tradeoff_scores.csv`, `appendix\model_pareto_frontier.csv`, `appendix\feature_selection_receipts.csv`, and `appendix\model_window_metrics.csv`: model leaderboard, naive benchmark win rates, Pareto tradeoff review, descriptive feature evidence, and per-cutoff metrics.
    - `appendix\residual_diagnostics.csv`, `appendix\residual_tests.csv`, and `appendix\interval_diagnostics.csv`: residual, structural-break screening, and interval calibration evidence.
    - `appendix\trust_summary.csv`: first-stop decision artifact with per-series High/Medium/Low trust, score drivers, horizon trust, full-horizon claim gate, caveats, and recommended next actions. Rubric: High >=75, Medium 40-74, Low <40.
    - `appendix\model_explainability.csv`: MLForecast lag/calendar, rolling-transform, and opt-in driver feature importance or coefficient magnitudes when ML models run.
@@ -432,16 +502,20 @@ Visual reports are scaffolded automatically with each forecast run:
 
 - `report.html`: a plain, professional forecast review with a decision summary, model-policy resolution, target transformation audit when relevant, assumptions/driver audit section when events or regressors are declared, forecast-ledger preview when `ledger_context.json` exists, all-model and selected/top-weighted forecast charts, Pareto tradeoff review, descriptive feature receipts, shaded future bands with interval-status caveats, seasonality credibility evidence, a fixed-axis rolling-origin backtest filmstrip with train/holdout shading, model leaderboard, and core output map.
 - `report_base64.txt`: the same HTML report base64-encoded for MCPs, tickets, notebooks, or LLM handoffs that need text-only payloads.
-- `streamlit_app.py`: an editable local dashboard/workbench with cached local artifact loading and polished sidebar **Workbench section** button tabs so every section stays easy to find while only the active heavy section renders on each rerun. The Forecast review section owns the styled executive headline card, copy-safe code block, decision/next-action cards, and operating loop: connect the refresh end to end, add drivers/regressors, and track forecast performance over time. It includes model-policy resolution from `manifest.json`, series selector, champion lens controls for best overall vs best StatsForecast/classical vs best MLForecast, explicit skipped/failed family reasons when a lens has no candidate, active-champion horizon trust and interval-status banners, a winner-metric selector with guidance for RMSE/MAE/WAPE/MASE/RMSSE/bias/weight tradeoffs, first-glance forecast charts that include interval bands for every displayed interval-bearing candidate model, a dedicated Model investigation section with manual model picking and Pareto tradeoff scatter, menus that show `#rank | model | engine`, a model-picker guide with rank, engine, model type, and role so StatsForecast/classical, MLForecast, baseline, ensemble, and custom candidates are readable, focused forecast/CV comparison charts whose interval ribbons use the same color as the owning model line, are named in the legend, and use the same `forecast_long.csv` model feed for point forecasts plus interval bounds, a fixed-axis CV window player with previous/next/slider controls, a dedicated Prediction intervals section with the top interval-bearing candidate model bands selected by default plus the same rank/engine picker guide, interval-width summary, calibration evidence, and interval row review, benchmark win-rate chart, residual horizon/time/histogram/ACF diagnostics with white-noise heuristic and outlier dates, selected-interval availability warnings, a Seasonality section with cycle-count credibility, configurable seasonal-year overlay that defaults to the active/best model forecast and lets users choose any candidate model while retaining actual-year context, and additive decomposition evidence, MLForecast feature importance, hierarchy roll-up/down diagnostics plus pre/post reconciliation gap review when enabled, an Assumptions & Drivers section for scenario overlays and known-future regressor audits, and consolidated output previews with `yhat` and interval bound columns kept adjacent. Set `NIXTLA_SCAFFOLD_STREAMLIT_PERF=1` before launching to show artifact load/row-count diagnostics in the sidebar. Run it from the output folder:
+- `streamlit_app.py`: an editable local dashboard/workbench with cached local artifact loading and polished sidebar **Workbench section** button tabs so every section stays easy to find while only the active heavy section renders on each rerun. The Forecast review section owns the styled executive headline card, copy-safe code block, decision/next-action cards, and operating loop: connect the refresh end to end, add drivers/regressors, and track forecast performance over time. It includes model-policy resolution from `manifest.json`, series selector, champion lens controls for best overall vs best StatsForecast/classical vs best MLForecast, explicit skipped/failed family reasons when a lens has no candidate, active-champion horizon trust and interval-status banners, a winner-metric selector with guidance for RMSE/MAE/WAPE/MASE/RMSSE/bias/weight tradeoffs, first-glance forecast charts that include interval bands for every displayed interval-bearing candidate model, a dedicated Model investigation section with manual model picking and Pareto tradeoff scatter, menus that show `#rank | model | engine`, a model-picker guide with rank, engine, model type, and role so StatsForecast/classical, MLForecast, baseline, ensemble, and custom candidates are readable, focused forecast/CV comparison charts whose interval ribbons use the same color as the owning model line, are named in the legend, and use the same `forecast_long.csv` model feed for point forecasts plus interval bounds, a fixed-axis CV window player with previous/next/slider controls, a dedicated Prediction intervals section with the top interval-bearing candidate model bands selected by default plus the same rank/engine picker guide, interval-width summary, calibration evidence, and interval row review, benchmark win-rate chart, residual horizon/time/histogram/ACF diagnostics with white-noise heuristic and outlier dates, selected-interval availability warnings, a Seasonality section with cycle-count credibility, configurable seasonal-year overlay that defaults to the active/best model forecast and lets users choose any candidate model while retaining actual-year context, and additive decomposition evidence, MLForecast feature importance, hierarchy roll-up/down diagnostics plus pre/post reconciliation gap review when enabled, an Assumptions & Drivers section for scenario overlays, known-future regressor audits, ML feature importance, and optional PNG/JPG regressor/driver/STL visuals discovered from the run root, `appendix\`, `audit\`, or `experiments\`, and consolidated output previews with `yhat` and interval bound columns kept adjacent. Set `NIXTLA_SCAFFOLD_STREAMLIT_PERF=1` before launching to show artifact load/row-count diagnostics in the sidebar. Run it from the output folder; the launcher uses `uv` plus the generated `streamlit_requirements.txt`, so it does not require the original package project virtual environment:
+
+  The Model investigation and Assumptions & Drivers sections include a lightweight Nixtla-style MLForecast explainability guide inspired by https://nixtlaverse.nixtla.io/mlforecast/docs/how-to-guides/analyzing_models.html: start with `model_explainability.csv`, optionally reproduce `models_`/`preprocess`/`SaveFeatures`/SHAP offline for deeper dives, and keep default runs free of persisted model-object or SHAP artifacts.
 
 ```powershell
 cd runs\demo
-uv run streamlit run streamlit_app.py
+.\run_streamlit.ps1
+# Fallback if PowerShell script execution is restricted:
+uv run --with-requirements streamlit_requirements.txt streamlit run .\streamlit_app.py
 ```
 
 ### Forecast ledger: versions, official locks, actuals, and Power BI exports
 
-Use `refresh` when new actuals land and you want to reuse a prior run's persisted setup without manually retyping the spec. Explicit CLI flags override the previous manifest; otherwise the prior horizon, frequency, model policy, events, regressors, and feature settings are reused. The refreshed run writes `refresh_manifest.json` and `appendix\refresh_delta.csv` with selected forecast, model-selection, trust, and spec changes.
+Use `refresh` when new actuals land and you want to reuse a prior run's persisted setup without manually retyping the spec. Explicit CLI flags override the previous manifest; otherwise the prior horizon, frequency, model policy, model allowlist, events, regressors, transforms, hierarchy, and feature settings are reused. Refresh reruns the normal model tournament on the updated data and selects the current best champion under that same policy; it does not silently pin the old selected model. The refreshed run writes `refresh_manifest.json` and `appendix\refresh_delta.csv` with selected forecast, model-selection, trust, and spec changes so model drift and champion changes are visible.
 
 ```powershell
 uv run nixtla-scaffold refresh --previous-run runs\actions_arr_march --input data_april.csv --output runs\actions_arr_april
@@ -451,19 +525,19 @@ Use the ledger when a forecast becomes operational and you need to remember what
 
 ```powershell
 # Register a run as a version while forecasting, and optionally lock it as a submitted view.
-uv run nixtla-scaffold forecast --input data.csv --preset finance --horizon 6 --output runs\actions_arr_march --ledger runs\forecast_ledger --forecast-key "Actions ARR" --version-label "March refresh" --lock-official --lock-label "March lock"
+uv run nixtla-scaffold forecast --input data.csv --preset finance --horizon 6 --output runs\product_arr_march --ledger runs\forecast_ledger --forecast-key "Product ARR" --version-label "March refresh" --lock-official --lock-label "March lock"
 
 # Register an existing run folder later.
-uv run nixtla-scaffold ledger register --ledger runs\forecast_ledger --run runs\actions_arr_april --forecast-key "Actions ARR" --version-label "April refresh"
+uv run nixtla-scaffold ledger register --ledger runs\forecast_ledger --run runs\product_arr_april --forecast-key "Product ARR" --version-label "April refresh"
 
 # Append revised actuals from Kusto/DAX/Excel/CSV and preserve every refresh revision.
-uv run nixtla-scaffold ledger actuals --ledger runs\forecast_ledger --input actuals.csv --forecast-key "Actions ARR" --source-kind kusto --revision-label "April actuals"
+uv run nixtla-scaffold ledger actuals --ledger runs\forecast_ledger --input actuals.csv --forecast-key "Product ARR" --source-kind kusto --revision-label "April actuals"
 
 # Add anomaly corrections, business-model normalization, or forward-looking regime-change audit rows.
-uv run nixtla-scaffold ledger adjustments --ledger runs\forecast_ledger --input adjustments.csv --forecast-key "Actions ARR"
+uv run nixtla-scaffold ledger adjustments --ledger runs\forecast_ledger --input adjustments.csv --forecast-key "Product ARR"
 
 # Compare the latest registered version against a submitted lock. Thresholds are user-owned.
-uv run nixtla-scaffold ledger compare --ledger runs\forecast_ledger --forecast-key "Actions ARR" --against-lock "March lock" --call-up-pct 0.10 --call-down-pct 0.10
+uv run nixtla-scaffold ledger compare --ledger runs\forecast_ledger --forecast-key "Product ARR" --against-lock "March lock" --call-up-pct 0.10 --call-down-pct 0.10
 
 # Refresh the folder CSVs Power BI can ingest.
 uv run nixtla-scaffold ledger export --ledger runs\forecast_ledger --output runs\forecast_ledger\exports
@@ -472,6 +546,26 @@ uv run nixtla-scaffold ledger export --ledger runs\forecast_ledger --output runs
 The ledger writes `forecast_versions.csv`, `forecast_snapshot.csv`, `forecast_version_metrics.csv`, `official_forecast_locks.csv`, `forecast_actual_revisions.csv`, `forecast_actuals.csv`, `forecast_performance.csv`, `forecast_version_deltas.csv`, `forecast_adjustments.csv`, `corrected_actuals.csv`, and `regime_changes.csv`. Official locks are intentionally plural: a March lock and April lock can both remain as filterable submitted forecasts. Actuals are revisioned because operational systems can correct history. Corrections/normalizations are audited separately and require an explicit user action before corrected or normalized history feeds a forecast.
 
 When a run has `ledger_context.json`, both generated review surfaces include the ledger: `report.html` embeds a static preview of versions, official locks, lock-vs-refresh deltas, performance, adjustments, corrected/normalized actuals, and regime changes; `streamlit_app.py` adds an interactive **Forecast ledger** sidebar section that starts with one clean line chart: latest actuals/history, official locks emphasized, and recent non-lock forecast versions as lighter lines. Raw deltas, performance rows, actual revisions, adjustments, corrected/normalized actuals, and regime changes stay collapsed in audit tables. Ledger registration and lock commands refresh the run report automatically, and you can rerun `nixtla-scaffold report --run <run>` after later actuals, adjustments, compares, or exports.
+
+### Local operations: status, doctor, drift, and operate
+
+The package now includes production-shaped local operations: receipts, health checks, run discovery, and drift rollups that run entirely on your machine. This is not a cloud pipeline, scheduler, daemon, or DAG framework. It is a disciplined local runbook with machine-readable evidence.
+
+```powershell
+# Find the latest local runs and their health without opening Streamlit.
+uv run nixtla-scaffold status --runs runs --output runs\ops_status
+
+# Inspect one run for missing artifacts, Low-trust series, horizon caveats, and ledger linkage.
+uv run nixtla-scaffold doctor --run runs\actions_arr_april --output runs\actions_arr_april\ops
+
+# Roll up refresh deltas and ledger performance once actuals land.
+uv run nixtla-scaffold drift --ledger runs\forecast_ledger --refreshed-run runs\actions_arr_april --output runs\forecast_ledger\drift
+
+# Optional: execute a small linear checklist from YAML. No DAGs, retries, parallelism, or scheduler.
+uv run nixtla-scaffold operate --config forecast_operating_loop.yaml --output runs\monthly_operate
+```
+
+Every normal forecast run writes `appendix\run_receipt.json`, `appendix\run_receipt.md`, `appendix\validation_receipt.csv`, and `appendix\validation_receipt.json`. `status` scans existing `manifest.json` files. `doctor` is non-mutating and points to the next action. `drift` reads existing `appendix\refresh_delta.csv` and ledger exports rather than rerunning models. `operate` simply runs listed CLI steps in order and writes `operate_manifest.json`.
 
 You can regenerate these report artifacts from an existing run:
 
@@ -535,7 +629,7 @@ Local outputs are intentionally ignored by git. `.gitignore` excludes `.intern`,
 3. Runs simple baselines and, when available, a resilient StatsForecast ladder.
 4. Backtests when enough history exists.
 5. Selects a champion model per series.
-6. Adds a Pareto tradeoff review for non-dominated RMSE/MAE/WAPE/MASE/RMSSE/bias alternatives without changing the official champion.
+6. Adds a Pareto tradeoff review for non-dominated RMSE/MAE alternatives without changing the official champion; WAPE and scale-free metrics remain diagnostic context only.
 7. Adds an inverse-error weighted ensemble when validation data supports it.
 8. Supports auditable finance target transforms: log/log1p plus positive factor normalization for pricing, FX, inflation, or definition-change analysis.
 9. Supports auditable event/scenario overlays plus known-future and historical-only regressor contracts with leakage/future-availability checks; historical-only drivers can enter MLForecast only as safe lag features and regressors are never recursively forecast.
@@ -551,7 +645,7 @@ StatsForecast execution is failure-isolated: the scaffold tries the full ladder 
 
 - One obvious path first: load, profile, forecast, explain, export.
 - Advanced options live in config/CLI flags, not required setup.
-- No local MCP server in the MVP; MCPs can provide data as CSV, Excel, or DataFrames.
+- No local MCP server in the MVP; MCPs can provide data as CSV, Excel, DataFrames, or script-backed source pipeline extracts.
 - TimeGPT is out of scope.
 - NeuralForecast is optional research, not a core default.
 

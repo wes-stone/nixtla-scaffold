@@ -259,7 +259,7 @@ def _agent_brief(
             "2. Confirm the forecast grain and whether each row maps to one `unique_id`, `ds`, `y` point.",
             "3. Profile missing dates, duplicate keys, sparse histories, zeros, negatives, and outliers.",
             "4. Check whether hierarchy or grouped rollups are needed before stakeholder use.",
-            "5. Choose model families deliberately: baselines for sanity, StatsForecast for classical production, MLForecast only when future regressors are known, HierarchicalForecast for reconciliation, NeuralForecast for research only.",
+            "5. Choose model families deliberately: baselines for sanity, StatsForecast for classical production, MLForecast for feasible lag/calendar ML and audited future-regressor experiments, HierarchicalForecast for reconciliation, NeuralForecast for research only.",
             "6. List possible drivers/events and separate known future assumptions from historical-only explanatory variables.",
             "7. Decide whether intervals are appropriate after seeing history length and backtest windows.",
             "",
