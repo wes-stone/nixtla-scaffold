@@ -506,9 +506,60 @@ def build_streamlit_app() -> str:
 
 
         RUN_DIR = Path(__file__).parent
-        UI_FONT = '"Aptos", "Segoe UI", "Helvetica Neue", Arial, sans-serif'
-        CONDENSED_FONT = '"Aptos Narrow", "Arial Narrow", "Segoe UI", Arial, sans-serif'
-        DATA_FONT = '"Cascadia Mono", "Consolas", "Roboto Mono", "Courier New", monospace'
+        FONT_THEME_OPTIONS = {
+            "Trebuchet readable": {
+                "ui": '"Trebuchet MS", Aptos, "Segoe UI", Arial, sans-serif',
+                "heading": '"Trebuchet MS", Aptos, "Segoe UI", Arial, sans-serif',
+                "data": '"Courier New", "Consolas", monospace',
+                "note": "Readable and warmer; less enterprise, more web-dashboard.",
+            },
+            "Current finance-native": {
+                "ui": '"Aptos", "Segoe UI", "Helvetica Neue", Arial, sans-serif',
+                "heading": '"Aptos Narrow", "Arial Narrow", "Segoe UI", Arial, sans-serif',
+                "data": '"Cascadia Mono", "Consolas", "Roboto Mono", "Courier New", monospace',
+                "note": "Compact Aptos UI with Cascadia-style dense data tables.",
+            },
+            "Segoe reliable": {
+                "ui": '"Segoe UI", Aptos, Calibri, Arial, sans-serif',
+                "heading": '"Segoe UI Semibold", "Segoe UI", Aptos, Arial, sans-serif',
+                "data": '"Consolas", "Cascadia Mono", "Courier New", monospace',
+                "note": "Most native Windows/Streamlit look.",
+            },
+            "Arial Narrow terminal": {
+                "ui": '"Arial Narrow", Arial, "Segoe UI", sans-serif',
+                "heading": '"Arial Narrow", "Aptos Narrow", Arial, sans-serif',
+                "data": '"Consolas", "Courier New", monospace',
+                "note": "More compressed and market-terminal adjacent.",
+            },
+            "Bahnschrift control room": {
+                "ui": '"Bahnschrift", "Segoe UI", Aptos, Arial, sans-serif',
+                "heading": '"Bahnschrift", "Arial Narrow", Arial, sans-serif',
+                "data": '"Cascadia Mono", "Consolas", "Courier New", monospace',
+                "note": "Technical, condensed, and punchier on Windows.",
+            },
+            "Classic Office": {
+                "ui": '"Calibri", Aptos, "Segoe UI", Arial, sans-serif',
+                "heading": '"Aptos Display", Calibri, Aptos, "Segoe UI", sans-serif',
+                "data": '"Consolas", "Courier New", monospace',
+                "note": "Softer and Excel-adjacent.",
+            },
+            "All terminal mono": {
+                "ui": '"Cascadia Mono", "Consolas", "Courier New", monospace',
+                "heading": '"Cascadia Mono", "Consolas", "Courier New", monospace',
+                "data": '"Cascadia Mono", "Consolas", "Courier New", monospace',
+                "note": "Maximum data-desk feel; colder for prose sections.",
+            },
+            "Roboto + IBM Plex if installed": {
+                "ui": '"Roboto Condensed", "Arial Narrow", Arial, "Segoe UI", sans-serif',
+                "heading": '"Roboto Condensed", "Arial Narrow", Arial, sans-serif',
+                "data": '"IBM Plex Mono", "Cascadia Mono", "Consolas", monospace',
+                "note": "Closest to a bundled market-terminal style when local fonts exist.",
+            },
+        }
+        DEFAULT_FONT_THEME = "Trebuchet readable"
+        UI_FONT = FONT_THEME_OPTIONS[DEFAULT_FONT_THEME]["ui"]
+        CONDENSED_FONT = FONT_THEME_OPTIONS[DEFAULT_FONT_THEME]["heading"]
+        DATA_FONT = FONT_THEME_OPTIONS[DEFAULT_FONT_THEME]["data"]
         TERMINAL_FONT = DATA_FONT
         CHART_BG = "#071014"
         CHART_GRID = "#1b2830"
@@ -533,27 +584,26 @@ def build_streamlit_app() -> str:
         BASE_DASHBOARD_SECTIONS = [
             "Control Pane",
             "Forecast review",
-            "Model investigation",
-            "CV window player",
+            "Model tournament",
             "Prediction intervals",
             "Model audit",
             "Seasonality",
             "Hierarchy",
             "Assumptions & Drivers",
+            "Ledger view",
             "Feeder outputs",
         ]
         DASHBOARD_SECTIONS = list(BASE_DASHBOARD_SECTIONS)
         SECTION_DESCRIPTIONS = {
             "Control Pane": "One-glance run controls, feature map, policy status, and copyable next command.",
             "Forecast review": "Fast default view: champion, trust, and selected forecast context.",
-            "Model investigation": "Drill into selected models and Pareto tradeoffs.",
-            "CV window player": "Step through rolling-origin windows without rendering other sections.",
+            "Model tournament": "All-model scoreboard, point forecasts, intervals, and ensemble weights.",
             "Prediction intervals": "Review uncertainty bands and calibration evidence.",
             "Model audit": "Inspect leaderboard, weights, residuals, and interval diagnostics.",
             "Seasonality": "Check seasonal credibility and model-aware seasonal overlay.",
             "Hierarchy": "Review parent/child coherence and reconciliation tradeoffs.",
             "Assumptions & Drivers": "Review events, scenarios, and known-future driver audits.",
-            "Forecast ledger": "Review registered versions, official locks, landed actuals, and adjustment audits.",
+            "Ledger view": "Browse ledger tables, registered versions, locks, actuals, and drift rows.",
             "BYO / Finance model": "Compare Excel-owned finance model versions against scaffold forecasts.",
             "Feeder outputs": "Preview exported CSVs; use files for full-row review.",
         }
@@ -561,6 +611,16 @@ def build_streamlit_app() -> str:
         PERF_DIAGNOSTICS = os.environ.get("NIXTLA_SCAFFOLD_STREAMLIT_PERF", "").lower() in {"1", "true", "yes"}
         REGRESSOR_VISUAL_KEYWORDS = ("regressor", "driver", "feature", "covariate", "exogenous", "xreg", "stl", "rolling")
         REGRESSOR_VISUAL_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+        CHART_HEIGHT_SCALE = 0.94
+        CHART_LABEL_MAX_CHARS = 22
+        CHART_LABEL_OVERRIDES = {
+            "AutoARIMA_MSTLFeatures": "AutoARIMA MSTL feat",
+            "MSTL_AutoARIMA": "MSTL AutoARIMA",
+            "RandomWalkWithDrift": "Drift",
+            "HistoricAverage": "Historic avg",
+            "SeasonalNaive": "Seasonal naive",
+            "WeightedEnsemble": "Weighted ensemble",
+        }
 
 
         def color_to_rgba(color: str, alpha: float) -> str:
@@ -613,6 +673,12 @@ def build_streamlit_app() -> str:
             for annotation in fig.layout.annotations or []:
                 annotation.font.color = annotation.font.color or CHART_TEXT
                 annotation.font.family = annotation.font.family or TERMINAL_FONT
+            height = getattr(fig.layout, "height", None)
+            if height:
+                try:
+                    fig.update_layout(height=max(330, int(float(height) * CHART_HEIGHT_SCALE)))
+                except (TypeError, ValueError):
+                    pass
             return fig
 
 
@@ -712,6 +778,20 @@ def build_streamlit_app() -> str:
                 if path.exists():
                     return path
             return None
+
+
+        def resolve_artifact_reference(value) -> Path:
+            raw = str(value or "").strip()
+            if not raw:
+                return Path()
+            path = Path(raw).expanduser()
+            if path.is_absolute() or path.exists():
+                return path
+            for base in (RUN_DIR, *RUN_DIR.parents):
+                candidate = base / path
+                if candidate.exists():
+                    return candidate
+            return path
 
 
         def artifact_relative_label(path: Path) -> str:
@@ -925,7 +1005,7 @@ def build_streamlit_app() -> str:
                 ),
                 (
                     "3. Track performance over time",
-                    "Forecast ledger",
+                    "Ledger view",
                     "Save each forecast snapshot, append landed actuals, compare last month's yhat versus actuals, rerun, and judge whether the run rate changes the full-year call.",
                 ),
             ]
@@ -977,12 +1057,12 @@ def build_streamlit_app() -> str:
                 """
                 <div class="workbench-nav-shell">
                     <div class="workbench-nav-eyebrow">Workbench nav</div>
-                    <div class="workbench-nav-title">Single-section render. Select an analysis surface.</div>
+                    <div class="workbench-nav-title">Single-section render</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
-            st.caption("Only the selected surface renders on rerun.")
+            st.caption("Only the selected surface renders.")
             for section in DASHBOARD_SECTIONS:
                 clicked = st.button(
                     visible_section_label(section),
@@ -994,7 +1074,7 @@ def build_streamlit_app() -> str:
                     st.session_state["active_workbench_section"] = section
                     st.rerun()
             current = st.session_state.get("active_workbench_section", current)
-            st.caption(f"{SECTION_DESCRIPTIONS.get(current, '')} Only this section renders on rerun.")
+            st.caption(SECTION_DESCRIPTIONS.get(current, ""))
             return current
 
 
@@ -1878,7 +1958,7 @@ def build_streamlit_app() -> str:
             if name in top_weighted(uid, champion=active_champion):
                 roles.append("top weighted")
             if focus_models and name in set(map(str, focus_models)):
-                roles.append("investigated")
+                roles.append("highlighted")
             if selected_interval_levels(uid, name):
                 roles.append("interval bands")
             return ", ".join(dedupe_models(roles)) or "candidate"
@@ -2134,6 +2214,35 @@ def build_streamlit_app() -> str:
             return len([col for col in model_columns(am) if col not in shown])
 
 
+        def compact_chart_label(text: str, *, max_chars: int = CHART_LABEL_MAX_CHARS) -> str:
+            raw = str(text or "")
+            champion_suffix = ""
+            if raw.endswith(" (champion)"):
+                raw = raw[: -len(" (champion)")]
+                champion_suffix = " champ"
+            if raw.endswith(" (active champion)"):
+                raw = raw[: -len(" (active champion)")]
+                champion_suffix = " champ"
+            label = CHART_LABEL_OVERRIDES.get(raw, raw.replace("_", " "))
+            room = max(8, max_chars - len(champion_suffix))
+            if len(label) > room:
+                label = label[: max(5, room - 3)].rstrip() + "..."
+            return label + champion_suffix
+
+
+        def compact_chart_legend(y: float = -0.16) -> dict[str, object]:
+            return dict(
+                orientation="h",
+                x=0,
+                xanchor="left",
+                y=y,
+                yanchor="top",
+                font=dict(size=10),
+                itemsizing="constant",
+                tracegroupgap=2,
+            )
+
+
         def add_intervals(
             fig: go.Figure,
             f: pd.DataFrame,
@@ -2156,7 +2265,7 @@ def build_streamlit_app() -> str:
                             fillcolor=color_to_rgba(band_color, alpha * opacity_scale),
                             mode="lines",
                             line=dict(width=0),
-                            name=f"{model} {level}% interval",
+                            name=f"{compact_chart_label(model, max_chars=18)} {level}%",
                             hoverinfo="skip",
                             showlegend=showlegend,
                             legendgroup=model,
@@ -2189,7 +2298,7 @@ def build_streamlit_app() -> str:
                             fillcolor=color_to_rgba(band_color, alpha * opacity_scale),
                             mode="lines",
                             line=dict(width=0),
-                            name=f"{model} {level}% interval",
+                            name=f"{compact_chart_label(model, max_chars=18)} {level}%",
                             hoverinfo="skip",
                             showlegend=showlegend,
                             legendgroup=model,
@@ -2203,14 +2312,14 @@ def build_streamlit_app() -> str:
             fig.add_annotation(
                 x=x,
                 y=y,
-                text=text,
+                text=compact_chart_label(text),
                 showarrow=False,
                 xanchor="left",
                 xshift=8,
                 yshift=yshift,
                 font=dict(size=11, color=color),
-                bgcolor="rgba(255,255,255,0.82)",
-                bordercolor="rgba(0,0,0,0.12)",
+                bgcolor="rgba(7,16,20,0.86)",
+                bordercolor=color,
                 borderpad=2,
             )
 
@@ -2330,6 +2439,8 @@ def build_streamlit_app() -> str:
             show_all_models: bool,
             champion: str | None = None,
             focus_models: list[str] | None = None,
+            show_intervals: bool = True,
+            endpoint_labels: bool = True,
         ) -> go.Figure:
             h = history[history["unique_id"].astype(str) == uid].sort_values("ds")
             f = forecast[forecast["unique_id"].astype(str) == uid].sort_values("ds")
@@ -2342,7 +2453,7 @@ def build_streamlit_app() -> str:
             cols = model_columns(all_models)
             display_models = cols if show_all_models else [model for model in dedupe_models([sel, *highlighted]) if model]
             display_models = [model for model in dedupe_models(display_models) if not future_model_frame(uid, model).empty]
-            show_interval_legend = not show_all_models and len(display_models) <= 4
+            show_interval_legend = not show_all_models and len(display_models) == 1
 
             def display_color(model: str) -> str:
                 if model == sel:
@@ -2359,11 +2470,12 @@ def build_streamlit_app() -> str:
                 return 0.35
 
             fig = go.Figure()
-            for model in display_models:
-                frame = future_model_frame(uid, model)
-                color = display_color(model)
-                opacity = interval_opacity(model)
-                add_intervals(fig, frame, model=model, color=color, opacity_scale=opacity, showlegend=show_interval_legend)
+            if show_intervals:
+                for model in display_models:
+                    frame = future_model_frame(uid, model)
+                    color = display_color(model)
+                    opacity = interval_opacity(model)
+                    add_intervals(fig, frame, model=model, color=color, opacity_scale=opacity, showlegend=show_interval_legend)
             if not h.empty:
                 fig.add_trace(go.Scatter(x=h["ds"], y=h["y"], name="History", line=dict(color=C["hist"], width=2.6)))
             if show_all_models:
@@ -2377,7 +2489,7 @@ def build_streamlit_app() -> str:
                         go.Scatter(
                             x=frame["ds"],
                             y=pd.to_numeric(frame["yhat"], errors="coerce"),
-                            name=col,
+                            name=compact_chart_label(col),
                             line=dict(color=C["dim"], width=1, dash="dot"),
                             opacity=0.32,
                             showlegend=False,
@@ -2391,11 +2503,12 @@ def build_streamlit_app() -> str:
                         go.Scatter(
                             x=frame["ds"],
                             y=y,
-                            name=model,
+                            name=compact_chart_label(model),
                             line=dict(color=ALT_COLORS[idx % len(ALT_COLORS)], width=2.2, dash="dash"),
                         )
                     )
-                    add_endpoint_label(fig, frame["ds"].iloc[-1], y.iloc[-1], model, ALT_COLORS[idx % len(ALT_COLORS)], yshift=(idx - 1) * 10)
+                    if endpoint_labels:
+                        add_endpoint_label(fig, frame["ds"].iloc[-1], y.iloc[-1], model, ALT_COLORS[idx % len(ALT_COLORS)], yshift=(idx - 1) * 10)
             selected_frame = future_model_frame(uid, sel)
             if sel and not selected_frame.empty and "yhat" in selected_frame.columns:
                 y = pd.to_numeric(selected_frame["yhat"], errors="coerce")
@@ -2403,21 +2516,25 @@ def build_streamlit_app() -> str:
                     go.Scatter(
                         x=selected_frame["ds"],
                         y=y,
-                        name=f"{sel} (active champion)",
+                        name=compact_chart_label(f"{sel} (active champion)"),
                         line=dict(color=C["champ"], width=3.2),
                     )
                 )
-                add_endpoint_label(fig, selected_frame["ds"].iloc[-1], y.iloc[-1], f"{sel} (champion)", C["champ"], yshift=14)
+                if endpoint_labels:
+                    add_endpoint_label(fig, selected_frame["ds"].iloc[-1], y.iloc[-1], f"{sel} (champion)", C["champ"], yshift=14)
             elif not f.empty and "yhat" in f.columns:
                 fig.add_trace(go.Scatter(x=f["ds"], y=f["yhat"], name="Forecast", line=dict(color=C["champ"], width=3.2)))
-                add_endpoint_label(fig, f["ds"].iloc[-1], f["yhat"].iloc[-1], "Forecast", C["champ"])
+                if endpoint_labels:
+                    add_endpoint_label(fig, f["ds"].iloc[-1], f["yhat"].iloc[-1], "Forecast", C["champ"])
             fig.update_layout(
-                height=430,
-                margin=dict(l=40, r=190, t=25, b=40),
+                height=500 if show_all_models else 470,
+                margin=dict(l=52, r=54 if not endpoint_labels else 92, t=28, b=68),
                 hovermode="x unified",
-                legend=dict(orientation="h", y=-0.18),
-                yaxis_title="value",
+                legend=compact_chart_legend(y=-0.15),
+                yaxis_title=None,
             )
+            fig.update_xaxes(automargin=True)
+            fig.update_yaxes(automargin=True)
             return fig
 
 
@@ -2479,7 +2596,7 @@ def build_streamlit_app() -> str:
                         go.Scatter(
                             x=bt["ds"],
                             y=y,
-                            name=col,
+                            name=compact_chart_label(col),
                             line=dict(color=C["dim"], width=1, dash="dot"),
                             opacity=0.28,
                             showlegend=False,
@@ -2492,7 +2609,7 @@ def build_streamlit_app() -> str:
                         go.Scatter(
                             x=bt["ds"],
                             y=y,
-                            name=model,
+                            name=compact_chart_label(model),
                             line=dict(color=ALT_COLORS[idx % len(ALT_COLORS)], width=2.3, dash="dash"),
                         )
                     )
@@ -2504,7 +2621,7 @@ def build_streamlit_app() -> str:
                     go.Scatter(
                         x=bt["ds"],
                         y=y,
-                        name=f"{sel} (active champion)",
+                        name=compact_chart_label(f"{sel} (active champion)"),
                         line=dict(color=C["champ"], width=3.4),
                     )
                 )
@@ -2512,12 +2629,14 @@ def build_streamlit_app() -> str:
             add_cutoff_marker(fig, cutoff)
             fig.update_layout(
                 height=500,
-                margin=dict(l=45, r=210, t=30, b=45),
+                margin=dict(l=52, r=95, t=30, b=68),
                 hovermode="x unified",
-                legend=dict(orientation="h", y=-0.16),
-                yaxis_title="value",
-                xaxis_title="date",
+                legend=compact_chart_legend(y=-0.14),
+                yaxis_title=None,
+                xaxis_title=None,
             )
+            fig.update_xaxes(automargin=True)
+            fig.update_yaxes(automargin=True)
             if x_range is not None:
                 fig.update_xaxes(range=x_range)
             if y_range is not None:
@@ -3429,8 +3548,9 @@ def build_streamlit_app() -> str:
                                 fillcolor=color_to_rgba(line_color, alpha),
                                 mode="lines",
                                 line=dict(width=0),
-                                name=f"{model_name} {level}% PI",
+                                name=f"{compact_chart_label(model_name, max_chars=18)} {level}%",
                                 hoverinfo="skip",
+                                showlegend=False,
                                 legendgroup=model_name,
                             )
                         )
@@ -3438,13 +3558,15 @@ def build_streamlit_app() -> str:
                     go.Scatter(
                         x=mf["ds"],
                         y=pd.to_numeric(mf["yhat"], errors="coerce"),
-                        name=f"{model_name}{' (champion)' if model_name == overall else ''}",
+                        name=compact_chart_label(f"{model_name}{' (champion)' if model_name == overall else ''}"),
                         line=dict(color=line_color, width=3.1 if model_name == overall else 2.2),
                         mode="lines+markers",
                         legendgroup=model_name,
                     )
                 )
-            fig.update_layout(height=520, margin=dict(l=45, r=210, t=25, b=45), hovermode="x unified", yaxis_title="value", xaxis_title="date")
+            fig.update_layout(height=560, margin=dict(l=52, r=58, t=28, b=72), hovermode="x unified", legend=compact_chart_legend(y=-0.16), yaxis_title=None, xaxis_title=None)
+            fig.update_xaxes(automargin=True)
+            fig.update_yaxes(automargin=True)
             return fig
 
 
@@ -3584,32 +3706,59 @@ def build_streamlit_app() -> str:
             return out.dropna(subset=["ds", "y_history"]).sort_values(["unique_id", "ds"])
 
 
-        def ledger_forecast_evolution_chart(snapshot: pd.DataFrame, actuals: pd.DataFrame, history: pd.DataFrame, locks: pd.DataFrame, uid: str, version_labels: list[str]) -> go.Figure:
-            fig = go.Figure()
-            view = snapshot[snapshot["unique_id"].astype(str) == str(uid)].copy() if "unique_id" in snapshot.columns else snapshot.copy()
-            if version_labels and "version_label" in view.columns:
-                view = view[view["version_label"].fillna("").astype(str).replace("", "unlabeled version").isin(version_labels)]
+        def ledger_history_with_run_context(run_history: pd.DataFrame, ledger_history: pd.DataFrame) -> pd.DataFrame:
+            frames: list[pd.DataFrame] = []
+            if not run_history.empty and {"unique_id", "ds", "y"}.issubset(run_history.columns):
+                base = run_history[["unique_id", "ds", "y"]].copy().rename(columns={"y": "y_history"})
+                base["history_source"] = "run history"
+                frames.append(base)
+            if not ledger_history.empty:
+                frames.append(ledger_history.copy())
+            if not frames:
+                return pd.DataFrame()
+            out = pd.concat(frames, ignore_index=True, sort=False)
+            out["ds"] = pd.to_datetime(out["ds"], errors="coerce")
+            out["y_history"] = pd.to_numeric(out["y_history"], errors="coerce")
+            return out.dropna(subset=["unique_id", "ds", "y_history"]).sort_values(["unique_id", "ds"]).drop_duplicates(subset=["unique_id", "ds"], keep="last")
+
+
+        def ledger_actual_line_for_series(actuals: pd.DataFrame, history: pd.DataFrame, uid: str) -> pd.DataFrame:
             actual_line = history[history["unique_id"].astype(str) == str(uid)].copy() if not history.empty and "unique_id" in history.columns else pd.DataFrame()
             if actual_line.empty:
                 actual_line = actuals[actuals["unique_id"].astype(str) == str(uid)].copy() if not actuals.empty and "unique_id" in actuals.columns else pd.DataFrame()
                 if not actual_line.empty and "y_actual" in actual_line.columns:
                     actual_line = actual_line.rename(columns={"y_actual": "y_history"})
-            if not actual_line.empty and {"ds", "y_history"}.issubset(actual_line.columns):
-                actual_line["y_history"] = pd.to_numeric(actual_line["y_history"], errors="coerce")
-                actual_line = actual_line.dropna(subset=["ds", "y_history"]).sort_values("ds").drop_duplicates(subset=["ds"], keep="last")
-                fig.add_trace(
-                    go.Scatter(
-                        x=actual_line["ds"],
-                        y=actual_line["y_history"],
-                        name="Latest actuals",
-                        mode="lines",
-                        line=dict(color=C["hist"], width=3.0),
-                        hovertemplate="date=%{x|%Y-%m-%d}<br>actual=%{y:,.2f}<extra></extra>",
-                    )
-                )
-            if view.empty:
-                return fig
-            if not {"ds", "yhat"}.issubset(view.columns):
+            if actual_line.empty or not {"ds", "y_history"}.issubset(actual_line.columns):
+                return pd.DataFrame()
+            actual_line["ds"] = pd.to_datetime(actual_line["ds"], errors="coerce")
+            actual_line["y_history"] = pd.to_numeric(actual_line["y_history"], errors="coerce")
+            return actual_line.dropna(subset=["ds", "y_history"]).sort_values("ds").drop_duplicates(subset=["ds"], keep="last")
+
+
+        def compact_ledger_version_name(version_label: str, lock_label: str = "") -> str:
+            label = compact_chart_label(version_label or "Forecast version", max_chars=34)
+            if lock_label:
+                return f"{label} · lock"
+            return label
+
+
+        def ledger_ordered_version_groups(view: pd.DataFrame) -> list[tuple[object, pd.DataFrame]]:
+            version_groups = list(view.groupby("forecast_version_id", sort=False))
+
+            def version_sort_key(item) -> tuple[pd.Timestamp, str]:
+                version_id, group = item
+                origin = pd.NaT
+                if "forecast_origin" in group.columns:
+                    origins = pd.to_datetime(group["forecast_origin"], errors="coerce").dropna()
+                    if not origins.empty:
+                        origin = origins.max()
+                return (origin if pd.notna(origin) else pd.Timestamp.min, str(version_id))
+
+            return sorted(version_groups, key=version_sort_key)
+
+
+        def ledger_add_forecast_version_traces(fig: go.Figure, view: pd.DataFrame, locks: pd.DataFrame) -> go.Figure:
+            if view.empty or not {"ds", "yhat"}.issubset(view.columns):
                 return fig
             if "forecast_version_id" not in view.columns:
                 view = view.copy()
@@ -3617,32 +3766,103 @@ def build_streamlit_app() -> str:
             lock_lookup = {}
             if not locks.empty and {"forecast_version_id", "lock_label"}.issubset(locks.columns):
                 lock_lookup = locks.dropna(subset=["forecast_version_id"]).set_index(locks["forecast_version_id"].astype(str))["lock_label"].astype(str).to_dict()
-            palette = [C["champ"], C["alt1"], C["alt2"], C["alt3"], C["gold"], "#3f7f93", "#7a7f87"]
-            for idx, (version_id, group) in enumerate(view.groupby("forecast_version_id", sort=False)):
+            version_groups = ledger_ordered_version_groups(view)
+            total_versions = max(len(version_groups), 1)
+            for idx, (version_id, group) in enumerate(version_groups):
                 group = group.sort_values("ds") if "ds" in group.columns else group
                 version_label = display_value(group["version_label"].iloc[0] if "version_label" in group.columns else version_id, default="unlabeled version")
                 lock_label = lock_lookup.get(str(version_id), "")
-                name = f"{version_label} [lock: {lock_label}]" if lock_label else version_label
-                base_color = C["champ"] if lock_label else palette[idx % len(palette)]
-                color = base_color if lock_label else color_to_rgba(base_color, 0.42)
+                recency = 1.0 if total_versions == 1 else idx / (total_versions - 1)
+                alpha = 0.30 + (0.65 * recency)
+                color = color_to_rgba(C["champ"], round(alpha, 2))
+                width = 2.0 + (1.5 * recency)
                 fig.add_trace(
                     go.Scatter(
                         x=group["ds"],
                         y=pd.to_numeric(group["yhat"], errors="coerce"),
-                        name=name,
+                        name=compact_ledger_version_name(version_label, lock_label),
                         mode="lines",
-                        line=dict(color=color, width=3.1 if lock_label else 2.0, dash="solid"),
+                        line=dict(color=color, width=width, dash="solid"),
                         customdata=group[["model", "forecast_origin"]].to_numpy() if {"model", "forecast_origin"}.issubset(group.columns) else None,
-                        hovertemplate="date=%{x|%Y-%m-%d}<br>yhat=%{y:,.2f}<extra></extra>",
+                        hovertemplate=(
+                            f"version={html.escape(version_label)}<br>"
+                            f"lock={html.escape(lock_label or 'none')}<br>"
+                            "date=%{x|%Y-%m-%d}<br>yhat=%{y:,.2f}<extra></extra>"
+                        ),
                     )
                 )
+            return fig
+
+
+        def ledger_forecast_version_view(snapshot: pd.DataFrame, uid: str, version_labels: list[str]) -> pd.DataFrame:
+            view = snapshot[snapshot["unique_id"].astype(str) == str(uid)].copy() if "unique_id" in snapshot.columns else snapshot.copy()
+            if version_labels and "version_label" in view.columns:
+                view = view[view["version_label"].fillna("").astype(str).replace("", "unlabeled version").isin(version_labels)]
+            return view
+
+
+        def ledger_forecast_evolution_chart(snapshot: pd.DataFrame, actuals: pd.DataFrame, history: pd.DataFrame, locks: pd.DataFrame, uid: str, version_labels: list[str]) -> go.Figure:
+            fig = go.Figure()
+            view = ledger_forecast_version_view(snapshot, uid, version_labels)
+            actual_line = ledger_actual_line_for_series(actuals, history, uid)
+            if not actual_line.empty:
+                fig.add_trace(
+                    go.Scatter(
+                        x=actual_line["ds"],
+                        y=actual_line["y_history"],
+                        name="Actuals (history + landed)",
+                        mode="lines",
+                        line=dict(color=C["hist"], width=3.2),
+                        hovertemplate="date=%{x|%Y-%m-%d}<br>actual=%{y:,.2f}<extra></extra>",
+                    )
+                )
+            if view.empty:
+                return fig
+            if not {"ds", "yhat"}.issubset(view.columns):
+                return fig
+            fig = ledger_add_forecast_version_traces(fig, view, locks)
             fig.update_layout(
                 height=480,
-                margin=dict(l=45, r=180, t=25, b=45),
+                margin=dict(l=45, r=35, t=25, b=45),
                 hovermode="x unified",
                 yaxis_title="forecast / actual value",
                 xaxis_title="forecast period",
-                legend_title="Forecast version",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, title_text=""),
+            )
+            return fig
+
+
+        def ledger_forecast_only_chart(snapshot: pd.DataFrame, actuals: pd.DataFrame, history: pd.DataFrame, locks: pd.DataFrame, uid: str, version_labels: list[str]) -> go.Figure:
+            fig = go.Figure()
+            view = ledger_forecast_version_view(snapshot, uid, version_labels)
+            if view.empty or not {"ds", "yhat"}.issubset(view.columns):
+                return fig
+            view["ds"] = pd.to_datetime(view["ds"], errors="coerce")
+            forecast_start = view["ds"].min()
+            forecast_end = view["ds"].max()
+            fig = ledger_add_forecast_version_traces(fig, view, locks)
+            actual_window = ledger_actual_line_for_series(actuals, history, uid)
+            if not actual_window.empty and pd.notna(forecast_start) and pd.notna(forecast_end):
+                actual_window = actual_window[(actual_window["ds"] >= forecast_start) & (actual_window["ds"] <= forecast_end)]
+                if not actual_window.empty:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=actual_window["ds"],
+                            y=actual_window["y_history"],
+                            name="Actuals in window",
+                            mode="lines+markers",
+                            line=dict(color=C["hist"], width=3.0),
+                            marker=dict(color=C["hist"], size=6),
+                            hovertemplate="date=%{x|%Y-%m-%d}<br>actual=%{y:,.2f}<extra></extra>",
+                        )
+                    )
+            fig.update_layout(
+                height=390,
+                margin=dict(l=45, r=35, t=25, b=45),
+                hovermode="x unified",
+                yaxis_title="forecast / actual value",
+                xaxis_title="forecast period",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, title_text="Forecast versions"),
             )
             return fig
 
@@ -3734,20 +3954,33 @@ def build_streamlit_app() -> str:
 
 
         st.set_page_config(page_title="Forecast control workbench", layout="wide")
+        active_font_theme_name = st.session_state.get("font_theme", DEFAULT_FONT_THEME)
+        if active_font_theme_name not in FONT_THEME_OPTIONS:
+            active_font_theme_name = DEFAULT_FONT_THEME
+        active_font_theme = FONT_THEME_OPTIONS[active_font_theme_name]
+        UI_FONT = active_font_theme["ui"]
+        CONDENSED_FONT = active_font_theme["heading"]
+        DATA_FONT = active_font_theme["data"]
+        TERMINAL_FONT = DATA_FONT
         st.markdown(
             """
             <style>
             :root {
-                --font-ui: "Aptos", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-                --font-condensed: "Aptos Narrow", "Arial Narrow", "Segoe UI", Arial, sans-serif;
-                --font-data: "Cascadia Mono", "Consolas", "Roboto Mono", "Courier New", monospace;
+                --font-ui: "Trebuchet MS", Aptos, "Segoe UI", Arial, sans-serif;
+                --font-condensed: "Trebuchet MS", Aptos, "Segoe UI", Arial, sans-serif;
+                --font-data: "Courier New", "Consolas", monospace;
+                --density-row-height: 1.86rem;
+                --density-cell-padding-y: 0.18rem;
+                --density-cell-padding-x: 0.34rem;
+                --density-panel-gap: 0.42rem;
             }
             html,
             body,
             .stApp {
                 font-family: var(--font-ui);
-                font-size: 14px;
+                font-size: 12.5px;
                 font-variant-numeric: tabular-nums;
+                line-height: 1.28;
             }
             .headline-card {
                 border: 1px solid #2a3640;
@@ -3890,8 +4123,8 @@ def build_streamlit_app() -> str:
             }
             [data-testid="stMainBlockContainer"],
             .main .block-container {
-                padding-top: 2.45rem;
-                padding-bottom: 2.2rem;
+                padding-top: 1.35rem;
+                padding-bottom: 1.45rem;
             }
             [data-testid="stMarkdownContainer"] h1,
             [data-testid="stMarkdownContainer"] h2,
@@ -3901,15 +4134,29 @@ def build_streamlit_app() -> str:
                 font-family: var(--font-condensed);
                 letter-spacing: -0.02em;
             }
+            [data-testid="stMarkdownContainer"] h2 {
+                font-size: 1.14rem;
+                margin: 0.58rem 0 0.28rem 0;
+            }
+            [data-testid="stMarkdownContainer"] h3 {
+                font-size: 1.02rem;
+                margin: 0.5rem 0 0.24rem 0;
+            }
+            [data-testid="stMarkdownContainer"] h4 {
+                font-size: 0.88rem;
+                margin: 0.42rem 0 0.22rem 0;
+            }
             [data-testid="stMarkdownContainer"] p,
             [data-testid="stMarkdownContainer"] li,
             [data-testid="stCaptionContainer"] p {
                 color: #aeb9c2;
+                font-size: 0.78rem;
+                line-height: 1.32;
             }
             [data-testid="stExpander"] {
                 background: #0b1419;
                 border: 1px solid #26323b;
-                border-radius: 4px;
+                border-radius: 2px;
             }
             [data-testid="stExpander"] details,
             [data-testid="stExpander"] summary,
@@ -3933,6 +4180,8 @@ def build_streamlit_app() -> str:
             [data-testid="stExpander"] summary p {
                 color: #d8e1e8;
                 font-family: var(--font-ui);
+                font-size: 0.78rem;
+                font-weight: 750;
             }
             [data-testid="stAlert"] {
                 border-radius: 4px;
@@ -3950,15 +4199,16 @@ def build_streamlit_app() -> str:
             }
             div[data-testid="stButton"] > button {
                 border-radius: 2px;
-                min-height: 2.25rem;
+                min-height: var(--density-row-height);
                 border: 1px solid #2a3640;
                 background: #111b22;
                 color: #d8e1e8;
                 font-family: var(--font-data);
-                font-size: 0.78rem;
+                font-size: 0.72rem;
                 font-weight: 800;
                 letter-spacing: 0;
                 box-shadow: none;
+                padding: 0 0.52rem;
             }
             div[data-testid="stButton"] > button:hover {
                 border-color: #f2a900;
@@ -3973,6 +4223,25 @@ def build_streamlit_app() -> str:
                 color: #eef4f7 !important;
                 font-family: var(--font-data) !important;
                 box-shadow: none !important;
+                min-height: var(--density-row-height) !important;
+            }
+            [data-testid="stMetric"] {
+                background: #0f181e;
+                border: 1px solid #26323b;
+                border-left: 3px solid #697782;
+                padding: 0.32rem 0.45rem;
+            }
+            [data-testid="stMetricLabel"] p {
+                color: #8a98a3 !important;
+                font-size: 0.64rem !important;
+                font-weight: 850 !important;
+                letter-spacing: 0.05em;
+                text-transform: uppercase;
+            }
+            [data-testid="stMetricValue"] {
+                color: #eef4f7 !important;
+                font-family: var(--font-data) !important;
+                font-size: 0.95rem !important;
             }
             div[data-baseweb="select"] span,
             div[data-baseweb="select"] div,
@@ -4047,7 +4316,7 @@ def build_streamlit_app() -> str:
                 border-collapse: collapse;
                 color: #d8e1e8;
                 font-family: var(--font-data);
-                font-size: 0.74rem;
+                font-size: 0.70rem;
                 font-variant-numeric: tabular-nums;
                 min-width: 100%;
                 width: 100%;
@@ -4070,7 +4339,7 @@ def build_streamlit_app() -> str:
             table.terminal-dataframe th,
             table.terminal-dataframe td {
                 border: 1px solid #1b2830 !important;
-                padding: 0.28rem 0.42rem;
+                padding: var(--density-cell-padding-y) var(--density-cell-padding-x);
                 vertical-align: top;
                 white-space: nowrap;
             }
@@ -4105,7 +4374,7 @@ def build_streamlit_app() -> str:
                 border-radius: 4px;
                 color: #d8e1e8;
                 font-family: var(--font-ui);
-                margin: 0.45rem 0 0.75rem 0;
+                margin: 0.22rem 0 0.5rem 0;
             }
             .forecast-console-topline {
                 align-items: center;
@@ -4114,7 +4383,7 @@ def build_streamlit_app() -> str:
                 display: flex;
                 flex-wrap: wrap;
                 gap: 0.85rem;
-                padding: 0.38rem 0.58rem;
+                padding: 0.26rem 0.5rem;
             }
             .forecast-console-label {
                 color: #f2a900;
@@ -4138,12 +4407,12 @@ def build_streamlit_app() -> str:
             }
             .forecast-console-titlebox {
                 background: #0b1419;
-                padding: 0.68rem 0.8rem;
+                padding: 0.48rem 0.62rem;
             }
             .forecast-console-title {
                 color: #eef4f7;
                 font-family: var(--font-condensed);
-                font-size: 1.08rem;
+                font-size: 0.98rem;
                 font-weight: 850;
                 letter-spacing: 0.01em;
                 line-height: 1.15;
@@ -4164,7 +4433,7 @@ def build_streamlit_app() -> str:
             .forecast-console-metric {
                 background: #0f181e;
                 min-height: 3.45rem;
-                padding: 0.42rem 0.5rem;
+                padding: 0.32rem 0.42rem;
             }
             .forecast-console-metric-label {
                 color: #8a98a3;
@@ -4176,7 +4445,7 @@ def build_streamlit_app() -> str:
             .forecast-console-metric-value {
                 color: #eef4f7;
                 font-family: var(--font-data);
-                font-size: 1.03rem;
+                font-size: 0.92rem;
                 font-weight: 850;
                 margin-top: 0.35rem;
             }
@@ -4202,11 +4471,11 @@ def build_streamlit_app() -> str:
                 color: #80909c;
                 display: flex;
                 flex-wrap: wrap;
-                font-size: 0.72rem;
+                font-size: 0.66rem;
                 font-weight: 800;
                 gap: 0.8rem;
                 letter-spacing: 0.05em;
-                padding: 0.48rem 0.65rem;
+                padding: 0.34rem 0.52rem;
                 text-transform: uppercase;
             }
             .control-terminal-header span {
@@ -4224,15 +4493,15 @@ def build_streamlit_app() -> str:
                 position: relative;
                 display: grid;
                 grid-template-columns: minmax(280px, 0.85fr) minmax(420px, 1.25fr);
-                gap: 0.7rem;
+                gap: var(--density-panel-gap);
                 align-items: stretch;
-                padding: 0.75rem;
+                padding: 0.52rem;
             }
             .control-hero-copy {
                 border: 1px solid #202c34;
                 background: #0b1419;
                 color: #d8e1e8;
-                padding: 0.7rem 0.8rem;
+                padding: 0.52rem 0.62rem;
             }
             .control-eyebrow {
                 color: #f2a900;
@@ -4244,7 +4513,7 @@ def build_streamlit_app() -> str:
             .control-title {
                 color: #eef4f7;
                 font-family: var(--font-condensed);
-                font-size: clamp(1rem, 1.5vw, 1.25rem);
+                font-size: clamp(0.92rem, 1.25vw, 1.08rem);
                 font-weight: 850;
                 line-height: 1.08;
                 letter-spacing: 0.01em;
@@ -4253,8 +4522,8 @@ def build_streamlit_app() -> str:
             }
             .control-copy {
                 color: #aeb9c2;
-                font-size: 0.8rem;
-                line-height: 1.45;
+                font-size: 0.76rem;
+                line-height: 1.34;
                 max-width: 36rem;
                 margin-top: 0.55rem;
             }
@@ -4270,8 +4539,8 @@ def build_streamlit_app() -> str:
                 border-left: 3px solid #5a6670;
                 border-radius: 0;
                 background: #0f181e;
-                padding: 0.55rem 0.65rem;
-                min-height: 4.35rem;
+                padding: 0.42rem 0.52rem;
+                min-height: 3.45rem;
                 box-shadow: none;
             }
             .control-stat-card.status-ok { border-left-color: #1fda83; }
@@ -4280,7 +4549,7 @@ def build_streamlit_app() -> str:
             .control-stat-card.status-muted { border-left-color: #697782; }
             .control-stat-label {
                 color: #8a98a3;
-                font-size: 0.66rem;
+                font-size: 0.62rem;
                 font-weight: 850;
                 letter-spacing: 0.06em;
                 text-transform: uppercase;
@@ -4288,7 +4557,7 @@ def build_streamlit_app() -> str:
             .control-stat-value {
                 color: #eef4f7;
                 font-family: var(--font-data);
-                font-size: 1.05rem;
+                font-size: 0.92rem;
                 font-weight: 850;
                 letter-spacing: -0.01em;
                 line-height: 1.1;
@@ -4296,8 +4565,8 @@ def build_streamlit_app() -> str:
             }
             .control-stat-detail {
                 color: #9ba8b2;
-                font-size: 0.72rem;
-                line-height: 1.28;
+                font-size: 0.68rem;
+                line-height: 1.22;
                 margin-top: 0.24rem;
             }
             .control-action-grid, .control-feature-grid {
@@ -4313,12 +4582,12 @@ def build_streamlit_app() -> str:
                 border-radius: 0;
                 background: #101a20;
                 box-shadow: none;
-                padding: 0.62rem 0.72rem;
+                padding: 0.48rem 0.58rem;
             }
             .control-action-kicker {
                 color: #f2a900;
                 font-family: var(--font-data);
-                font-size: 0.66rem;
+                font-size: 0.61rem;
                 font-weight: 850;
                 letter-spacing: 0.06em;
                 text-transform: uppercase;
@@ -4462,6 +4731,18 @@ def build_streamlit_app() -> str:
             """,
             unsafe_allow_html=True,
         )
+        st.markdown(
+            f"""
+            <style>
+            :root {{
+                --font-ui: {active_font_theme["ui"]};
+                --font-condensed: {active_font_theme["heading"]};
+                --font-data: {active_font_theme["data"]};
+            }}
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
 
         artifact_load_started = time.perf_counter()
         manifest = read_json("manifest.json")
@@ -4471,8 +4752,6 @@ def build_streamlit_app() -> str:
         refresh_manifest = read_json("refresh_manifest.json")
         refresh_delta = prep_dates(read_csv("refresh_delta.csv"))
         ledger_context = read_json("ledger_context.json")
-        if ledger_context and "Forecast ledger" not in DASHBOARD_SECTIONS:
-            DASHBOARD_SECTIONS.insert(DASHBOARD_SECTIONS.index("Feeder outputs"), "Forecast ledger")
         executive_headline = diagnostics.get("executive_headline", {})
         model_policy_resolution = manifest.get("model_policy_resolution", {})
         history = prep_dates(read_csv("history.csv"))
@@ -4604,12 +4883,11 @@ def build_streamlit_app() -> str:
             <div class="forecast-console-topbar">
                 <div class="forecast-console-topline">
                     <span class="forecast-console-label">Forecast workbench</span>
-                    <span class="forecast-console-caption">Artifact-backed review</span>
                 </div>
                 <div class="forecast-console-body">
                     <div class="forecast-console-titlebox">
-                        <div class="forecast-console-title">Forecast workbench</div>
-                        <div class="forecast-console-subtitle">Local artifacts only: champion, candidates, trust, and output files.</div>
+                        <div class="forecast-console-title">Forecast control</div>
+                        <div class="forecast-console-subtitle">Artifacts are source of truth: champion, trust, intervals, files.</div>
                     </div>
                     <div class="forecast-console-metrics">
                         <div class="forecast-console-metric"><div class="forecast-console-metric-label">Series</div><div class="forecast-console-metric-value">{len(uids)}</div></div>
@@ -4627,21 +4905,33 @@ def build_streamlit_app() -> str:
             st.header("Controls")
             active_section = render_workbench_section_nav()
             st.divider()
+            with st.expander("Settings / accessibility", expanded=False):
+                st.caption("Display settings only; forecasts and artifact files stay unchanged.")
+                selected_font_theme_name = st.selectbox(
+                    "Font theme",
+                    list(FONT_THEME_OPTIONS),
+                    index=list(FONT_THEME_OPTIONS).index(active_font_theme_name),
+                    key="font_theme",
+                    help="Switch dashboard typography only; forecasts and artifact files stay unchanged.",
+                )
+                st.caption(FONT_THEME_OPTIONS.get(selected_font_theme_name, active_font_theme)["note"])
+                st.caption("Reserved for density, contrast, and motion controls as the workbench grows.")
+            st.divider()
             uid = st.selectbox("Series", uids)
-            with st.expander("Champion controls", expanded=False):
-                champion_scope = st.radio(
-                    "Champion lens",
-                    CHAMPION_SCOPE_OPTIONS,
-                    help="Switch the active champion between the tournament winner, the best StatsForecast/classical candidate, and the best MLForecast candidate.",
-                )
-                winner_metric = st.selectbox(
-                    "Winner metric",
-                    available_winner_metrics(uid),
-                    index=0,
-                    format_func=metric_label,
-                    help="Choose the metric used to pick the active champion inside the selected lens. This changes the dashboard champion for review; it does not rewrite forecast.csv.",
-                )
-                st.markdown("**Metric guide**")
+            st.markdown("##### Champion controls")
+            champion_scope = st.radio(
+                "Champion lens",
+                CHAMPION_SCOPE_OPTIONS,
+                help="Switch active champion without rewriting forecast.csv.",
+            )
+            winner_metric = st.selectbox(
+                "Winner metric",
+                available_winner_metrics(uid),
+                index=0,
+                format_func=metric_label,
+                help="Review lens only; official selection artifacts stay unchanged.",
+            )
+            with st.expander("When should I use each metric?", expanded=False):
                 for metric in available_winner_metrics(uid):
                     guidance = WINNER_METRIC_GUIDANCE[metric]
                     direction = "higher is better" if guidance["direction"] == "higher" else "lower is better"
@@ -4665,20 +4955,20 @@ def build_streamlit_app() -> str:
             focus_key = f"models_to_investigate_{uid}"
             stored_focus_models = st.session_state.get(focus_key, default_models)
             sidebar_focus_default = [model for model in dedupe_models(stored_focus_models) if model in model_options] or default_models
-            with st.expander("Model investigation controls", expanded=active_section == "Model investigation"):
-                st.caption("Used by Model investigation and diagnostic pages. Forecast Review now keeps a fixed champion view plus an all-model view so this picker does not make the main review disappear.")
+            with st.expander("Tournament focus controls", expanded=active_section == "Model tournament"):
+                st.caption("Used by diagnostic pages to highlight a few models. The Model tournament section always shows the full candidate field.")
                 focus_models = st.multiselect(
-                    "Models to investigate",
+                    "Models to highlight",
                     model_options,
                     default=sidebar_focus_default,
                     format_func=lambda model: model_menu_label(uid, model, winner_metric),
-                    help="These models are highlighted in model investigation, CV, residual, interval, and audit sections. Clear the list to only use the active champion.",
+                    help="These models are highlighted in CV, residual, interval, and audit sections. Clear the list to only use the active champion.",
                     key=focus_key,
                 )
                 show_context_models = st.toggle(
                     "Show all other models in diagnostic charts",
                     value=False,
-                    help="Turn this on for full all-candidate context in CV/model-investigation diagnostic charts. Forecast Review always has its own all-model chart.",
+                    help="Turn this on for full all-candidate context in CV diagnostic charts. Forecast Review and Model tournament always have their own all-model views.",
                 )
             if active_champion and active_champion not in focus_models:
                 focus_models = [active_champion, *focus_models]
@@ -4793,7 +5083,7 @@ def build_streamlit_app() -> str:
                         "agent-readable artifact": "appendix/borrowed_strength_advisor.csv",
                     },
                     {
-                        "mechanism": "Forecast ledger",
+                        "mechanism": "Ledger view",
                         "status": "available" if ledger_context else "not present",
                         "agent-readable artifact": "ledger_context.json",
                     },
@@ -4873,7 +5163,7 @@ def build_streamlit_app() -> str:
                 with st.expander("Model policy resolution", expanded=False):
                     render_dataframe(policy_table, width="stretch", hide_index=True)
             if run_warnings:
-                with st.expander("Warnings and caveats", expanded=True):
+                with st.expander("Warnings and caveats", expanded=False):
                     for warning in run_warnings[:20]:
                         if str(warning).strip():
                             st.warning(str(warning))
@@ -4949,11 +5239,11 @@ def build_streamlit_app() -> str:
                 st.markdown(operating_loop_cards(), unsafe_allow_html=True)
                 st.caption(f"Trust rubric: {TRUST_RUBRIC_TEXT}")
                 st.caption(f"Interval glossary: {INTERVAL_GLOSSARY_TEXT}")
-            with st.expander("All series trust summary"):
+            with st.expander("All series trust summary", expanded=False):
                 render_dataframe(display_trust_summary(trust_summary), width="stretch", hide_index=True)
         if active_section == "Forecast review":
             with st.expander("Copy/paste wide summary", expanded=False):
-                st.caption("Human-readable wide table for pasting into planning docs. Date columns stay clean; actuals, forecasts, and selected interval bounds appear as labeled rows under each series. Forecast rows default to the active champion by series; switch the model selector for challenger-model copy/paste. Blank cells mean that series/model has no value or interval bound for that date; official machine-readable values remain in `history.csv`, `forecast.csv`, and `forecast_long.csv`.")
+                st.caption("Date columns stay clean. Actuals, forecasts, and selected interval bounds appear as labeled rows. Forecast rows default to the active champion by series; switch the model selector for challenger-model copy/paste. Adds indented lo/hi rows for selected intervals. Machine-readable values remain in `history.csv`, `forecast.csv`, and `forecast_long.csv`.")
                 history_period_count = int(history["ds"].dropna().nunique()) if not history.empty and "ds" in history.columns else 0
                 forecast_period_count = int(forecast["ds"].dropna().nunique()) if not forecast.empty and "ds" in forecast.columns else 0
                 wide_top_cols = st.columns([1.05, 1.05, 1.9])
@@ -5070,22 +5360,70 @@ def build_streamlit_app() -> str:
 
         st.caption(f"Active section: {active_section}. Only this workbench section renders on rerun; switch sections from the sidebar when you need deeper diagnostics.")
 
-        if active_section == "Model investigation":
-            st.subheader("Models to investigate")
-            st.caption("Pick specific models from the sidebar, then compare their future path, rolling-origin windows, errors, intervals, weights, and explainability without crowding the main forecast review. Menu labels use `#rank | model | engine`; the guide below is grouped by engine and alphabetized by model so StatsForecast/classical and MLForecast candidates are easy to distinguish.")
-            picker_guide = model_menu_table(uid, model_options, active_champion=active_champion, focus_models=focus_models, metric=winner_metric)
-            if not picker_guide.empty:
-                with st.expander("Model picker guide: rank, engine, and role", expanded=True):
-                    st.caption("Rank comes from the current winner metric. Engine labels distinguish StatsForecast/classical, MLForecast, baseline, ensemble, custom, and other candidates; the native guide table italicizes the Engine column when Streamlit dataframe styling is available.")
-                    render_dataframe(model_picker_guide_style(picker_guide), width="stretch", hide_index=True)
-            investigation = model_investigation_table(uid, dedupe_models(focus_models), active_champion=active_champion, metric=winner_metric)
-            inv_cols = st.columns(4)
-            inv_cols[0].metric("Active champion", active_champion or "N/A")
-            inv_cols[1].metric("Winner metric", metric_label(winner_metric))
-            inv_cols[2].metric("Investigated models", len(dedupe_models(focus_models)))
-            inv_cols[3].metric("Available candidates", len(model_options))
-            if not investigation.empty:
-                render_dataframe(investigation, width="stretch", hide_index=True)
+        if active_section == "Model tournament":
+            st.subheader("Model tournament")
+            st.caption("All candidate models are visible here: a full leaderboard, an all-model point forecast race, an interval-capable race with bands, and the inverse-error ensemble weights that feed the weighted candidate.")
+            tournament_models = model_menu_options(uid, candidate_models(uid))
+            tournament_table = model_investigation_table(uid, tournament_models, active_champion=active_champion, metric=winner_metric)
+            tournament_interval_models = [model for model in tournament_models if selected_interval_levels(uid, model)]
+            tournament_weight_rows = weights[weights["unique_id"].astype(str) == uid].copy() if not weights.empty and "unique_id" in weights.columns else weights.copy()
+            if not tournament_weight_rows.empty and "model" in tournament_weight_rows.columns:
+                tournament_weight_rows["model"] = tournament_weight_rows["model"].astype(str)
+            mt_cols = st.columns(4)
+            mt_cols[0].metric("Active champion", active_champion or "N/A")
+            mt_cols[1].metric("Candidate models", len(tournament_models))
+            mt_cols[2].metric("Interval-capable", len(tournament_interval_models))
+            mt_cols[3].metric("Weighted rows", len(tournament_weight_rows))
+            if not tournament_table.empty:
+                st.subheader("All-model leaderboard")
+                st.caption("Rank comes from the current winner metric. Role flags show active champion, forecast.csv selected, top weighted, highlighted, and interval-band ownership.")
+                render_dataframe(model_picker_guide_style(tournament_table, limit=max(len(tournament_table), 1)), width="stretch", hide_index=True)
+            st.subheader("All point forecasts - no prediction intervals")
+            st.caption("Every candidate forecast line is rendered without bands so the tournament shape stays readable. Use the leaderboard above for exact model identity, rank, engine, and role.")
+            render_plotly_chart(
+                forecast_chart(
+                    uid,
+                    show_all_models=True,
+                    champion=active_champion,
+                    focus_models=[],
+                    show_intervals=False,
+                    endpoint_labels=False,
+                ),
+                width="stretch",
+                key="model_tournament_all_point_forecasts",
+            )
+            st.subheader("All interval-capable models - with prediction intervals")
+            if tournament_interval_models:
+                st.caption("This view shows every model with exported lo/hi interval columns. WeightedEnsemble is point-only and does not inherit component-model intervals.")
+                render_plotly_chart(
+                    prediction_interval_focus_chart(uid, tournament_interval_models),
+                    width="stretch",
+                    key="model_tournament_all_interval_forecasts",
+                )
+                interval_table = model_investigation_table(uid, tournament_interval_models, active_champion=active_champion, metric=winner_metric)
+                render_dataframe(model_picker_guide_view(interval_table, limit=max(len(interval_table), 1)), width="stretch", hide_index=True)
+            else:
+                st.info("No interval-capable model forecasts were exported for this series.")
+            st.subheader("Inverse-error weighted ensemble")
+            ensemble_present = "WeightedEnsemble" in set(map(str, tournament_models))
+            st.caption(
+                "Ensembling is still available when the run exports `model_weights.csv`: component weights are inverse-error validation support, and the `WeightedEnsemble` candidate is point-only unless a separate interval model is exported. "
+                + f"WeightedEnsemble candidate present: {'yes' if ensemble_present else 'no'}."
+            )
+            if not tournament_weight_rows.empty and {"model", "weight"}.issubset(tournament_weight_rows.columns):
+                tournament_weight_rows["weight"] = pd.to_numeric(tournament_weight_rows["weight"], errors="coerce")
+                weight_view = tournament_weight_rows.sort_values("weight", ascending=False).copy()
+                score_for_weights = model_score_table(uid)
+                if not score_for_weights.empty and "model" in score_for_weights.columns:
+                    candidate_metric_cols = ["family", winner_metric, "rmse", "mae", "wape", "mase", "rmsse", "bias"]
+                    merge_cols = ["model", *[col for col in candidate_metric_cols if col in score_for_weights.columns and col != "weight"]]
+                    weight_view = weight_view.merge(score_for_weights[merge_cols].drop_duplicates("model"), on="model", how="left")
+                if "family" in weight_view.columns:
+                    weight_view["engine"] = weight_view["family"].map(display_family)
+                preferred_weight_cols = [col for col in ["model", "engine", "weight", winner_metric, "rmse", "mae", "wape", "mase", "rmsse", "bias"] if col in weight_view.columns]
+                render_dataframe(weight_view[preferred_weight_cols].head(1000), width="stretch", hide_index=True)
+            else:
+                st.info("No model_weights.csv rows are available for this series. Weighted ensemble evidence appears when the run exports component weights.")
             st.subheader("Model tradeoffs / Pareto frontier")
             st.caption("Pareto highlights non-dominated models across complete RMSE/MAE backtest metrics for analyst review. WAPE and scale-free metrics stay diagnostic; Pareto does not override the official selected model or `forecast.csv`.")
             if not model_pareto_frontier.empty:
@@ -5111,66 +5449,78 @@ def build_streamlit_app() -> str:
                 render_dataframe(pareto_view[pareto_cols].head(1000), width="stretch", hide_index=True)
             else:
                 st.info("No Pareto frontier rows are available. Runs without backtest metrics produce an empty schema for this review lens.")
-            st.subheader("Focused future forecast")
-            focused_interval_models = [model for model in dedupe_models(focus_models) if selected_interval_levels(uid, model)]
-            if focused_interval_models:
-                st.caption(
-                    "Focused future forecast interval ownership: "
-                    + "; ".join(
-                        f"{model} ({', '.join(str(level) + '%' for level in selected_interval_levels(uid, model))})"
-                        for model in focused_interval_models
-                    )
-                    + ". Ribbons use the same color as their model line; the legend names each interval band. Point forecasts and bands come from the same `forecast_long.csv` model feed."
-                )
-            else:
-                st.caption("Focused future forecast has no interval-bearing selected models; lines show point forecasts only.")
-            render_plotly_chart(
-                forecast_chart(uid, show_all_models=False, champion=active_champion, focus_models=focus_models),
-                width="stretch",
-                key="investigation_forecast_chart",
-            )
             if not backtest.empty and "cutoff" in backtest.columns:
                 bt_uid = backtest[backtest["unique_id"].astype(str) == uid].copy()
-                investigation_cutoffs = sorted(bt_uid["cutoff"].dropna().unique())
-                if investigation_cutoffs:
-                    cutoff = st.selectbox(
-                        "Investigation CV cutoff",
-                        investigation_cutoffs,
-                        index=len(investigation_cutoffs) - 1,
-                        format_func=lambda value: str(pd.Timestamp(value).date()),
-                        key=f"model_investigation_cutoff_{uid}",
-                    )
-                    st.subheader("Focused rolling-origin window")
+                tournament_cutoffs = sorted(bt_uid["cutoff"].dropna().unique())
+                if tournament_cutoffs:
+                    state_key = f"model_tournament_cv_cutoff_idx_{uid}"
+                    slider_key = f"{state_key}_slider"
+                    if state_key not in st.session_state:
+                        st.session_state[state_key] = len(tournament_cutoffs) - 1
+                    st.session_state[state_key] = min(max(int(st.session_state[state_key]), 0), len(tournament_cutoffs) - 1)
+                    if slider_key not in st.session_state or int(st.session_state[slider_key]) != int(st.session_state[state_key]):
+                        st.session_state[slider_key] = int(st.session_state[state_key])
+
+                    def sync_tournament_cutoff_slider() -> None:
+                        st.session_state[state_key] = min(max(int(st.session_state[slider_key]), 0), len(tournament_cutoffs) - 1)
+
+                    st.subheader("Rolling-origin CV window player")
+                    st.caption("Use Previous/Next or drag the cutoff slider to step through all-model rolling-origin windows. Axes stay fixed by default so the train/cutoff/holdout movement is obvious.")
+                    control_a, control_b, control_c, control_d, control_e = st.columns([0.7, 2.4, 0.7, 1.1, 1.1])
+                    with control_a:
+                        if st.button("Previous", disabled=st.session_state[state_key] <= 0):
+                            st.session_state[state_key] -= 1
+                            st.rerun()
+                    with control_b:
+                        st.slider(
+                            "Cutoff index",
+                            min_value=0,
+                            max_value=len(tournament_cutoffs) - 1,
+                            key=slider_key,
+                            on_change=sync_tournament_cutoff_slider,
+                            help="Step through rolling-origin windows while axes remain stable.",
+                        )
+                    with control_c:
+                        if st.button("Next", disabled=st.session_state[state_key] >= len(tournament_cutoffs) - 1):
+                            st.session_state[state_key] += 1
+                            st.rerun()
+                    with control_d:
+                        fixed_x = st.toggle("Fixed date axis", value=True, key=f"model_tournament_fixed_x_{uid}")
+                        fixed_y = st.toggle("Fixed value axis", value=True, key=f"model_tournament_fixed_y_{uid}")
+                    with control_e:
+                        show_intervals = st.toggle("Show intervals", value=False, key=f"model_tournament_show_intervals_{uid}")
+                    cutoff = tournament_cutoffs[st.session_state[state_key]]
+                    st.markdown(f"**Window {st.session_state[state_key] + 1} of {len(tournament_cutoffs)}** | cutoff `{pd.Timestamp(cutoff).date()}`")
+                    st.subheader("All-model rolling-origin window")
                     render_plotly_chart(
                         backtest_chart(
                             uid,
                             cutoff,
-                            show_all_models=False,
-                            fixed_x=True,
-                            fixed_y=True,
-                            show_intervals=True,
+                            show_all_models=True,
+                            fixed_x=fixed_x,
+                            fixed_y=fixed_y,
+                            show_intervals=show_intervals,
                             champion=active_champion,
-                            focus_models=focus_models,
+                            focus_models=[],
                         ),
                         width="stretch",
-                        key="investigation_backtest_chart",
+                        key="model_tournament_backtest_chart",
                     )
                     if not model_window_metrics.empty:
                         metrics_view = model_window_metrics[
                             (model_window_metrics["unique_id"].astype(str) == uid) & (model_window_metrics["cutoff"] == cutoff)
                         ]
-                        if "model" in metrics_view.columns and focus_models:
-                            metrics_view = metrics_view[metrics_view["model"].astype(str).isin(dedupe_models(focus_models))]
-                        render_dataframe(metrics_view.sort_values("rmse").head(50), width="stretch", hide_index=True)
+                        sort_col = "rmse" if "rmse" in metrics_view.columns else winner_metric if winner_metric in metrics_view.columns else None
+                        if sort_col:
+                            metrics_view = metrics_view.sort_values(sort_col)
+                        render_dataframe(metrics_view.head(1000), width="stretch", hide_index=True)
                     if not backtest_long.empty:
                         view = backtest_long[(backtest_long["unique_id"].astype(str) == uid) & (backtest_long["cutoff"] == cutoff)]
-                        if "model" in view.columns and focus_models:
-                            view = view[view["model"].astype(str).isin(dedupe_models(focus_models))]
-                        render_dataframe(view.head(500), width="stretch", hide_index=True)
+                        render_dataframe(view.head(1000), width="stretch", hide_index=True)
                 else:
                     st.info("No rolling-origin windows are available for this series.")
             else:
-                st.info("No backtest predictions are available for focused model investigation.")
+                st.info("No backtest predictions are available for model tournament review.")
 
         if active_section == "Forecast review":
             st.subheader("Forecast model snapshot")
@@ -5185,14 +5535,14 @@ def build_streamlit_app() -> str:
                     render_dataframe(family_view, width="stretch", hide_index=True)
             champion_review_models = dedupe_models([active_champion, *top_weighted(uid, champion=active_champion)])
             st.subheader("Champion decision view")
-            st.caption("Active champion plus weighted alternatives. Independent of the Model investigation picker.")
+            st.caption("Active champion plus weighted alternatives. Independent of the tournament focus picker.")
             chart_interval_models = [model for model in champion_review_models if selected_interval_levels(uid, model)]
             chart_interval_levels = sorted({level for model in chart_interval_models for level in selected_interval_levels(uid, model)})
             if chart_interval_models:
                 st.caption(
                     f"Champion view includes interval bands for {len(chart_interval_models)} candidate model(s): "
                     f"{', '.join(str(level) + '%' for level in chart_interval_levels)} where available. "
-                    "Check the Prediction intervals tab for calibration and row-level review."
+                    "First-glance chart includes interval bands where available. Check the Prediction intervals tab for calibration and row-level review."
                 )
             else:
                 st.warning("No prediction interval bands were written for the champion decision view.")
@@ -5201,14 +5551,14 @@ def build_streamlit_app() -> str:
                 width="stretch",
                 key="forecast_context_chart",
             )
-            with st.expander("All candidate model spread", expanded=True):
-                st.caption("Every candidate forecast as context; highlighted lines show the active champion and weighted alternatives. Spread is disagreement, not uncertainty.")
+            with st.expander("All candidate model spread", expanded=False):
+                st.caption("Every candidate forecast as context; highlighted lines show the active champion and weighted alternatives. The faint gray spread is model disagreement, not calibrated uncertainty.")
                 render_plotly_chart(
                     forecast_chart(uid, show_all_models=True, champion=active_champion, focus_models=champion_review_models),
                     width="stretch",
                     key="forecast_all_models_chart",
                 )
-            st.caption("Use the Model investigation tab for the dedicated picker when you want custom model comparisons.")
+            st.caption("Use the Model tournament section for the full candidate field and interval-capable tournament view.")
             if not series_summary.empty:
                 with st.expander("Series summary", expanded=False):
                     render_dataframe(series_summary[series_summary["unique_id"].astype(str) == uid], width="stretch", hide_index=True)
@@ -5220,90 +5570,6 @@ def build_streamlit_app() -> str:
                 with st.expander("Borrowed-strength guidance", expanded=False):
                     st.caption("Borrowed-strength guidance is advisory only. It does not anchor, pool, or override the official selected forecast.")
                     render_dataframe(borrowed_strength_advisor[borrowed_strength_advisor["unique_id"].astype(str) == uid], width="stretch", hide_index=True)
-
-        if active_section == "CV window player":
-            if backtest.empty or "cutoff" not in backtest.columns:
-                st.warning("No backtest predictions are available.")
-            else:
-                bt_uid = backtest[backtest["unique_id"].astype(str) == uid].copy()
-                cutoffs = sorted(bt_uid["cutoff"].dropna().unique())
-                if not cutoffs:
-                    st.warning("No backtest windows for this series.")
-                else:
-                    state_key = f"cv_cutoff_idx_{uid}"
-                    slider_key = f"{state_key}_slider"
-                    if state_key not in st.session_state:
-                        st.session_state[state_key] = len(cutoffs) - 1
-                    st.session_state[state_key] = min(max(int(st.session_state[state_key]), 0), len(cutoffs) - 1)
-                    if slider_key not in st.session_state or int(st.session_state[slider_key]) != int(st.session_state[state_key]):
-                        st.session_state[slider_key] = int(st.session_state[state_key])
-
-                    def sync_cutoff_slider() -> None:
-                        st.session_state[state_key] = min(max(int(st.session_state[slider_key]), 0), len(cutoffs) - 1)
-
-                    st.subheader("Rolling-origin CV window player")
-                    st.caption("The x-axis and y-axis stay fixed by default so the training region, cutoff, and holdout window visibly slide through time.")
-                    st.caption("Use Previous/Next, drag the cutoff slider, or turn on Auto-advance to play through the backtest windows. Auto-advance loops until you switch it off.")
-                    control_a, control_b, control_c, control_d, control_e = st.columns([0.7, 2.4, 0.7, 1.1, 1.1])
-                    with control_a:
-                        if st.button("Previous", disabled=st.session_state[state_key] <= 0):
-                            st.session_state[state_key] -= 1
-                            st.rerun()
-                    with control_b:
-                        st.slider(
-                            "Cutoff index",
-                            min_value=0,
-                            max_value=len(cutoffs) - 1,
-                            key=slider_key,
-                            on_change=sync_cutoff_slider,
-                            help="Step through rolling-origin windows while axes remain stable.",
-                        )
-                    with control_c:
-                        if st.button("Next", disabled=st.session_state[state_key] >= len(cutoffs) - 1):
-                            st.session_state[state_key] += 1
-                            st.rerun()
-                    with control_d:
-                        fixed_x = st.toggle("Fixed date axis", value=True)
-                        fixed_y = st.toggle("Fixed value axis", value=True)
-                    with control_e:
-                        show_intervals = st.toggle("Show intervals", value=True)
-                        autoplay = st.toggle("Auto-advance", value=False, key=f"{state_key}_autoplay")
-                        autoplay_delay = st.slider("Delay seconds", 0.3, 3.0, 1.0, 0.1, key=f"{state_key}_delay")
-                    cutoff = cutoffs[st.session_state[state_key]]
-                    st.markdown(f"**Window {st.session_state[state_key] + 1} of {len(cutoffs)}** | cutoff `{pd.Timestamp(cutoff).date()}`")
-                    st.subheader("All backtested candidate models")
-                    render_plotly_chart(
-                        backtest_chart(
-                            uid,
-                            cutoff,
-                            show_all_models=show_context_models,
-                            fixed_x=fixed_x,
-                            fixed_y=fixed_y,
-                            show_intervals=show_intervals,
-                            champion=active_champion,
-                            focus_models=focus_models,
-                        ),
-                        width="stretch",
-                        key="backtest_context_chart",
-                    )
-                    if not model_window_metrics.empty:
-                        st.subheader("Window metrics for current cutoff")
-                        metrics_view = model_window_metrics[
-                            (model_window_metrics["unique_id"].astype(str) == uid) & (model_window_metrics["cutoff"] == cutoff)
-                        ]
-                        if "model" in metrics_view.columns and focus_models:
-                            metrics_view = metrics_view[metrics_view["model"].astype(str).isin(dedupe_models(focus_models))]
-                        render_dataframe(metrics_view.sort_values("rmse").head(50), width="stretch", hide_index=True)
-                    if not backtest_long.empty:
-                        view = backtest_long[(backtest_long["unique_id"].astype(str) == uid) & (backtest_long["cutoff"] == cutoff)]
-                        if "model" in view.columns and focus_models:
-                            view = view[view["model"].astype(str).isin(dedupe_models(focus_models))]
-                        render_dataframe(view.head(500), width="stretch", hide_index=True)
-                    if autoplay and len(cutoffs) > 1:
-                        st.caption(f"Auto-advance is active. Next window in {autoplay_delay:.1f}s.")
-                        time.sleep(float(autoplay_delay))
-                        st.session_state[state_key] = (st.session_state[state_key] + 1) % len(cutoffs)
-                        st.rerun()
 
         if active_section == "Prediction intervals":
             st.subheader("Prediction interval focus")
@@ -5385,7 +5651,7 @@ def build_streamlit_app() -> str:
                 if not investigation.empty:
                     render_dataframe(investigation, width="stretch", hide_index=True)
                 else:
-                    st.info("Pick models in the Model investigation tab to compare them here.")
+                    st.info("Pick models in Tournament focus controls to compare them here.")
                 st.subheader("Win rate vs benchmark")
                 if not model_win_rates.empty:
                     render_plotly_chart(benchmark_win_rate_chart(), width="stretch", key="benchmark_win_rate_chart")
@@ -5416,7 +5682,7 @@ def build_streamlit_app() -> str:
                 st.info("No residual test summary available.")
             st.subheader("Residual diagnostics by horizon")
             if not residual_diagnostics.empty:
-                st.caption("Residual views follow the models selected in the Model investigation tab. The ACF/white-noise panel uses the first investigated model so it remains readable.")
+                st.caption("Residual views follow the models selected in Tournament focus controls. The ACF/white-noise panel uses the first highlighted model so it remains readable.")
                 render_plotly_chart(residual_horizon_chart(uid, focus_models), width="stretch", key="residual_horizon_plot")
                 res_left, res_mid, res_right = st.columns(3)
                 with res_left:
@@ -5454,7 +5720,7 @@ def build_streamlit_app() -> str:
                 if "model" in explainability_view.columns and focus_models:
                     explainability_view = explainability_view[explainability_view["model"].astype(str).isin(dedupe_models(focus_models))]
                 if explainability_view.empty:
-                    st.info("No MLForecast feature importance rows match the currently investigated models.")
+                    st.info("No MLForecast feature importance rows match the currently highlighted models.")
                 else:
                     render_dataframe(explainability_view.sort_values(["model", "importance"], ascending=[True, False]), width="stretch", hide_index=True)
             else:
@@ -5676,7 +5942,7 @@ def build_streamlit_app() -> str:
                 if "model" in driver_explainability_view.columns and focus_models:
                     driver_explainability_view = driver_explainability_view[driver_explainability_view["model"].astype(str).isin(dedupe_models(focus_models))]
                 if driver_explainability_view.empty:
-                    st.info("No feature-importance rows match the currently investigated models.")
+                    st.info("No feature-importance rows match the currently highlighted models.")
                 else:
                     render_plotly_chart(feature_importance_chart(focus_models), width="stretch", key="driver_feature_importance_plot")
                     sort_columns = [col for col in ["model", "importance"] if col in driver_explainability_view.columns]
@@ -5721,14 +5987,81 @@ def build_streamlit_app() -> str:
                 st.subheader("Driver experiment summary")
                 render_dataframe(driver_experiment_summary, width="stretch", hide_index=True)
 
-        if active_section == "Forecast ledger":
-            st.subheader("Forecast ledger")
-            st.caption("Version tracker for official forecast locks, landed actual revisions, selected-lock deltas, and anomaly/business-model adjustment audits. The visuals come first; raw ledger tables are collapsed below for audit review.")
+        if active_section == "Ledger view":
+            st.subheader("Ledger view")
+            st.caption("Database-style browser for historical forecast versions, official forecast locks, landed actual revisions, selected-lock deltas, and anomaly/business-model adjustment audits.")
             if not ledger_context:
-                st.info("No ledger_context.json was found for this run. Register the run with `nixtla-scaffold ledger register` or pass `--ledger --forecast-key` when forecasting.")
+                st.info("No ledger_context.json was found for this run, so there are no registered versions to plot yet. The ledger feature is still available; this run just has not been registered into a historical ledger.")
+                forecast_key_hint = uid or str(manifest.get("forecast_key", "") or "My forecast")
+                register_command = (
+                    f'uv run nixtla-scaffold ledger register --ledger runs\\forecast_ledger '
+                    f'--run "{RUN_DIR}" --forecast-key "{forecast_key_hint}" --version-label "Initial forecast"'
+                )
+                forecast_with_ledger_command = (
+                    f'uv run nixtla-scaffold forecast --input data.csv --output runs\\next_forecast '
+                    f'--ledger runs\\forecast_ledger --forecast-key "{forecast_key_hint}" --version-label "Next refresh"'
+                )
+                actuals_command = (
+                    f'uv run nixtla-scaffold ledger actuals --ledger runs\\forecast_ledger '
+                    f'--input actuals.csv --forecast-key "{forecast_key_hint}"'
+                )
+                compare_command = (
+                    f'uv run nixtla-scaffold ledger compare --ledger runs\\forecast_ledger '
+                    f'--forecast-key "{forecast_key_hint}" --against-lock "Official lock"'
+                )
+                st.markdown(
+                    """
+                    <div class="decision-grid">
+                      <div class="decision-card">
+                        <div class="decision-label">Version history</div>
+                        <div class="decision-note">Register each refresh as a ledger version so the workbench can show how forecast lines trended over time.</div>
+                      </div>
+                      <div class="decision-card">
+                        <div class="decision-label">Official locks</div>
+                        <div class="decision-note">Lock submitted views so March lock, April lock, and leadership submissions remain filterable instead of overwritten.</div>
+                      </div>
+                      <div class="decision-card">
+                        <div class="decision-label">Performance tracking</div>
+                        <div class="decision-note">Ingest landed actuals, score forecast-vs-actuals, and compare latest refreshes against selected locks.</div>
+                      </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                st.subheader("Ledger table browser")
+                st.caption("No ledger database is attached yet. After export, this view becomes a table selector for the CSV mirror tables: forecast_versions, forecast_snapshot, official_forecast_locks, forecast_actuals, forecast_performance, forecast_version_deltas, forecast_adjustments, corrected_actuals, and regime_changes.")
+                st.subheader("Set it up")
+                st.caption("Use one of these paths to attach this run or future runs to a refreshable historical ledger.")
+                st.code(register_command, language="powershell")
+                st.caption("Or register automatically while creating the next run:")
+                st.code(forecast_with_ledger_command, language="powershell")
+                st.subheader("After actuals land")
+                st.code(actuals_command, language="powershell")
+                st.code(compare_command, language="powershell")
+                st.caption("Then run `uv run nixtla-scaffold ledger export --ledger runs\\forecast_ledger` if you want stable CSV mirrors for Power BI folder ingestion.")
+                st.subheader("Forecast operating loop")
+                st.markdown(
+                    """
+                    <div class="decision-grid">
+                      <div class="decision-card">
+                        <div class="decision-label">1. Register versions</div>
+                        <div class="decision-note">Every refresh becomes a preserved version with source metadata, notes, and model context.</div>
+                      </div>
+                      <div class="decision-card">
+                        <div class="decision-label">2. Lock submissions</div>
+                        <div class="decision-note">Official locks record the submitted planning view before later refreshes or corrected actuals arrive.</div>
+                      </div>
+                      <div class="decision-card">
+                        <div class="decision-label">3. Score drift</div>
+                        <div class="decision-note">Landed actuals create performance rows, selected-lock deltas, and call-up/call-down evidence over time.</div>
+                      </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
             else:
                 ledger_key = str(ledger_context.get("forecast_key", ""))
-                ledger_exports = Path(str(ledger_context.get("exports_path", "")))
+                ledger_exports = resolve_artifact_reference(ledger_context.get("exports_path", ""))
                 ledger_versions = read_csv_path(ledger_exports / "forecast_versions.csv")
                 ledger_snapshot = ledger_selected_snapshot(prep_dates(read_csv_path(ledger_exports / "forecast_snapshot.csv")))
                 ledger_locks = read_csv_path(ledger_exports / "official_forecast_locks.csv")
@@ -5755,7 +6088,31 @@ def build_streamlit_app() -> str:
                 ledger_adjustments = ledger_filter(ledger_adjustments)
                 ledger_corrected = ledger_filter(ledger_corrected)
                 ledger_regimes = ledger_filter(ledger_regimes)
-                ledger_history = ledger_latest_history_frame(ledger_revisions, ledger_corrected)
+                ledger_history = ledger_history_with_run_context(history, ledger_latest_history_frame(ledger_revisions, ledger_corrected))
+                ledger_table_paths = {
+                    "forecast_versions": ledger_exports / "forecast_versions.csv",
+                    "forecast_snapshot": ledger_exports / "forecast_snapshot.csv",
+                    "official_forecast_locks": ledger_exports / "official_forecast_locks.csv",
+                    "forecast_actual_revisions": ledger_exports / "forecast_actual_revisions.csv",
+                    "forecast_actuals": ledger_exports / "forecast_actuals.csv",
+                    "forecast_performance": ledger_exports / "forecast_performance.csv",
+                    "forecast_version_deltas": ledger_exports / "forecast_version_deltas.csv",
+                    "forecast_adjustments": ledger_exports / "forecast_adjustments.csv",
+                    "corrected_actuals": ledger_exports / "corrected_actuals.csv",
+                    "regime_changes": ledger_exports / "regime_changes.csv",
+                }
+                ledger_tables = {
+                    "forecast_versions": ledger_versions,
+                    "forecast_snapshot": ledger_snapshot,
+                    "official_forecast_locks": ledger_locks,
+                    "forecast_actual_revisions": ledger_revisions,
+                    "forecast_actuals": ledger_actuals,
+                    "forecast_performance": ledger_performance,
+                    "forecast_version_deltas": ledger_deltas,
+                    "forecast_adjustments": ledger_adjustments,
+                    "corrected_actuals": ledger_corrected,
+                    "regime_changes": ledger_regimes,
+                }
 
                 st.markdown(f"**Forecast key:** `{ledger_key or 'not recorded'}`")
                 if not ledger_versions.empty:
@@ -5766,6 +6123,39 @@ def build_streamlit_app() -> str:
                     c4.metric("Delta rows", len(ledger_deltas))
                 else:
                     st.warning(f"Ledger exports were not found at `{ledger_exports}` or contain no rows for this forecast key.")
+
+                st.subheader("Ledger table browser")
+                st.caption("Pick a ledger CSV mirror like a DB table, filter rows, and inspect the records that power the version, lock, actuals, performance, and adjustment views.")
+                table_names = list(ledger_tables)
+                selected_ledger_table = st.selectbox(
+                    "Ledger table",
+                    table_names,
+                    format_func=lambda name: f"{name} ({len(ledger_tables[name]):,} rows x {len(ledger_tables[name].columns) if not ledger_tables[name].empty else 0} cols)",
+                    key=f"ledger_table_browser_{ledger_key}",
+                )
+                browser_frame = ledger_tables[selected_ledger_table].copy()
+                browser_cols = st.columns(3)
+                if not browser_frame.empty and "unique_id" in browser_frame.columns:
+                    series_values = ["All", *sorted(browser_frame["unique_id"].dropna().astype(str).unique())]
+                    table_series = browser_cols[0].selectbox("Table series", series_values, key=f"ledger_table_series_{ledger_key}_{selected_ledger_table}")
+                    if table_series != "All":
+                        browser_frame = browser_frame[browser_frame["unique_id"].astype(str) == table_series]
+                if not browser_frame.empty and "version_label" in browser_frame.columns:
+                    version_values = sorted(browser_frame["version_label"].dropna().astype(str).unique())
+                    table_versions = browser_cols[1].multiselect(
+                        "Table versions",
+                        version_values,
+                        default=version_values[: min(len(version_values), 8)],
+                        key=f"ledger_table_versions_{ledger_key}_{selected_ledger_table}",
+                    )
+                    if table_versions:
+                        browser_frame = browser_frame[browser_frame["version_label"].astype(str).isin(table_versions)]
+                search_text = browser_cols[2].text_input("Search table", key=f"ledger_table_search_{ledger_key}_{selected_ledger_table}")
+                if search_text and not browser_frame.empty:
+                    search_frame = browser_frame.astype(str)
+                    browser_frame = browser_frame[search_frame.apply(lambda col: col.str.contains(search_text, case=False, regex=False, na=False)).any(axis=1)]
+                st.caption(f"Source: `{ledger_table_paths[selected_ledger_table]}`. Showing {len(browser_frame):,} filtered rows.")
+                render_dataframe(browser_frame.head(2000), width="stretch", hide_index=True)
 
                 series_options = ledger_available_series(ledger_snapshot, ledger_history, ledger_actuals, ledger_deltas, ledger_corrected)
                 if series_options:
@@ -5793,7 +6183,7 @@ def build_streamlit_app() -> str:
                     )
 
                 st.subheader("Forecasts as they moved over time")
-                st.caption("Latest actuals are a clean line; registered forecast versions are lines too. Official locks are emphasized, and non-lock refreshes use lighter shades so the version history is visible without overpowering the chart.")
+                st.caption("Historical and landed actuals are shown as the blue baseline. Registered forecast versions use one gold family: the latest version is darkest and older versions fade back with transparency.")
                 if not ledger_snapshot.empty:
                     render_plotly_chart(
                         ledger_forecast_evolution_chart(ledger_snapshot, ledger_actuals, ledger_history, ledger_locks, ledger_uid, selected_version_labels),
@@ -5802,6 +6192,15 @@ def build_streamlit_app() -> str:
                     )
                 else:
                     st.info("No forecast_snapshot.csv rows are available for this ledger key.")
+
+                st.subheader("Forecast-only zoom")
+                st.caption("Forecast paths plus actuals that overlap the forecast window only; no pre-window history, so the scale stays tight around version-to-version shifts.")
+                if not ledger_snapshot.empty:
+                    render_plotly_chart(
+                        ledger_forecast_only_chart(ledger_snapshot, ledger_actuals, ledger_history, ledger_locks, ledger_uid, selected_version_labels),
+                        width="stretch",
+                        key="ledger_forecast_only_zoom",
+                    )
 
                 status_text = "No selected-lock comparison has been exported yet."
                 if not ledger_deltas.empty and "status_label" in ledger_deltas.columns:
@@ -6616,9 +7015,11 @@ def _ledger_payload_from_directory(run_dir: Path) -> dict[str, Any]:
     exports_value = context.get("exports_path")
     exports_path = Path(str(exports_value)) if exports_value else Path()
     if exports_value and not exports_path.exists() and not exports_path.is_absolute():
-        candidate = run_dir / exports_path
-        if candidate.exists():
-            exports_path = candidate
+        for base in (run_dir, *run_dir.parents):
+            candidate = base / exports_path
+            if candidate.exists():
+                exports_path = candidate
+                break
     forecast_key = str(context.get("forecast_key", "") or "")
     tables: dict[str, list[dict[str, Any]]] = {}
     counts: dict[str, int] = {}
@@ -7142,8 +7543,8 @@ def _ledger_section(ledger: dict[str, Any]) -> str:
     )
     return f"""
     <section class="panel" style="margin-bottom:14px">
-      <h2>Forecast ledger</h2>
-      <p class="footnote">Static ledger preview embedded from <code>ledger_context.json</code> at report generation time. Use the Streamlit <strong>Forecast ledger</strong> section for interactive filtering, and rerun <code>nixtla-scaffold report --run</code> after new actuals, adjustments, comparisons, or exports.</p>
+      <h2>Ledger view</h2>
+      <p class="footnote">Static ledger preview embedded from <code>ledger_context.json</code> at report generation time. Use the Streamlit <strong>Ledger view</strong> section for interactive filtering, and rerun <code>nixtla-scaffold report --run</code> after new actuals, adjustments, comparisons, or exports.</p>
       <p class="footnote"><strong>Current run:</strong> {_display_value(version_label)} <span class="muted">({_esc(version_id)})</span>. <strong>Exports:</strong> <code>{_esc(exports_path)}</code></p>
       <div class="cards">{cards}</div>
       <h3 style="margin-top:16px">Registered versions</h3>

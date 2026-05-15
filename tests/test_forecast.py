@@ -2227,11 +2227,21 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert "table.terminal-dataframe" in streamlit_app
     assert '[data-testid="stExpander"] summary:hover' in streamlit_app
     assert "-webkit-text-fill-color: #eef4f7" in streamlit_app
-    assert '"Forecast ledger"' in streamlit_app
+    assert '"Ledger view"' in streamlit_app
     assert 'read_json("ledger_context.json")' in streamlit_app
+    assert "No ledger_context.json was found for this run" in streamlit_app
+    assert "Version history" in streamlit_app
     assert "official forecast locks" in streamlit_app
-    assert "Non-lock forecasts render as lighter lines" in streamlit_app
-    assert "Latest actuals are a clean line" in streamlit_app
+    assert "Ledger table browser" in streamlit_app
+    assert "selected_ledger_table" in streamlit_app
+    assert "Search table" in streamlit_app
+    assert "ledger_history_with_run_context" in streamlit_app
+    assert "the latest version is darkest and older versions fade back with transparency" in streamlit_app
+    assert "compact_ledger_version_name" in streamlit_app
+    assert "Forecast-only zoom" in streamlit_app
+    assert "ledger_forecast_only_chart" in streamlit_app
+    assert "Actuals in window" in streamlit_app
+    assert "Forecast paths plus actuals that overlap the forecast window only" in streamlit_app
     assert "Applying corrected/normalized history to a forecast requires an explicit user action" in streamlit_app
     assert "forecast snapshot" in streamlit_app
     assert 'data-baseweb="tab"' not in streamlit_app
@@ -2257,13 +2267,13 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert "Heuristic residual checks" in streamlit_app
     assert "structural-break checks" in streamlit_app
     assert "Champion controls" in streamlit_app
-    assert "Model investigation controls" in streamlit_app
+    assert "Tournament focus controls" in streamlit_app
     assert "Champion decision view" in streamlit_app
     assert "All candidate model spread" in streamlit_app
     assert "Champion view includes interval bands" in streamlit_app
-    assert "Focused future forecast interval ownership" in streamlit_app
-    assert "the legend names each interval band" in streamlit_app
-    assert "Point forecasts and bands come from the same `forecast_long.csv` model feed" in streamlit_app
+    assert "All interval-capable models - with prediction intervals" in streamlit_app
+    assert "every model with exported lo/hi interval columns" in streamlit_app
+    assert "show_intervals=False" in streamlit_app
     assert "future_model_frame" in streamlit_app
     assert "ordered_model_feed_columns" in streamlit_app
     assert "Model feed columns keep `yhat`, `yhat_lo_80`, `yhat_hi_80`, `yhat_lo_95`, and `yhat_hi_95` adjacent" in streamlit_app
@@ -2276,7 +2286,11 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert "cached_read_csv" in streamlit_app
     assert "Workbench nav" in streamlit_app
     assert "Single-section render" in streamlit_app
-    assert "Only the selected surface renders on rerun" in streamlit_app
+    assert "Only the selected surface renders" in streamlit_app
+    assert "Bloomberg compact data-first workbench" not in streamlit_app
+    assert "COMPACT_UX_MODE" not in streamlit_app
+    assert "--density-row-height" in streamlit_app
+    assert "CHART_HEIGHT_SCALE" in streamlit_app
     assert "forecast-console-topbar" in streamlit_app
     assert "workbench_tab_" in streamlit_app
     assert "section_key(section)" in streamlit_app
@@ -2307,17 +2321,25 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert "seasonality_decomposition_chart" in streamlit_app
     assert 'read_csv("seasonality_diagnostics.csv")' in streamlit_app
     assert 'read_csv("seasonality_decomposition.csv")' in streamlit_app
-    assert "CV window player" in streamlit_app
+    assert '"CV window player"' not in streamlit_app
+    assert "Rolling-origin CV window player" in streamlit_app
     assert "st.slider" in streamlit_app
     assert "st.session_state" in streamlit_app
     assert "slider_key = f\"{state_key}_slider\"" in streamlit_app
     assert "key=slider_key" in streamlit_app
-    assert "on_change=sync_cutoff_slider" in streamlit_app
-    assert "Auto-advance is active" in streamlit_app
-    assert "Auto-advance loops until you switch it off" in streamlit_app
+    assert "on_change=sync_tournament_cutoff_slider" in streamlit_app
+    assert "Use Previous/Next or drag the cutoff slider" in streamlit_app
+    assert "time.sleep(float(autoplay_delay))" not in streamlit_app
     assert "Every candidate forecast as context" in streamlit_app
     assert "--font-ui" in streamlit_app
     assert "--font-data" in streamlit_app
+    assert "compact_chart_label" in streamlit_app
+    assert "compact_chart_legend" in streamlit_app
+    assert "show_interval_legend = not show_all_models and len(display_models) == 1" in streamlit_app
+    assert "FONT_THEME_OPTIONS" in streamlit_app
+    assert "Font theme" in streamlit_app
+    assert "Settings / accessibility" in streamlit_app
+    assert "Trebuchet readable" in streamlit_app
     assert "Aptos" in streamlit_app
     assert "No prediction interval bands were written for the champion decision view" in streamlit_app
     assert "The faint gray spread is model disagreement, not calibrated uncertainty" in streamlit_app
@@ -2335,37 +2357,42 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert "MAE - typical absolute miss" in streamlit_app
     assert "WAPE - business percentage error" in streamlit_app
     assert "Absolute bias - avoid systematic over/under" in streamlit_app
-    assert '"Model investigation"' in streamlit_app
-    assert "Models to investigate" in streamlit_app
+    assert '"Model tournament"' in streamlit_app
+    assert "Model tournament" in streamlit_app
+    assert "Models to highlight" in streamlit_app
+    assert "All-model leaderboard" in streamlit_app
+    assert "All point forecasts - no prediction intervals" in streamlit_app
+    assert "All interval-capable models - with prediction intervals" in streamlit_app
+    assert "Inverse-error weighted ensemble" in streamlit_app
+    assert "WeightedEnsemble candidate present" in streamlit_app
+    assert "model_tournament_all_point_forecasts" in streamlit_app
+    assert "model_tournament_all_interval_forecasts" in streamlit_app
     assert "Model tradeoffs / Pareto frontier" in streamlit_app
     assert 'read_csv("model_pareto_frontier.csv")' in streamlit_app
     assert 'read_csv("feature_selection_receipts.csv")' in streamlit_app
     assert "Feature selection receipts" in streamlit_app
     assert "pareto_tradeoff_chart" in streamlit_app
-    assert "Menu labels use `#rank | model | engine`" in streamlit_app
-    assert "Model picker guide: rank, engine, and role" in streamlit_app
     assert "Rank comes from the current winner metric" in streamlit_app
-    assert "native guide table italicizes the Engine column" in streamlit_app
+    assert "Role flags show active champion" in streamlit_app
     assert "model_menu_label" in streamlit_app
     assert "model_menu_table" in streamlit_app
     assert "model_picker_guide_style" in streamlit_app
     assert "model_picker_guide_html" not in streamlit_app
     assert "Interval model picker guide: rank and engine" in streamlit_app
-    assert "Focused future forecast" in streamlit_app
-    assert "Focused rolling-origin window" in streamlit_app
+    assert "All-model rolling-origin window" in streamlit_app
     assert "best_model_for_scope" in streamlit_app
     assert "model_family" in streamlit_app
     assert 'focus_key = f"models_to_investigate_{uid}"' in streamlit_app
     assert "key=focus_key" in streamlit_app
     assert 'key="forecast_context_chart"' in streamlit_app
-    assert 'key="investigation_forecast_chart"' in streamlit_app
-    assert 'key="investigation_backtest_chart"' in streamlit_app
-    assert 'key="backtest_context_chart"' in streamlit_app
+    assert 'key="model_tournament_all_point_forecasts"' in streamlit_app
+    assert 'key="model_tournament_backtest_chart"' in streamlit_app
+    assert 'key="backtest_context_chart"' not in streamlit_app
     assert 'key="residual_horizon_plot"' in streamlit_app
     assert 'key="interval_calibration_plot"' in streamlit_app
-    focused_chart_idx = streamlit_app.rindex("show_all_models=False,")
-    autoplay_idx = streamlit_app.index("if autoplay and len(cutoffs) > 1:")
-    assert focused_chart_idx < autoplay_idx
+    focused_chart_idx = streamlit_app.index('key="model_tournament_all_point_forecasts"')
+    prediction_interval_idx = streamlit_app.index('if active_section == "Prediction intervals":')
+    assert focused_chart_idx < prediction_interval_idx
     assert "Fixed date axis" in streamlit_app
     assert "add_period_shading" in streamlit_app
     assert "add_cutoff_marker" in streamlit_app
