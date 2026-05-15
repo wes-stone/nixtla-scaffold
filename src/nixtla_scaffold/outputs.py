@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
 from typing import Any, Sequence
@@ -99,6 +100,23 @@ FEATURE_SELECTION_RECEIPT_COLUMNS = [
     "final_decision",
     "notes",
 ]
+BORROWED_STRENGTH_ADVISOR_COLUMNS = [
+    "unique_id",
+    "history_observations",
+    "history_depth_bucket",
+    "forecastability_score_0_100",
+    "trust_level",
+    "trust_score_0_100",
+    "hierarchy_level",
+    "hierarchy_depth",
+    "anchor_guidance",
+    "anchor_unique_id",
+    "anchor_type",
+    "threshold_basis",
+    "reason",
+    "recommended_next_action",
+    "advisory_only",
+]
 
 
 def write_run(run: ForecastRun, output_dir: str | Path) -> Path:
@@ -117,6 +135,7 @@ def write_run(run: ForecastRun, output_dir: str | Path) -> Path:
     build_backtest_long(run).to_csv(appendix / "backtest_long.csv", index=False)
     build_series_summary(run).to_csv(appendix / "series_summary.csv", index=False)
     build_series_features(run).to_csv(appendix / "series_features.csv", index=False)
+    build_borrowed_strength_advisor(run).to_csv(appendix / "borrowed_strength_advisor.csv", index=False)
     build_model_audit(run).to_csv(appendix / "model_audit.csv", index=False)
     build_model_win_rates(run).to_csv(appendix / "model_win_rates.csv", index=False)
     build_model_tradeoff_scores(run).to_csv(appendix / "model_tradeoff_scores.csv", index=False)
@@ -176,6 +195,11 @@ def write_run(run: ForecastRun, output_dir: str | Path) -> Path:
     if "hierarchy_depth" in run.forecast.columns:
         hierarchy_backtest = build_hierarchy_backtest_comparison(run)
         hierarchy_backtest.to_csv(audit / "hierarchy_backtest_comparison.csv", index=False)
+    write_training_progress_log(run, audit / "training_progress.jsonl")
+    (out / "control_pane_state.json").write_text(
+        _json(build_control_pane_state(run, out, selected_forecast=selected_forecast, forecast_long=forecast_long)),
+        encoding="utf-8",
+    )
     (out / "profile.json").write_text(_json(run.profile.to_dict()), encoding="utf-8")
     (out / "manifest.json").write_text(_json(run.manifest()), encoding="utf-8")
     (out / "diagnostics.json").write_text(_json(run.diagnostics()), encoding="utf-8")
@@ -189,6 +213,180 @@ def write_run(run: ForecastRun, output_dir: str | Path) -> Path:
     write_review_outputs(run, out, selected_forecast=selected_forecast, forecast_long=forecast_long)
     write_operational_receipts(out)
     return out
+
+
+def build_control_pane_state(
+    run: ForecastRun,
+    output_dir: str | Path,
+    *,
+    selected_forecast: pd.DataFrame | None = None,
+    forecast_long: pd.DataFrame | None = None,
+) -> dict[str, Any]:
+    """Compact human/agent handoff for the generated Streamlit control pane."""
+
+    out = Path(output_dir)
+    selected = selected_forecast if selected_forecast is not None else build_selected_forecast(run, build_forecast_long(run))
+    long_forecast = forecast_long if forecast_long is not None else build_forecast_long(run)
+    diagnostics = run.diagnostics()
+    spec = run.spec.to_dict()
+    policy_resolution = run.model_policy_resolution if isinstance(run.model_policy_resolution, dict) else {}
+    trust_summary = build_trust_summary(run)
+    model_audit = build_model_audit(run)
+    smooth_status = _family_status(policy_resolution, "smooth")
+    warnings = diagnostics.get("warnings") or run.warnings
+    if not isinstance(warnings, list):
+        warnings = [warnings]
+    feature_map = [
+        {
+            "mechanism": "Standard/light model ladder",
+            "status": policy_resolution.get("model_policy", spec.get("model_policy", "unknown")),
+            "artifact": "manifest.json -> model_policy_resolution",
+        },
+        {
+            "mechanism": "Smooth ADAM family",
+            "status": smooth_status,
+            "artifact": "manifest.json -> model_policy_resolution.family=smooth",
+        },
+        {
+            "mechanism": "BYO Excel comparison",
+            "status": "not present",
+            "artifact": "byo_model_manifest.json / forecast_comparison.csv",
+        },
+        {
+            "mechanism": "Hierarchy coherence",
+            "status": "available"
+            if (
+                "hierarchy_depth" in run.forecast.columns
+                or not run.hierarchy_reconciliation.empty
+                or not run.hierarchy_reconciliation_comparison.empty
+            )
+            else "not present",
+            "artifact": "appendix/hierarchy_reconciliation.csv / appendix/hierarchy_rollup.csv",
+        },
+        {
+            "mechanism": "Drivers and assumptions",
+            "status": "available" if (run.spec.events or run.spec.regressors or not run.driver_availability_audit.empty) else "not present",
+            "artifact": "appendix/scenario_assumptions.csv / appendix/driver_availability_audit.csv",
+        },
+        {
+            "mechanism": "Borrowed-strength advisor",
+            "status": "available",
+            "artifact": "appendix/borrowed_strength_advisor.csv",
+        },
+        {
+            "mechanism": "Custom or finance challengers",
+            "status": "available" if (run.spec.custom_models or not run.custom_model_contracts.empty) else "not present",
+            "artifact": "appendix/custom_model_contracts.csv",
+        },
+        {
+            "mechanism": "Forecast ledger",
+            "status": "available" if (out / "ledger_context.json").exists() else "not present",
+            "artifact": "ledger_context.json",
+        },
+    ]
+    return {
+        "schema_version": "nixtla_scaffold.control_pane.v1",
+        "generated_at_utc": _utc_now_iso(),
+        "run_dir": str(out),
+        "generated_command": _regenerated_forecast_command(spec, out),
+        "overview": {
+            "series_count": _series_count(run.history),
+            "forecast_rows": int(len(selected)),
+            "all_model_rows": int(len(long_forecast)),
+            "history_start": _date_min(run.history.get("ds")),
+            "history_end": _date_max(run.history.get("ds")),
+            "forecast_start": _date_min(selected.get("ds")),
+            "forecast_end": _date_max(selected.get("ds")),
+            "horizon": spec.get("horizon"),
+            "freq": spec.get("freq") or run.profile.to_dict().get("freq"),
+            "selected_models": _selected_model_records(run.model_selection),
+            "trust_counts": _control_trust_counts(trust_summary),
+            "warning_count": len([warning for warning in warnings if str(warning).strip()]),
+        },
+        "feature_map": feature_map,
+        "model_policy_resolution": policy_resolution,
+        "top_model_audit": _top_model_audit_records(model_audit),
+        "warnings": [str(warning) for warning in warnings if str(warning).strip()],
+        "artifacts": {
+            "forecast": "forecast.csv",
+            "forecast_long": "appendix/forecast_long.csv",
+            "backtest_long": "appendix/backtest_long.csv",
+            "model_audit": "appendix/model_audit.csv",
+            "trust_summary": "appendix/trust_summary.csv",
+            "borrowed_strength_advisor": "appendix/borrowed_strength_advisor.csv",
+            "training_progress": "audit/training_progress.jsonl",
+            "manifest": "manifest.json",
+            "diagnostics": "diagnostics.json",
+            "streamlit_app": "streamlit_app.py",
+            "launcher": "run_streamlit.ps1",
+        },
+    }
+
+
+def write_training_progress_log(run: ForecastRun, output_path: str | Path) -> Path:
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows = build_training_progress_rows(run)
+    text = "\n".join(json.dumps(row, default=str) for row in rows)
+    path.write_text(text + ("\n" if text else ""), encoding="utf-8")
+    return path
+
+
+def build_training_progress_rows(run: ForecastRun) -> list[dict[str, Any]]:
+    generated_at = _utc_now_iso()
+    rows: list[dict[str, Any]] = []
+    policy_resolution = run.model_policy_resolution if isinstance(run.model_policy_resolution, dict) else {}
+    for family in policy_resolution.get("families", []) or []:
+        if not isinstance(family, dict):
+            continue
+        status = "finished" if bool(family.get("ran")) else ("skipped" if bool(family.get("requested")) else "not_requested")
+        rows.append(
+            {
+                "generated_at_utc": generated_at,
+                "phase": "model_policy",
+                "event": f"family_{status}",
+                "status": status,
+                "family": family.get("family", ""),
+                "model": "",
+                "unique_id": "",
+                "reason": family.get("reason_if_not_ran", ""),
+                "contributed_models": family.get("contributed_models", []),
+            }
+        )
+    audit = build_model_audit(run)
+    if not audit.empty:
+        for record in audit.to_dict(orient="records"):
+            rows.append(
+                {
+                    "generated_at_utc": generated_at,
+                    "phase": "model_selection",
+                    "event": "candidate_scored",
+                    "status": "selected" if bool(record.get("is_selected_model", False)) else "finished",
+                    "family": record.get("family") or model_family(str(record.get("model", ""))),
+                    "model": record.get("model", ""),
+                    "unique_id": record.get("unique_id", ""),
+                    "rmse": record.get("rmse", ""),
+                    "mae": record.get("mae", ""),
+                    "cv_windows": record.get("cv_windows", ""),
+                    "selection_horizon": record.get("selection_horizon", ""),
+                    "reason": record.get("selection_reason", ""),
+                }
+            )
+    for warning in run.warnings[:50]:
+        if str(warning).strip():
+            rows.append(
+                {
+                    "generated_at_utc": generated_at,
+                    "phase": "run_warning",
+                    "event": "warning_recorded",
+                    "status": "warn",
+                    "family": "",
+                    "model": "",
+                    "unique_id": "",
+                    "reason": str(warning),
+                }
+            )
+    return rows
 
 
 def write_workbook(run: ForecastRun, output_path: str | Path) -> Path:
@@ -226,6 +424,7 @@ def write_workbook(run: ForecastRun, output_path: str | Path) -> Path:
         build_backtest_long(run).to_excel(writer, sheet_name="Backtest Long", index=False)
         build_series_summary(run).to_excel(writer, sheet_name="Series Summary", index=False)
         build_series_features(run).to_excel(writer, sheet_name="Series Features", index=False)
+        build_borrowed_strength_advisor(run).to_excel(writer, sheet_name="Borrowed Strength", index=False)
         build_model_audit(run).to_excel(writer, sheet_name="Model Audit", index=False)
         build_model_win_rates(run).to_excel(writer, sheet_name="Model Win Rates", index=False)
         build_model_tradeoff_scores(run).to_excel(writer, sheet_name="Model Tradeoffs", index=False)
@@ -291,6 +490,7 @@ def write_review_outputs(
 
     selected = selected_forecast.copy() if selected_forecast is not None else build_selected_forecast(run, forecast_long)
     trust_summary = build_trust_summary(run)
+    borrowed_strength = build_borrowed_strength_advisor(run)
     model_audit = build_model_audit(run)
     forecast_review = build_review_forecast(selected)
     decision_summary = build_review_decision_summary(trust_summary)
@@ -303,6 +503,7 @@ def write_review_outputs(
     leaderboard_path = appendix_dir / "model_leaderboard.csv"
     brief_path = appendix_dir / "forecast_brief.csv"
     guide_path = appendix_dir / "artifact_guide.csv"
+    borrowed_path = appendix_dir / "borrowed_strength_advisor.csv"
     workbook_path = review_dir / "forecast_review.xlsx"
     index_path = review_dir / "index.html"
     open_first_path = out / "OPEN_ME_FIRST.html"
@@ -312,6 +513,7 @@ def write_review_outputs(
     model_leaderboard.to_csv(leaderboard_path, index=False)
     forecast_brief.to_csv(brief_path, index=False)
     artifact_guide.to_csv(guide_path, index=False)
+    borrowed_strength.to_csv(borrowed_path, index=False)
     write_review_workbook(
         workbook_path,
         forecast_brief=forecast_brief,
@@ -319,6 +521,7 @@ def write_review_outputs(
         decision_summary=decision_summary,
         model_leaderboard=model_leaderboard,
         artifact_guide=artifact_guide,
+        borrowed_strength=borrowed_strength,
     )
 
     open_first_path.write_text(
@@ -364,6 +567,7 @@ def write_review_outputs_from_directory(run_dir: str | Path) -> dict[str, Path]:
     selected = _read_review_frame(out / "forecast.csv")
     trust_summary = _read_review_frame(out / "trust_summary.csv")
     model_audit = _read_review_frame(out / "model_audit.csv")
+    borrowed_strength = _read_review_frame(out / APPENDIX_DIR / "borrowed_strength_advisor.csv")
     manifest = _read_review_json(out / "manifest.json")
     diagnostics = _read_review_json(out / "diagnostics.json")
 
@@ -387,6 +591,8 @@ def write_review_outputs_from_directory(run_dir: str | Path) -> dict[str, Path]:
     model_leaderboard.to_csv(leaderboard_path, index=False)
     forecast_brief.to_csv(brief_path, index=False)
     artifact_guide.to_csv(guide_path, index=False)
+    borrowed_path = appendix_dir / "borrowed_strength_advisor.csv"
+    borrowed_strength.to_csv(borrowed_path, index=False)
     write_review_workbook(
         workbook_path,
         forecast_brief=forecast_brief,
@@ -394,6 +600,7 @@ def write_review_outputs_from_directory(run_dir: str | Path) -> dict[str, Path]:
         decision_summary=decision_summary,
         model_leaderboard=model_leaderboard,
         artifact_guide=artifact_guide,
+        borrowed_strength=borrowed_strength,
     )
     open_first_path.write_text(
         _review_index_html(
@@ -437,6 +644,7 @@ def write_review_workbook(
     decision_summary: pd.DataFrame,
     model_leaderboard: pd.DataFrame,
     artifact_guide: pd.DataFrame,
+    borrowed_strength: pd.DataFrame | None = None,
 ) -> Path:
     """Write a compact workbook intended for standard forecast review, not full audit replay."""
 
@@ -451,6 +659,8 @@ def write_review_workbook(
         decision_summary.to_excel(writer, sheet_name="Decision Summary", index=False)
         model_leaderboard.to_excel(writer, sheet_name="Model Leaderboard", index=False)
         watchouts.to_excel(writer, sheet_name="Watchouts", index=False)
+        if borrowed_strength is not None and not borrowed_strength.empty:
+            borrowed_strength.to_excel(writer, sheet_name="Borrowed Strength", index=False)
         artifact_guide.to_excel(writer, sheet_name="File Guide", index=False)
     return path
 
@@ -639,9 +849,13 @@ def build_review_artifact_guide() -> pd.DataFrame:
         ("appendix", 1, "output/appendix/model_leaderboard.csv", "Small top-model view behind the workbook leaderboard."),
         ("appendix", 2, "output/appendix/forecast_brief.csv", "One-page run brief used by OPEN_ME_FIRST.html and the workbook."),
         ("appendix", 3, "output/appendix/artifact_guide.csv", "This file map."),
+        ("appendix", 4, "appendix/borrowed_strength_advisor.csv", "Advisory sparse-series guidance for parent anchoring, reference-class review, or independent treatment."),
         ("agent", 1, "llm_context.json", "Full LLM handoff packet with guardrails and all major context."),
-        ("agent", 2, "forecast_long.csv", "All future model/date rows for agents, dashboards, and model feeds."),
-        ("agent", 3, "backtest_long.csv", "All rolling-origin validation rows for programmatic inspection."),
+        ("agent", 2, "control_pane_state.json", "Compact control-pane handoff with current levers, feature map, warnings, selected models, and copyable CLI command."),
+        ("agent", 3, "audit/training_progress.jsonl", "Append-only-shaped progress evidence for family availability, scored candidates, selected models, and warnings."),
+        ("agent", 4, "appendix/borrowed_strength_advisor.csv", "Borrowed-strength advisory labels for sparse or low-trust series; never a hidden model override."),
+        ("agent", 5, "forecast_long.csv", "All future model/date rows for agents, dashboards, and model feeds."),
+        ("agent", 6, "backtest_long.csv", "All rolling-origin validation rows for programmatic inspection."),
         ("audit", 1, "audit/all_models.csv", "Every candidate model forecast for transparency."),
         ("audit", 2, "audit/backtest_metrics.csv", "Raw model CV metrics behind selection."),
         ("audit", 3, "audit/seasonality_diagnostics.csv", "Cycle-count and seasonality credibility checks."),
@@ -687,9 +901,12 @@ def _update_manifest_review_outputs(path: Path) -> None:
             "output_model_leaderboard": "output/appendix/model_leaderboard.csv",
             "output_forecast_brief": "output/appendix/forecast_brief.csv",
             "output_artifact_guide": "output/appendix/artifact_guide.csv",
+            "output_borrowed_strength_advisor": "output/appendix/borrowed_strength_advisor.csv",
             "streamlit_requirements": "streamlit_requirements.txt",
             "streamlit_launcher_ps1": "run_streamlit.ps1",
             "streamlit_launcher_cmd": "run_streamlit.cmd",
+            "control_pane_state": "control_pane_state.json",
+            "training_progress": "audit/training_progress.jsonl",
         }
     )
     path.write_text(_json(manifest), encoding="utf-8")
@@ -715,6 +932,96 @@ def _date_max(series: pd.Series | None) -> str:
         return ""
     values = pd.to_datetime(series, errors="coerce").dropna()
     return values.max().date().isoformat() if not values.empty else ""
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _family_status(policy_resolution: dict[str, Any], family_name: str) -> str:
+    for row in policy_resolution.get("families", []) or []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("family", "")).lower() != family_name.lower():
+            continue
+        if bool(row.get("ran")):
+            return "ran"
+        if bool(row.get("requested")):
+            return str(row.get("reason_if_not_ran") or "skipped")
+        return "not requested"
+    return "not recorded"
+
+
+def _control_trust_counts(trust_summary: pd.DataFrame) -> dict[str, int]:
+    if trust_summary.empty or "trust_level" not in trust_summary.columns:
+        return {}
+    counts = trust_summary["trust_level"].astype(str).str.lower().value_counts()
+    return {str(level): int(count) for level, count in counts.items()}
+
+
+def _selected_model_records(selection: pd.DataFrame) -> list[dict[str, Any]]:
+    if selection.empty:
+        return []
+    columns = [col for col in ["unique_id", "model", "selection_reason", "selection_horizon", "requested_horizon", "cv_windows"] if col in selection.columns]
+    return selection[columns].to_dict(orient="records") if columns else []
+
+
+def _top_model_audit_records(model_audit: pd.DataFrame) -> list[dict[str, Any]]:
+    if model_audit.empty:
+        return []
+    columns = [
+        col
+        for col in [
+            "unique_id",
+            "model",
+            "family",
+            "is_selected_model",
+            "rmse",
+            "mae",
+            "wape",
+            "cv_windows",
+            "selection_horizon",
+            "interval_status",
+        ]
+        if col in model_audit.columns
+    ]
+    frame = model_audit[columns].head(25) if columns else model_audit.head(25)
+    return frame.to_dict(orient="records")
+
+
+def _quote_cli_arg(value: Any) -> str:
+    text = str(value)
+    if not text:
+        return '""'
+    if any(ch.isspace() for ch in text) or any(ch in text for ch in ['"', "'", "$", "&", "|", "<", ">"]):
+        return '"' + text.replace('"', '`"') + '"'
+    return text
+
+
+def _regenerated_forecast_command(spec: dict[str, Any], output_dir: Path) -> str:
+    parts = ["uv", "run", "nixtla-scaffold", "forecast", "--input", "<input.csv>"]
+    horizon = spec.get("horizon")
+    if horizon:
+        parts.extend(["--horizon", str(horizon)])
+    freq = spec.get("freq")
+    if freq:
+        parts.extend(["--freq", str(freq)])
+    policy = spec.get("model_policy")
+    if policy:
+        parts.extend(["--model-policy", str(policy)])
+    levels = spec.get("levels") or []
+    for level in levels:
+        parts.extend(["--levels", str(level)])
+    for model in spec.get("model_allowlist") or []:
+        parts.extend(["--model", str(model)])
+    if spec.get("target_transform") and spec.get("target_transform") != "none":
+        parts.extend(["--target-transform", str(spec.get("target_transform"))])
+    if spec.get("normalization_factor_col"):
+        parts.extend(["--normalization-factor-col", str(spec.get("normalization_factor_col"))])
+    if spec.get("hierarchy_reconciliation") and spec.get("hierarchy_reconciliation") != "none":
+        parts.extend(["--hierarchy-reconciliation", str(spec.get("hierarchy_reconciliation"))])
+    parts.extend(["--output", str(output_dir)])
+    return " ".join(_quote_cli_arg(part) for part in parts)
 
 
 def _review_index_html(
@@ -1379,6 +1686,171 @@ def build_series_features(run: ForecastRun) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
+
+
+def build_borrowed_strength_advisor(run: ForecastRun) -> pd.DataFrame:
+    """Advisory sparse-series guidance; never changes model selection or forecasts."""
+
+    features = build_series_features(run)
+    if features.empty:
+        return pd.DataFrame(columns=BORROWED_STRENGTH_ADVISOR_COLUMNS)
+
+    trust = build_trust_summary(run)
+    trust_map: dict[str, dict[str, Any]] = {}
+    if not trust.empty and "unique_id" in trust.columns:
+        trust_map = {
+            str(row["unique_id"]): row.to_dict()
+            for _, row in trust.iterrows()
+            if str(row.get("unique_id", "")).strip()
+        }
+    hierarchy_map = _hierarchy_metadata_map(run)
+    horizon = max(int(run.spec.horizon), 1)
+    season_length = int(run.spec.season_length or run.profile.season_length or 1)
+    thin_threshold = max(6, horizon * 2)
+    seasonal_threshold = season_length * 2 if season_length > 1 else thin_threshold
+    rows: list[dict[str, Any]] = []
+    for _, feature_row in features.iterrows():
+        uid = str(feature_row.get("unique_id", ""))
+        observations = int(_safe_float(feature_row.get("history_observations")) or 0)
+        bucket = str(feature_row.get("history_depth_bucket") or "")
+        score = _safe_float(feature_row.get("forecastability_score_0_100"))
+        trust_row = trust_map.get(uid, {})
+        trust_level = str(trust_row.get("trust_level") or "Unknown")
+        trust_score = _safe_float(trust_row.get("trust_score_0_100"))
+        metadata = hierarchy_map.get(uid, {})
+        parent_id = str(metadata.get("parent_unique_id") or "")
+        depth = _int_or_none(metadata.get("hierarchy_depth"))
+        hierarchy_level = str(metadata.get("hierarchy_level") or "")
+        guidance, anchor_id, anchor_type, reason, action = _borrowed_strength_guidance(
+            unique_id=uid,
+            observations=observations,
+            history_bucket=bucket,
+            forecastability_score=score,
+            trust_level=trust_level,
+            parent_id=parent_id,
+            hierarchy_depth=depth,
+            horizon=horizon,
+            season_length=season_length,
+        )
+        rows.append(
+            {
+                "unique_id": uid,
+                "history_observations": observations,
+                "history_depth_bucket": bucket,
+                "forecastability_score_0_100": score,
+                "trust_level": trust_level,
+                "trust_score_0_100": trust_score,
+                "hierarchy_level": hierarchy_level,
+                "hierarchy_depth": depth,
+                "anchor_guidance": guidance,
+                "anchor_unique_id": anchor_id,
+                "anchor_type": anchor_type,
+                "threshold_basis": (
+                    f"thin if observations < max(6, 2*horizon)={thin_threshold}; "
+                    f"seasonal review if observations < 2*season_length={seasonal_threshold}; "
+                    "Low trust or forecastability < 45 triggers reference-class review"
+                ),
+                "reason": reason,
+                "recommended_next_action": action,
+                "advisory_only": True,
+            }
+        )
+    return pd.DataFrame(rows, columns=BORROWED_STRENGTH_ADVISOR_COLUMNS).sort_values(
+        ["anchor_guidance", "history_observations", "unique_id"],
+        ascending=[True, True, True],
+    ).reset_index(drop=True)
+
+
+def _hierarchy_metadata_map(run: ForecastRun) -> dict[str, dict[str, Any]]:
+    source = run.history if "hierarchy_depth" in run.history.columns else run.forecast
+    if source.empty or "hierarchy_depth" not in source.columns or "unique_id" not in source.columns:
+        return {}
+    metadata_cols = [col for col in ["unique_id", "hierarchy_level", "hierarchy_depth"] if col in source.columns]
+    metadata = source[metadata_cols].copy()
+    metadata["unique_id"] = metadata["unique_id"].astype(str)
+    metadata["hierarchy_depth"] = pd.to_numeric(metadata["hierarchy_depth"], errors="coerce")
+    metadata = metadata.dropna(subset=["unique_id", "hierarchy_depth"]).drop_duplicates("unique_id")
+    root_ids = metadata.loc[metadata["hierarchy_depth"] == 0, "unique_id"].dropna().astype(str).unique()
+    root_id = root_ids[0] if len(root_ids) else "Total"
+    rows: dict[str, dict[str, Any]] = {}
+    for _, row in metadata.iterrows():
+        item = row.to_dict()
+        depth = _int_or_none(item.get("hierarchy_depth"))
+        parent_id = ""
+        if depth is not None and depth > 0:
+            try:
+                parent_id = _hierarchy_parent_id(pd.Series(item), root_id)
+            except ValueError:
+                parent_id = ""
+        item["parent_unique_id"] = parent_id
+        rows[str(item["unique_id"])] = item
+    return rows
+
+
+def _borrowed_strength_guidance(
+    *,
+    unique_id: str,
+    observations: int,
+    history_bucket: str,
+    forecastability_score: float | None,
+    trust_level: str,
+    parent_id: str,
+    hierarchy_depth: int | None,
+    horizon: int,
+    season_length: int,
+) -> tuple[str, str, str, str, str]:
+    is_thin = history_bucket == "thin" or observations < max(6, horizon * 2)
+    lacks_seasonal_cycles = season_length > 1 and observations < season_length * 2
+    low_forecastability = forecastability_score is not None and forecastability_score < 45
+    low_trust = trust_level.lower() == "low"
+    has_parent = bool(parent_id)
+    if is_thin and has_parent:
+        return (
+            "parent_anchored",
+            parent_id,
+            "hierarchy_parent",
+            f"{unique_id} has {observations} observations, below the thin-history threshold, and a hierarchy parent is available.",
+            "Review child share-of-parent stability and compare independent forecasts against bottom-up/top-down reconciliation before using the child as a standalone planning row.",
+        )
+    if (is_thin or low_trust or low_forecastability) and has_parent:
+        return (
+            "parent_anchored",
+            parent_id,
+            "hierarchy_parent",
+            f"{unique_id} has sparse or low-trust evidence and can borrow context from parent {parent_id}.",
+            "Use the parent trend as a reference-class sanity check; keep the official forecast unchanged unless a governed reconciliation or scenario is explicitly selected.",
+        )
+    if is_thin or low_trust or low_forecastability:
+        return (
+            "analog_candidate",
+            "",
+            "reference_class",
+            f"{unique_id} lacks enough independent evidence for a high-confidence standalone story.",
+            "Search for analogous series with similar product, geography, lifecycle, or demand shape; use the result as advisory context, not a hidden model input.",
+        )
+    if lacks_seasonal_cycles:
+        return (
+            "panel_pool_review_candidate",
+            parent_id if has_parent else "",
+            "hierarchy_parent" if has_parent else "panel_pool",
+            f"{unique_id} has {observations} observations, which is short of two complete seasonal cycles.",
+            "Treat seasonality as unvalidated; review pooled panel or parent-level seasonal evidence before making a seasonal claim.",
+        )
+    if hierarchy_depth is not None and hierarchy_depth > 0 and has_parent:
+        return (
+            "independent_with_parent_check",
+            parent_id,
+            "hierarchy_parent",
+            f"{unique_id} has enough history for independent selection, but parent coherence still matters for planning.",
+            "Use the independent champion as the statistical baseline and inspect hierarchy coherence/reconciliation artifacts if parent-child totals must tie.",
+        )
+    return (
+        "independent",
+        "",
+        "none",
+        f"{unique_id} has enough standalone evidence for the normal model tournament.",
+        "Review trust, horizon, residual, interval, and driver diagnostics; no borrowed-strength action is recommended by this advisory screen.",
+    )
 
 
 def _safe_fraction(numerator: float, denominator: float) -> float | None:

@@ -4,19 +4,22 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
+import importlib.metadata as metadata
 import warnings
 
 import numpy as np
 import pandas as pd
 
 from nixtla_scaffold.drivers import DriverFeatureBundle, prepare_mlforecast_regressor_features
-from nixtla_scaffold.model_families import STATS_SKLEARN_MODELS, model_family
+from nixtla_scaffold.model_families import SMOOTH_MODELS, STATS_SKLEARN_MODELS, model_family
 from nixtla_scaffold.schema import DataProfile, ForecastSpec
 
 
 MLFORECAST_MIN_OBS = 30
-MLFORECAST_AUTO_MIN_OBS = 8
+MLFORECAST_LIGHT_MIN_OBS = 8
+SMOOTH_MIN_OBS = 6
 MSTL_FEATURE_ARIMA_MODEL = "AutoARIMA_MSTLFeatures"
+SMOOTH_MODEL_ORDER = ("SmoothADAM_ZXZ", "SmoothADAM_CCC", "SmoothADAM_CustomPool")
 
 
 @dataclass(frozen=True)
@@ -61,15 +64,16 @@ def forecast_with_policy(
     if spec.model_policy == "mlforecast":
         return _with_policy_resolution(forecast_with_mlforecast(history, profile, spec), profile, spec)
 
-    if spec.model_allowlist and spec.model_policy in ("auto", "all") and not _allowlist_requests_classical(spec):
-        return _run_mlforecast_only_allowlist(history, profile, spec)
+    if spec.model_allowlist and spec.model_policy in ("standard", "light", "all") and not _allowlist_requests_classical(spec):
+        return _run_nonclassical_only_allowlist(history, profile, spec)
 
-    # For "auto", "statsforecast", or "all": run statsforecast first
+    # For standard/light/statsforecast/all, run StatsForecast first.
     sf_result = _try_statsforecast(history, profile, spec)
 
-    # For "all" or "auto" with enough data, also run MLForecast and merge
+    # For standard/light/all with enough data, also run MLForecast and merge.
     ml_override: dict[str, Any] | None = None
-    if spec.model_policy in ("all", "auto"):
+    smooth_override: dict[str, Any] | None = None
+    if spec.model_policy in ("all", "standard", "light"):
         if spec.model_allowlist and not _allowlist_requests_family(spec, "mlforecast"):
             ml_override = {
                 "eligible": False,
@@ -78,7 +82,7 @@ def forecast_with_policy(
                 "contributed_models": [],
             }
         else:
-            feasibility = _mlforecast_auto_feasibility(profile, spec)
+            feasibility = _mlforecast_light_feasibility(profile, spec)
             if not feasibility.eligible:
                 ml_override = {
                     "eligible": False,
@@ -127,7 +131,56 @@ def forecast_with_policy(
                         ml_override = {"eligible": True, "ran": False, "reason_if_not_ran": reason, "contributed_models": []}
                         sf_result = _append_warnings(sf_result, f"MLForecast returned {ml_result.engine}; continuing without MLForecast")
 
-    return _with_policy_resolution(sf_result, profile, spec, {"mlforecast": ml_override} if ml_override else None)
+    if spec.model_policy in ("all", "standard") or _allowlist_explicitly_requests_family(spec, "smooth"):
+        smooth_override = _smooth_policy_override_for_default_run(profile, spec)
+        if smooth_override is not None and _allowlist_explicitly_requests_family(spec, "smooth"):
+            _raise_for_smooth_allowlist_override(smooth_override, spec)
+        if smooth_override is None:
+            try:
+                smooth_result = forecast_with_smooth(history, profile, spec)
+            except ImportError as exc:
+                smooth_override = {
+                    "eligible": False,
+                    "ran": False,
+                    "reason_if_not_ran": "not_installed_or_not_enabled",
+                    "contributed_models": [],
+                }
+                if _allowlist_explicitly_requests_family(spec, "smooth"):
+                    raise ImportError(
+                        "model_allowlist requested smooth models, but smooth is unavailable; "
+                        f"requested allowlist: {', '.join(spec.model_allowlist)}"
+                    ) from exc
+            except Exception as exc:
+                smooth_override = {
+                    "eligible": True,
+                    "ran": False,
+                    "reason_if_not_ran": f"runtime_failure: {exc}",
+                    "contributed_models": [],
+                }
+                if _allowlist_explicitly_requests_family(spec, "smooth"):
+                    raise RuntimeError(
+                        "model_allowlist requested smooth models, but no allowed smooth candidate could run; "
+                        f"requested allowlist: {', '.join(spec.model_allowlist)}"
+                    ) from exc
+                sf_result = _append_warnings(sf_result, f"smooth candidates failed; continuing without smooth ({exc})")
+            else:
+                if smooth_result.engine == "smooth" and _non_ensemble_model_columns(smooth_result.forecast):
+                    sf_result = _merge_model_results(sf_result, smooth_result, history=history, profile=profile, spec=spec)
+                else:
+                    smooth_override = {
+                        "eligible": True,
+                        "ran": False,
+                        "reason_if_not_ran": "produced_no_candidates",
+                        "contributed_models": [],
+                    }
+                    sf_result = _append_warnings(sf_result, "smooth produced no candidate models; continuing without smooth")
+
+    overrides: dict[str, dict[str, Any] | None] = {}
+    if ml_override:
+        overrides["mlforecast"] = ml_override
+    if smooth_override:
+        overrides["smooth"] = smooth_override
+    return _with_policy_resolution(sf_result, profile, spec, overrides or None)
 
 
 def _try_statsforecast(history: pd.DataFrame, profile: DataProfile, spec: ForecastSpec) -> ModelResult:
@@ -259,7 +312,53 @@ def _concat_optional_frames(*frames: pd.DataFrame) -> pd.DataFrame:
     return pd.concat(available, ignore_index=True)
 
 
-def _run_mlforecast_only_allowlist(history: pd.DataFrame, profile: DataProfile, spec: ForecastSpec) -> ModelResult:
+def _run_nonclassical_only_allowlist(history: pd.DataFrame, profile: DataProfile, spec: ForecastSpec) -> ModelResult:
+    result: ModelResult | None = None
+    overrides: dict[str, dict[str, Any]] = {
+        "baseline": {
+            "eligible": False,
+            "ran": False,
+            "reason_if_not_ran": "skipped_by_model_allowlist",
+            "contributed_models": [],
+        },
+        "statsforecast": {
+            "eligible": False,
+            "ran": False,
+            "reason_if_not_ran": "skipped_by_model_allowlist",
+            "contributed_models": [],
+        },
+    }
+    if _allowlist_explicitly_requests_family(spec, "mlforecast"):
+        result = _run_mlforecast_allowlist_without_resolution(history, profile, spec)
+    else:
+        overrides["mlforecast"] = {
+            "eligible": False,
+            "ran": False,
+            "reason_if_not_ran": "skipped_by_model_allowlist",
+            "contributed_models": [],
+        }
+
+    if _allowlist_explicitly_requests_family(spec, "smooth"):
+        smooth_result = _run_smooth_allowlist_without_resolution(history, profile, spec)
+        result = (
+            smooth_result
+            if result is None
+            else _merge_model_results(result, smooth_result, history=history, profile=profile, spec=spec)
+        )
+    else:
+        overrides["smooth"] = {
+            "eligible": False,
+            "ran": False,
+            "reason_if_not_ran": "skipped_by_model_allowlist",
+            "contributed_models": [],
+        }
+
+    if result is None:
+        raise ValueError(f"model_allowlist did not request runnable nonclassical families: {', '.join(spec.model_allowlist)}")
+    return _with_policy_resolution(result, profile, spec, overrides)
+
+
+def _run_mlforecast_allowlist_without_resolution(history: pd.DataFrame, profile: DataProfile, spec: ForecastSpec) -> ModelResult:
     if profile.min_obs_per_series < MLFORECAST_MIN_OBS:
         raise ValueError(
             "model_allowlist requested only MLForecast models, but MLForecast requires "
@@ -277,21 +376,40 @@ def _run_mlforecast_only_allowlist(history: pd.DataFrame, profile: DataProfile, 
             "model_allowlist requested only MLForecast models, but no allowed MLForecast candidate could run; "
             f"requested allowlist: {', '.join(spec.model_allowlist)}"
         ) from exc
-    overrides = {
-        "baseline": {
-            "eligible": False,
-            "ran": False,
-            "reason_if_not_ran": "skipped_by_model_allowlist",
-            "contributed_models": [],
-        },
-        "statsforecast": {
-            "eligible": False,
-            "ran": False,
-            "reason_if_not_ran": "skipped_by_model_allowlist",
-            "contributed_models": [],
-        },
-    }
-    return _with_policy_resolution(ml_result, profile, spec, overrides)
+    return ml_result
+
+
+def _run_smooth_allowlist_without_resolution(history: pd.DataFrame, profile: DataProfile, spec: ForecastSpec) -> ModelResult:
+    if profile.min_obs_per_series < SMOOTH_MIN_OBS:
+        raise ValueError(
+            "model_allowlist requested only smooth models, but smooth requires "
+            f"at least {SMOOTH_MIN_OBS} observations per series; min observations={profile.min_obs_per_series}"
+        )
+    try:
+        return forecast_with_smooth(history, profile, spec)
+    except ImportError as exc:
+        raise ImportError(
+            "model_allowlist requested only smooth models, but smooth is unavailable; "
+            f"requested allowlist: {', '.join(spec.model_allowlist)}"
+        ) from exc
+    except Exception as exc:
+        raise RuntimeError(
+            "model_allowlist requested only smooth models, but no allowed smooth candidate could run; "
+            f"requested allowlist: {', '.join(spec.model_allowlist)}"
+        ) from exc
+
+
+def _raise_for_smooth_allowlist_override(override: dict[str, Any], spec: ForecastSpec) -> None:
+    reason = str(override.get("reason_if_not_ran") or "unavailable")
+    requested = ", ".join(spec.model_allowlist)
+    if reason == "not_installed_or_not_enabled":
+        raise ImportError(f"model_allowlist requested smooth models, but smooth is unavailable; requested allowlist: {requested}")
+    if reason.startswith("min_history_below_smooth_threshold"):
+        raise ValueError(
+            "model_allowlist requested smooth models, but smooth requires "
+            f"at least {SMOOTH_MIN_OBS} observations per series; {reason}; requested allowlist: {requested}"
+        )
+    raise RuntimeError(f"model_allowlist requested smooth models, but smooth could not run ({reason}); requested allowlist: {requested}")
 
 
 def _allowlist_families(spec: ForecastSpec) -> set[str]:
@@ -306,6 +424,10 @@ def _allowlist_requests_family(spec: ForecastSpec, family: str) -> bool:
     return not spec.model_allowlist or family in _allowlist_families(spec)
 
 
+def _allowlist_explicitly_requests_family(spec: ForecastSpec, family: str) -> bool:
+    return bool(spec.model_allowlist) and family in _allowlist_families(spec)
+
+
 def _allowlist_allows_model(spec: ForecastSpec, model: str) -> bool:
     return not spec.model_allowlist or model in set(spec.model_allowlist)
 
@@ -316,12 +438,12 @@ def _model_allowlist_warning(spec: ForecastSpec) -> str | None:
     return f"model allowlist applied: {', '.join(spec.model_allowlist)}"
 
 
-def _mlforecast_auto_feasibility(profile: DataProfile, spec: ForecastSpec) -> MLForecastFeasibility:
+def _mlforecast_light_feasibility(profile: DataProfile, spec: ForecastSpec) -> MLForecastFeasibility:
     min_obs = int(profile.min_obs_per_series)
-    if min_obs < MLFORECAST_AUTO_MIN_OBS:
+    if min_obs < MLFORECAST_LIGHT_MIN_OBS:
         return MLForecastFeasibility(
             False,
-            f"min_history_below_auto_threshold: min observations {min_obs} < {MLFORECAST_AUTO_MIN_OBS}",
+            f"min_history_below_light_threshold: min observations {min_obs} < {MLFORECAST_LIGHT_MIN_OBS}",
         )
 
     h, n_windows, step_size = _adaptive_cv_params(
@@ -352,7 +474,7 @@ def _mlforecast_auto_feasibility(profile: DataProfile, spec: ForecastSpec) -> ML
 
 def _mlforecast_skip_warning(policy: str, reason: str) -> str:
     message = f"MLForecast skipped for model_policy='{policy}' because {reason}"
-    if policy == "auto":
+    if policy in {"standard", "light"}:
         message += (
             ". Add history, shorten the strict horizon, or use --model-policy mlforecast for "
             "exploratory forced ML; forced ML may fail or lack validation."
@@ -516,20 +638,22 @@ def _build_model_policy_resolution(
     overrides: dict[str, dict[str, Any] | None],
 ) -> dict[str, Any]:
     policy = spec.model_policy
-    ml_feasibility = _mlforecast_auto_feasibility(profile, spec)
+    ml_feasibility = _mlforecast_light_feasibility(profile, spec)
     requested = {
         "baseline": policy == "baseline",
-        "statsforecast": policy in {"auto", "all", "statsforecast"},
-        "mlforecast": policy in {"auto", "all", "mlforecast"},
+        "statsforecast": policy in {"standard", "light", "all", "statsforecast"},
+        "mlforecast": policy in {"standard", "light", "all", "mlforecast"},
+        "smooth": policy in {"standard", "all"} or _allowlist_explicitly_requests_family(spec, "smooth"),
     }
     eligible = {
         "baseline": requested["baseline"] or result.engine == "baseline",
         "statsforecast": requested["statsforecast"],
         "mlforecast": (policy == "mlforecast") or (requested["mlforecast"] and ml_feasibility.eligible),
+        "smooth": requested["smooth"] and profile.max_obs_per_series >= SMOOTH_MIN_OBS,
     }
     contributed = _contributed_models_by_family(result.forecast)
     families: list[dict[str, Any]] = []
-    for family in ["baseline", "statsforecast", "mlforecast"]:
+    for family in ["baseline", "statsforecast", "mlforecast", "smooth"]:
         override = overrides.get(family)
         if override is not None:
             family_requested = bool(override.get("requested", requested[family]))
@@ -546,6 +670,8 @@ def _build_model_policy_resolution(
                 reason = "not_requested"
             elif not family_eligible and family == "mlforecast":
                 reason = ml_feasibility.reason
+            elif not family_eligible and family == "smooth":
+                reason = "not_installed_or_not_enabled"
             elif not ran:
                 reason = "produced_no_candidates"
             else:
@@ -564,7 +690,7 @@ def _build_model_policy_resolution(
 
 
 def _contributed_models_by_family(forecast: pd.DataFrame) -> dict[str, list[str]]:
-    contributed: dict[str, list[str]] = {"baseline": [], "statsforecast": [], "mlforecast": []}
+    contributed: dict[str, list[str]] = {"baseline": [], "statsforecast": [], "mlforecast": [], "smooth": []}
     for model in _non_ensemble_model_columns(forecast):
         family = model_family(model)
         if family in contributed:
@@ -713,6 +839,288 @@ def forecast_with_statsforecast(
         model_explainability=_empty_model_explainability(),
         warnings=tuple(run_warnings),
     )
+
+
+def forecast_with_smooth(
+    history: pd.DataFrame,
+    profile: DataProfile,
+    spec: ForecastSpec,
+) -> ModelResult:
+    smooth_module = _load_smooth_module()
+    candidates = _smooth_candidate_names(spec)
+    if not candidates:
+        raise ValueError("no smooth candidate models requested")
+
+    run_warnings: list[str] = [
+        f"smooth ADAM ladder: {len(candidates)} models ({', '.join(candidates)})",
+        f"smooth optional dependency active: version={_smooth_package_version()}, license=LGPL-2.1",
+    ]
+    if spec.levels:
+        run_warnings.append("smooth intervals are not emitted yet; ADAM point forecasts enter the same tournament without interval columns")
+
+    forecast, forecast_warnings = _smooth_prediction_frame(
+        smooth_module,
+        history=history,
+        freq=profile.freq,
+        season_length=profile.season_length,
+        horizon=spec.horizon,
+        candidates=candidates,
+    )
+    run_warnings.extend(forecast_warnings)
+    if not _non_ensemble_model_columns(forecast):
+        raise RuntimeError("no smooth candidate model able to be fitted")
+
+    metrics, backtest_warnings, backtest_predictions = _smooth_backtest(
+        smooth_module,
+        history=history,
+        profile=profile,
+        spec=spec,
+        candidates=candidates,
+    )
+    model_weights = _model_weights_from_metrics(metrics) if spec.weighted_ensemble else _empty_model_weights()
+    forecast = _add_weighted_ensemble_forecast(forecast, model_weights)
+    run_warnings.extend(backtest_warnings)
+    run_warnings.extend(_weighted_ensemble_warnings(spec, model_weights))
+    run_warnings.extend(_cv_horizon_warnings(metrics))
+    return ModelResult(
+        forecast=forecast,
+        backtest_metrics=metrics,
+        backtest_predictions=backtest_predictions,
+        engine="smooth",
+        model_weights=model_weights,
+        model_explainability=_empty_model_explainability(),
+        warnings=tuple(dict.fromkeys(run_warnings)),
+    )
+
+
+def _load_smooth_module() -> Any:
+    import smooth
+
+    return smooth
+
+
+def _smooth_package_version() -> str:
+    try:
+        return metadata.version("smooth")
+    except metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def _smooth_policy_override_for_default_run(profile: DataProfile, spec: ForecastSpec) -> dict[str, Any] | None:
+    if spec.model_allowlist and not _allowlist_requests_family(spec, "smooth"):
+        return {
+            "eligible": False,
+            "ran": False,
+            "reason_if_not_ran": "skipped_by_model_allowlist",
+            "contributed_models": [],
+        }
+    if not _smooth_package_installed():
+        return {
+            "eligible": False,
+            "ran": False,
+            "reason_if_not_ran": "not_installed_or_not_enabled",
+            "contributed_models": [],
+        }
+    if profile.max_obs_per_series < SMOOTH_MIN_OBS:
+        return {
+            "eligible": False,
+            "ran": False,
+            "reason_if_not_ran": (
+                f"min_history_below_smooth_threshold: needs>={SMOOTH_MIN_OBS}, "
+                f"max_obs={profile.max_obs_per_series}"
+            ),
+            "contributed_models": [],
+        }
+    if not _smooth_candidate_names(spec):
+        return {
+            "eligible": False,
+            "ran": False,
+            "reason_if_not_ran": "skipped_by_model_allowlist",
+            "contributed_models": [],
+        }
+    return None
+
+
+def _smooth_package_installed() -> bool:
+    try:
+        metadata.version("smooth")
+    except metadata.PackageNotFoundError:
+        return False
+    return True
+
+
+def _smooth_candidate_names(spec: ForecastSpec) -> list[str]:
+    return [model for model in SMOOTH_MODEL_ORDER if _allowlist_allows_model(spec, model)]
+
+
+def _smooth_prediction_frame(
+    smooth_module: Any,
+    *,
+    history: pd.DataFrame,
+    freq: str,
+    season_length: int,
+    horizon: int,
+    candidates: list[str],
+) -> tuple[pd.DataFrame, list[str]]:
+    frames: list[pd.DataFrame] = []
+    run_warnings: list[str] = []
+    for uid, grp in history.groupby("unique_id", sort=True):
+        grp = grp.sort_values("ds")
+        future = _future_dates(grp["ds"].max(), freq, horizon)
+        frame = pd.DataFrame({"unique_id": str(uid), "ds": future})
+        y = grp["y"].to_numpy(dtype="float64")
+        if len(y) < SMOOTH_MIN_OBS:
+            run_warnings.append(
+                f"smooth skipped series {uid}: needs at least {SMOOTH_MIN_OBS} rows; found {len(y)}"
+            )
+            frames.append(frame)
+            continue
+        for candidate in candidates:
+            try:
+                values, caught = _smooth_fit_predict(
+                    smooth_module,
+                    candidate,
+                    y,
+                    horizon=horizon,
+                    season_length=season_length,
+                )
+            except Exception as exc:
+                run_warnings.append(f"smooth {candidate} skipped series {uid}: {exc}")
+                continue
+            frame[candidate] = values
+            run_warnings.extend(caught)
+        frames.append(frame)
+    if not frames:
+        return pd.DataFrame(columns=["unique_id", "ds"]), sorted(set(run_warnings))
+    out = pd.concat(frames, ignore_index=True).sort_values(["unique_id", "ds"]).reset_index(drop=True)
+    return out, sorted(set(run_warnings))
+
+
+def _smooth_backtest(
+    smooth_module: Any,
+    history: pd.DataFrame,
+    profile: DataProfile,
+    spec: ForecastSpec,
+    candidates: list[str],
+) -> tuple[pd.DataFrame, list[str], pd.DataFrame]:
+    rows: list[pd.DataFrame] = []
+    metadata_rows: list[dict[str, Any]] = []
+    run_warnings: list[str] = []
+    season = profile.season_length
+    for uid, grp in history.groupby("unique_id", sort=True):
+        grp = grp.sort_values("ds").reset_index(drop=True)
+        n = len(grp)
+        if n < SMOOTH_MIN_OBS:
+            run_warnings.append(f"smooth backtest skipped series {uid}: needs at least {SMOOTH_MIN_OBS} rows; found {n}")
+            continue
+        h, n_windows, step_size = _adaptive_cv_params(n, spec.horizon, season, strict=spec.strict_cv_horizon)
+        if h < 1 or n_windows < 1:
+            continue
+        series_rows: list[pd.DataFrame] = []
+        for train, test in _manual_cv_folds(grp, horizon=h, step_size=step_size, n_windows=n_windows):
+            if len(train) < SMOOTH_MIN_OBS or test.empty:
+                continue
+            frame = pd.DataFrame({"unique_id": str(uid), "ds": pd.to_datetime(test["ds"])})
+            y_train = train["y"].to_numpy(dtype="float64")
+            for candidate in candidates:
+                try:
+                    values, caught = _smooth_fit_predict(
+                        smooth_module,
+                        candidate,
+                        y_train,
+                        horizon=len(test),
+                        season_length=season,
+                    )
+                except Exception as exc:
+                    run_warnings.append(f"smooth {candidate} backtest skipped series {uid} cutoff {train['ds'].max()}: {exc}")
+                    continue
+                frame[candidate] = values
+                run_warnings.extend(caught)
+            if _non_ensemble_model_columns(frame):
+                frame["cutoff"] = train["ds"].max()
+                frame["y"] = test["y"].to_numpy(dtype="float64")
+                series_rows.append(frame)
+        if series_rows:
+            metadata_rows.append(
+                {
+                    "unique_id": uid,
+                    "requested_horizon": spec.horizon,
+                    "selection_horizon": h,
+                    "cv_windows": n_windows,
+                    "cv_step_size": step_size,
+                    "cv_horizon_matches_requested": h == spec.horizon,
+                }
+            )
+            rows.extend(series_rows)
+    if not rows:
+        return _empty_backtest_metrics(), sorted(set(run_warnings)), _empty_backtest_predictions()
+    cv = pd.concat(rows, ignore_index=True).sort_values(["unique_id", "cutoff", "ds"]).reset_index(drop=True)
+    if spec.weighted_ensemble:
+        cv = _add_weighted_ensemble_to_cv(cv)
+    metrics = _metrics_from_cv(cv, scales_by_series=_error_scale_map(history, season))
+    if metadata_rows:
+        metrics = metrics.merge(pd.DataFrame(metadata_rows), on="unique_id", how="left")
+    return metrics, sorted(set(run_warnings)), cv
+
+
+def _smooth_fit_predict(
+    smooth_module: Any,
+    model_name: str,
+    y: np.ndarray,
+    *,
+    horizon: int,
+    season_length: int,
+) -> tuple[np.ndarray, list[str]]:
+    if model_name not in SMOOTH_MODELS:
+        raise ValueError(f"unsupported smooth model: {model_name}")
+    kwargs: dict[str, Any] = {
+        "h": horizon,
+        "holdout": False,
+        "fast": True,
+        "verbose": 0,
+    }
+    if season_length > 1 and len(y) >= 2 * season_length:
+        kwargs["lags"] = [season_length]
+    else:
+        kwargs["lags"] = None
+    if model_name == "SmoothADAM_CustomPool":
+        estimator = smooth_module.AutoADAM
+        kwargs["model"] = ["ZXZ", "CCC"]
+    else:
+        estimator = smooth_module.ADAM
+        kwargs["model"] = "ZXZ" if model_name == "SmoothADAM_ZXZ" else "CCC"
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model = estimator(**kwargs)
+        model.fit(y)
+        prediction = model.predict(horizon)
+    values = _extract_smooth_mean(prediction, horizon=horizon)
+    caught_messages = _format_caught_warnings(
+        [item for item in caught if not issubclass(item.category, RuntimeWarning)],
+        prefix=f"smooth {model_name} warning",
+    )
+    return values, caught_messages
+
+
+def _extract_smooth_mean(prediction: Any, *, horizon: int) -> np.ndarray:
+    if isinstance(prediction, pd.DataFrame):
+        if "mean" in prediction.columns:
+            values = prediction["mean"].to_numpy(dtype="float64")
+        else:
+            numeric = prediction.select_dtypes(include=[np.number])
+            if numeric.empty:
+                raise ValueError("smooth prediction frame did not contain numeric columns")
+            values = numeric.iloc[:, 0].to_numpy(dtype="float64")
+    elif isinstance(prediction, pd.Series):
+        values = prediction.to_numpy(dtype="float64")
+    elif hasattr(prediction, "mean") and not callable(getattr(prediction, "mean")):
+        values = np.asarray(getattr(prediction, "mean"), dtype="float64")
+    else:
+        values = np.asarray(prediction, dtype="float64")
+    values = np.ravel(values)
+    if len(values) != horizon:
+        raise ValueError(f"smooth returned {len(values)} predictions for horizon {horizon}")
+    return values
 
 
 def _statsforecast_models_for_spec(
@@ -2287,26 +2695,19 @@ def _statsforecast_backtest(
             except Exception as exc:
                 all_warnings.append(f"{uid}: StatsForecast backtest failed for regular candidate models ({exc})")
         if include_mstl_feature_arima:
-            shortest_train = n - h - step_size * max(0, n_windows - 1)
-            if shortest_train < 2 * season:
-                all_warnings.append(
-                    f"{uid}: {MSTL_FEATURE_ARIMA_MODEL} backtest skipped because the shortest rolling-origin "
-                    f"training fold has {shortest_train} rows, below the {2 * season} rows needed for MSTL decomposition"
-                )
-            else:
-                mstl_cv, mstl_cv_warnings = _statsforecast_mstl_feature_arima_cross_validation_resilient(
-                    history=grp,
-                    freq=profile.freq,
-                    season_length=season,
-                    horizon=h,
-                    step_size=step_size,
-                    n_windows=n_windows,
-                    verbose=spec.verbose,
-                    interval_kwargs=interval_kwargs,
-                )
-                if not mstl_cv.empty:
-                    cv_frames.append(mstl_cv)
-                cv_warnings.extend(mstl_cv_warnings)
+            mstl_cv, mstl_cv_warnings = _statsforecast_mstl_feature_arima_cross_validation_resilient(
+                history=grp,
+                freq=profile.freq,
+                season_length=season,
+                horizon=h,
+                step_size=step_size,
+                n_windows=n_windows,
+                verbose=spec.verbose,
+                interval_kwargs=interval_kwargs,
+            )
+            if not mstl_cv.empty:
+                cv_frames.append(mstl_cv)
+            cv_warnings.extend(mstl_cv_warnings)
         if sklearn_aliases:
             shortest_train = n - h - step_size * max(0, n_windows - 1)
             min_train = _statsforecast_sklearn_min_train_rows(season)
@@ -2350,6 +2751,7 @@ def _statsforecast_backtest(
             n_windows=n_windows,
             step_size=step_size,
         )
+        metrics = _annotate_actual_cv_windows(metrics, cv)
         metric_frames.append(metrics)
         prediction_frames.append(cv)
         all_warnings.extend(cv_warnings)
@@ -2469,8 +2871,16 @@ def _statsforecast_mstl_feature_arima_cross_validation_resilient(
     warnings_out: list[str] = []
     interval_kwargs = interval_kwargs or {}
     rows: list[pd.DataFrame] = []
+    attempted_folds = 0
+    skipped_train_rows: list[int] = []
+    min_train_rows = 2 * season_length
     for train, test in _manual_cv_folds(history, horizon=horizon, step_size=step_size, n_windows=n_windows):
-        if train.empty or len(train) < 2 * season_length or test.empty:
+        attempted_folds += 1
+        if train.empty or test.empty:
+            skipped_train_rows.append(len(train))
+            continue
+        if len(train) < min_train_rows:
+            skipped_train_rows.append(len(train))
             continue
         forecast, forecast_warnings = _statsforecast_mstl_feature_arima_forecast_resilient(
             history=train,
@@ -2490,8 +2900,17 @@ def _statsforecast_mstl_feature_arima_cross_validation_resilient(
         fold["cutoff"] = train["ds"].max()
         rows.append(fold)
     if not rows:
-        warnings_out.append(f"StatsForecast candidate {MSTL_FEATURE_ARIMA_MODEL} backtest failed and was skipped")
+        warnings_out.append(
+            f"StatsForecast candidate {MSTL_FEATURE_ARIMA_MODEL} backtest skipped: "
+            f"no rolling-origin folds had at least {min_train_rows} training rows for MSTL decomposition"
+        )
         return pd.DataFrame(), sorted(set(warnings_out))
+    if skipped_train_rows:
+        warnings_out.append(
+            f"StatsForecast candidate {MSTL_FEATURE_ARIMA_MODEL} backtested on {len(rows)} of {attempted_folds} "
+            f"rolling-origin folds; skipped {len(skipped_train_rows)} immature fold(s) with training rows below "
+            f"{min_train_rows} ({', '.join(str(value) for value in sorted(set(skipped_train_rows)))})"
+        )
     return pd.concat(rows, ignore_index=True).sort_values(["unique_id", "cutoff", "ds"]).reset_index(drop=True), sorted(set(warnings_out))
 
 
@@ -2689,6 +3108,25 @@ def _attach_cv_metadata(
     out["cv_windows"] = int(n_windows)
     out["cv_step_size"] = int(step_size)
     out["cv_horizon_matches_requested"] = int(selection_horizon) == int(requested_horizon)
+    return out
+
+
+def _annotate_actual_cv_windows(metrics: pd.DataFrame, cv: pd.DataFrame) -> pd.DataFrame:
+    if metrics.empty or cv.empty or "cutoff" not in cv.columns:
+        return metrics
+    out = metrics.copy()
+    for idx, row in out.iterrows():
+        model = str(row.get("model", ""))
+        if model not in cv.columns:
+            continue
+        uid_mask = cv["unique_id"].astype(str) == str(row.get("unique_id", ""))
+        values = pd.to_numeric(cv.loc[uid_mask, model], errors="coerce")
+        finite = values.notna() & pd.Series(np.isfinite(values.to_numpy(dtype="float64")), index=values.index)
+        if not finite.any():
+            continue
+        actual_windows = pd.to_datetime(cv.loc[finite.index[finite], "cutoff"], errors="coerce").dropna().nunique()
+        if actual_windows:
+            out.at[idx, "cv_windows"] = int(actual_windows)
     return out
 
 

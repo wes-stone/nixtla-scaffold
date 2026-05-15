@@ -21,13 +21,21 @@ def test_setup_questions_cover_agent_intake_topics() -> None:
         "mcp_regressor_search",
         "outputs",
     }
-    assert questions["preset"]["answer"] == "finance"
+    assert questions["preset"]["answer"] == "standard"
     assert "Where is the data coming from?" in questions["data_source"]["question"]
     assert "Prediction intervals" in questions["intervals"]["caveat"]
     assert "MLForecast" in questions["model_families"]["caveat"]
     assert "NeuralForecast is research-only" in questions["model_families"]["caveat"]
     assert questions["mcp_regressor_search"]["answer"] is True
     assert "leakage" in questions["mcp_regressor_search"]["caveat"]
+
+
+def test_setup_legacy_aliases_canonicalize_in_generated_config() -> None:
+    answers = SetupAnswers(preset="finance", model_families=("auto",))
+
+    assert answers.preset == "standard"
+    assert answers.model_families == ("light",)
+    assert setup_questions(answers)[0]["answer"] == "standard"
 
 
 def test_create_forecast_setup_writes_agent_workspace(tmp_path) -> None:
@@ -61,14 +69,14 @@ def test_create_forecast_setup_writes_agent_workspace(tmp_path) -> None:
     config = yaml.safe_load(artifact.files["config"].read_text(encoding="utf-8"))
     assert config["answers"]["data_source"] == "kusto"
     assert config["answers"]["model_families"] == ["statsforecast", "mlforecast", "hierarchicalforecast"]
-    assert config["forecast_preset"] == "finance"
+    assert config["forecast_preset"] == "standard"
     assert config["forecast_spec"]["horizon"] == 6
     assert config["forecast_spec"]["freq"] == "ME"
     assert "preset_catalog" in config
     assert "MLForecast" in config["policy"]["model_family_caveat"]
     assert config["policy"]["mcp_regressor_search_allowed"] is True
     assert "nixtla-scaffold ingest" in artifact.next_commands[0]
-    assert "--preset finance" in artifact.next_commands[0]
+    assert "--preset standard" in artifact.next_commands[0]
     assert "--forecast-output" in artifact.next_commands[0]
     brief = artifact.files["agent_brief"].read_text(encoding="utf-8")
     assert "Required exploration checks" in brief

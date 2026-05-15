@@ -22,6 +22,12 @@ MLFORECAST_MODELS = {
     "LightGBM_Robust",
 }
 
+SMOOTH_MODELS = {
+    "SmoothADAM_ZXZ",
+    "SmoothADAM_CCC",
+    "SmoothADAM_CustomPool",
+}
+
 STATS_SKLEARN_MODELS = (
     "StatsSklearn_LinearRegression",
     "StatsSklearn_Ridge",
@@ -63,7 +69,7 @@ STATSFORECAST_MODELS = {
     "TSB",
 }
 
-MODEL_ALLOWLIST_CANDIDATES = BASELINE_MODELS | STATSFORECAST_MODELS | MLFORECAST_MODELS
+MODEL_ALLOWLIST_CANDIDATES = BASELINE_MODELS | STATSFORECAST_MODELS | MLFORECAST_MODELS | SMOOTH_MODELS
 
 
 def _model_key(value: Any) -> str:
@@ -134,6 +140,13 @@ _MODEL_ALIASES = {
     "tsb": "TSB",
     "mfles": "MFLES",
     "automfles": "AutoMFLES",
+    "smoothadamzxz": "SmoothADAM_ZXZ",
+    "smoothadam": "SmoothADAM_ZXZ",
+    "adamzxz": "SmoothADAM_ZXZ",
+    "smoothadamccc": "SmoothADAM_CCC",
+    "adamccc": "SmoothADAM_CCC",
+    "smoothadamcustompool": "SmoothADAM_CustomPool",
+    "adamcustompool": "SmoothADAM_CustomPool",
     "linear": "LinearRegression",
     "linearregression": "LinearRegression",
     "ridge": "Ridge",
@@ -193,6 +206,8 @@ def model_family(model: Any) -> str:
     if name.startswith("Custom_"):
         return "custom"
     base_name = name.removesuffix("_Drivers")
+    if base_name in SMOOTH_MODELS:
+        return "smooth"
     if base_name in MLFORECAST_MODELS or base_name.startswith("LightGBM"):
         return "mlforecast"
     if name in BASELINE_MODELS:
@@ -207,6 +222,7 @@ def display_model_family(model: Any) -> str:
         "baseline": "Baseline",
         "statsforecast": "StatsForecast",
         "mlforecast": "MLForecast",
+        "smooth": "Smooth",
         "custom": "Custom",
         "ensemble": "Ensemble",
         "unknown": "Other",

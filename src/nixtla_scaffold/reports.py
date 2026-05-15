@@ -221,6 +221,7 @@ def build_html_report(payload: dict[str, Any]) -> str:
     model_tradeoff_scores = payload.get("model_tradeoff_scores", [])
     model_pareto_frontier = payload.get("model_pareto_frontier", [])
     feature_selection_receipts = payload.get("feature_selection_receipts", [])
+    borrowed_strength = payload.get("borrowed_strength_advisor", [])
     residual_tests = payload.get("residual_tests", [])
     trust_summary = payload["trust_summary"]
     trust_summary_display = _trust_summary_display_rows(trust_summary)
@@ -366,6 +367,7 @@ def build_html_report(payload: dict[str, Any]) -> str:
       {_trust_summary_cards(trust_summary_display, limit=16)}
       <p class="footnote"><strong>Interval glossary:</strong> {_esc(INTERVAL_GLOSSARY_TEXT)}</p>
     </section>
+    {_borrowed_strength_section(borrowed_strength)}
     {_model_policy_resolution_section(model_policy_resolution)}
     {_target_transform_section(target_transform_audit)}
     {_driver_assumptions_section(scenario_assumptions, scenario_forecast, known_future_regressors, driver_availability_audit, driver_model_features, driver_model_cv_delta, driver_experiment_summary, feature_selection_receipts)}
@@ -436,6 +438,7 @@ def build_html_report(payload: dict[str, Any]) -> str:
           {_output_item("appendix/backtest_long.csv", "One row per backtest cutoff/series/model/date with actuals, errors, interval bounds, and coverage flags.")}
           {_output_item("appendix/series_summary.csv", "One row per series with selected model, RMSE/MAE/MASE/RMSSE/WAPE, seasonality, and top alternatives.")}
           {_output_item("appendix/series_features.csv", "Forecastability features and recommended next experiment step per series; advisory only.")}
+          {_output_item("appendix/borrowed_strength_advisor.csv", "Sparse-series borrowed-strength guidance: independent, parent-anchored, reference-class, or panel-pool review; advisory only.")}
           {_output_item("appendix/model_audit.csv", "Model leaderboard enriched with weights and selected/challenger flags.")}
           {_output_item("appendix/model_win_rates.csv", "Model win rates against SeasonalNaive or Naive benchmarks for cross-series review.")}
           {_output_item("appendix/model_tradeoff_scores.csv", "Per-series/model score table used for RMSE, WAPE, scale-free error, and bias tradeoff review.")}
@@ -503,22 +506,32 @@ def build_streamlit_app() -> str:
 
 
         RUN_DIR = Path(__file__).parent
+        UI_FONT = '"Aptos", "Segoe UI", "Helvetica Neue", Arial, sans-serif'
+        CONDENSED_FONT = '"Aptos Narrow", "Arial Narrow", "Segoe UI", Arial, sans-serif'
+        DATA_FONT = '"Cascadia Mono", "Consolas", "Roboto Mono", "Courier New", monospace'
+        TERMINAL_FONT = DATA_FONT
+        CHART_BG = "#071014"
+        CHART_GRID = "#1b2830"
+        CHART_BORDER = "#2a3640"
+        CHART_TEXT = "#d8e1e8"
+        CHART_MUTED = "#8a98a3"
         C = {
-            "hist": "#17324d",
-            "champ": "#b65f32",
-            "alt1": "#516246",
-            "alt2": "#62518f",
-            "alt3": "#9a6b21",
-            "gold": "#9a6b21",
-            "dim": "#b9c0c9",
-            "i80": "rgba(182, 95, 50, 0.18)",
-            "i95": "rgba(182, 95, 50, 0.08)",
-            "train": "rgba(23, 50, 77, 0.07)",
-            "test": "rgba(182, 95, 50, 0.10)",
+            "hist": "#4ea1ff",
+            "champ": "#f2a900",
+            "alt1": "#1fda83",
+            "alt2": "#9b7cff",
+            "alt3": "#ff8f3d",
+            "gold": "#f2a900",
+            "dim": "#82919c",
+            "i80": "rgba(242, 169, 0, 0.18)",
+            "i95": "rgba(242, 169, 0, 0.08)",
+            "train": "rgba(78, 161, 255, 0.10)",
+            "test": "rgba(242, 169, 0, 0.12)",
         }
         ALT_COLORS = [C["alt1"], C["alt2"], C["alt3"]]
         MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
         BASE_DASHBOARD_SECTIONS = [
+            "Control Pane",
             "Forecast review",
             "Model investigation",
             "CV window player",
@@ -531,6 +544,7 @@ def build_streamlit_app() -> str:
         ]
         DASHBOARD_SECTIONS = list(BASE_DASHBOARD_SECTIONS)
         SECTION_DESCRIPTIONS = {
+            "Control Pane": "One-glance run controls, feature map, policy status, and copyable next command.",
             "Forecast review": "Fast default view: champion, trust, and selected forecast context.",
             "Model investigation": "Drill into selected models and Pareto tradeoffs.",
             "CV window player": "Step through rolling-origin windows without rendering other sections.",
@@ -557,6 +571,134 @@ def build_streamlit_app() -> str:
                 b = int(text[5:7], 16)
                 return f"rgba({r}, {g}, {b}, {alpha})"
             return text
+
+
+        def apply_terminal_chart_theme(fig: go.Figure) -> go.Figure:
+            title_text = getattr(getattr(fig.layout, "title", None), "text", None)
+            fig.update_layout(
+                plot_bgcolor=CHART_BG,
+                paper_bgcolor=CHART_BG,
+                font=dict(color=CHART_TEXT, family=TERMINAL_FONT),
+                title_text=title_text or "",
+                legend=dict(
+                    bgcolor="rgba(7,16,20,0)",
+                    bordercolor=CHART_BORDER,
+                    font=dict(color=CHART_TEXT, family=TERMINAL_FONT),
+                ),
+                hoverlabel=dict(
+                    bgcolor="#101a20",
+                    bordercolor="#f2a900",
+                    font_color="#eef4f7",
+                    font_family=TERMINAL_FONT,
+                ),
+            )
+            if title_text:
+                fig.update_layout(title_font=dict(color="#eef4f7", family=TERMINAL_FONT))
+            fig.update_xaxes(
+                color=CHART_MUTED,
+                gridcolor=CHART_GRID,
+                linecolor=CHART_BORDER,
+                tickfont=dict(color=CHART_MUTED, family=TERMINAL_FONT),
+                title_font=dict(color=CHART_TEXT, family=TERMINAL_FONT),
+                zerolinecolor=CHART_BORDER,
+            )
+            fig.update_yaxes(
+                color=CHART_MUTED,
+                gridcolor=CHART_GRID,
+                linecolor=CHART_BORDER,
+                tickfont=dict(color=CHART_MUTED, family=TERMINAL_FONT),
+                title_font=dict(color=CHART_TEXT, family=TERMINAL_FONT),
+                zerolinecolor=CHART_BORDER,
+            )
+            for annotation in fig.layout.annotations or []:
+                annotation.font.color = annotation.font.color or CHART_TEXT
+                annotation.font.family = annotation.font.family or TERMINAL_FONT
+            return fig
+
+
+        def render_plotly_chart(fig: go.Figure, **kwargs) -> None:
+            st.plotly_chart(apply_terminal_chart_theme(fig), **kwargs)
+
+
+        def terminal_table_styles() -> list[dict[str, object]]:
+            return [
+                {
+                    "selector": "thead th",
+                    "props": [
+                        ("background-color", "#101a20"),
+                        ("color", "#f2a900"),
+                        ("border-color", "#2a3640"),
+                        ("font-family", TERMINAL_FONT),
+                        ("font-size", "0.78rem"),
+                        ("font-weight", "850"),
+                    ],
+                },
+                {
+                    "selector": "tbody td",
+                    "props": [
+                        ("background-color", "#071014"),
+                        ("color", "#d8e1e8"),
+                        ("border-color", "#1b2830"),
+                        ("font-family", TERMINAL_FONT),
+                        ("font-size", "0.78rem"),
+                    ],
+                },
+                {
+                    "selector": "tbody tr:nth-child(even) td",
+                    "props": [("background-color", "#0b1419")],
+                },
+            ]
+
+
+        def terminal_dataframe(data):
+            if isinstance(data, pd.DataFrame):
+                return data.style.set_table_styles(terminal_table_styles()).set_properties(
+                    **{
+                        "background-color": "#071014",
+                        "color": "#d8e1e8",
+                        "border-color": "#1b2830",
+                        "font-family": TERMINAL_FONT,
+                    }
+                )
+            if data.__class__.__name__ == "Styler" and hasattr(data, "set_table_styles"):
+                return data.set_table_styles(terminal_table_styles(), overwrite=False).set_properties(
+                    **{
+                        "background-color": "#071014",
+                        "color": "#d8e1e8",
+                        "border-color": "#1b2830",
+                        "font-family": TERMINAL_FONT,
+                    }
+                )
+            return data
+
+
+        def render_dataframe(data, **kwargs) -> None:
+            hide_index = bool(kwargs.get("hide_index", False))
+            max_height = kwargs.get("height") or 420
+            if isinstance(data, pd.DataFrame):
+                html_table = data.to_html(
+                    classes="terminal-dataframe",
+                    border=0,
+                    escape=True,
+                    index=not hide_index,
+                    na_rep="",
+                )
+            else:
+                styled = terminal_dataframe(data)
+                if hide_index and hasattr(styled, "hide"):
+                    try:
+                        styled = styled.hide(axis="index")
+                    except TypeError:
+                        styled = styled.hide_index()
+                if hasattr(styled, "to_html"):
+                    html_table = styled.to_html()
+                else:
+                    st.dataframe(styled, **kwargs)
+                    return
+            st.markdown(
+                f'<div class="terminal-dataframe-wrap" style="max-height:{int(max_height)}px">{html_table}</div>',
+                unsafe_allow_html=True,
+            )
 
 
         def artifact_path(name: str) -> Path | None:
@@ -641,6 +783,26 @@ def build_streamlit_app() -> str:
 
 
         @st.cache_data(show_spinner=False)
+        def cached_read_jsonl(path_text: str, modified_ns: int, size_bytes: int) -> list[dict]:
+            if size_bytes == 0:
+                return []
+            rows: list[dict] = []
+            for line in Path(path_text).read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line:
+                    rows.append(json.loads(line))
+            return rows
+
+
+        def read_jsonl(name: str) -> list[dict]:
+            path = artifact_path(name)
+            if path is None:
+                return []
+            stat = path.stat()
+            return cached_read_jsonl(str(path), stat.st_mtime_ns, stat.st_size)
+
+
+        @st.cache_data(show_spinner=False)
         def prep_dates(frame: pd.DataFrame) -> pd.DataFrame:
             if frame.empty:
                 return frame
@@ -692,6 +854,61 @@ def build_streamlit_app() -> str:
                 f"{detail_html}"
                 "</div>"
             )
+
+
+        def control_status_class(value: str) -> str:
+            text = display_value(value, default="unknown").lower()
+            if any(token in text for token in ["failed", "error", "missing", "low", "unavailable"]):
+                return "risk"
+            if any(token in text for token in ["warn", "medium", "baseline", "skipped"]):
+                return "watch"
+            if any(token in text for token in ["ran", "available", "finished", "selected", "high", "ok", "pass"]):
+                return "ok"
+            if "not " in text or text in {"unknown", "n/a", "none", "not_requested"}:
+                return "muted"
+            return "muted"
+
+
+        def control_stat_card(label: str, value: str, detail: str = "", status: str = "") -> str:
+            status_class = control_status_class(status or value)
+            detail_html = f'<div class="control-stat-detail">{html.escape(detail)}</div>' if detail else ""
+            return (
+                f'<div class="control-stat-card status-{status_class}">'
+                f'<div class="control-stat-label">{html.escape(label)}</div>'
+                f'<div class="control-stat-value">{html.escape(display_value(value))}</div>'
+                f"{detail_html}"
+                "</div>"
+            )
+
+
+        def control_feature_cards(rows: list[dict]) -> str:
+            cards = []
+            for row in rows:
+                mechanism = display_value(row.get("mechanism"), default="Capability")
+                status = display_value(row.get("status"), default="unknown")
+                artifact = display_value(row.get("artifact") or row.get("agent-readable artifact"), default="artifact not declared")
+                status_class = control_status_class(status)
+                cards.append(
+                    f'<div class="control-feature-card status-{status_class}">'
+                    '<div class="control-feature-topline">'
+                    f'<span class="control-feature-title">{html.escape(mechanism)}</span>'
+                    f'<span class="control-status-pill status-{status_class}">{html.escape(status)}</span>'
+                    '</div>'
+                    f'<div class="control-feature-artifact">{html.escape(artifact)}</div>'
+                    '</div>'
+                )
+            return '<div class="control-feature-grid">' + "".join(cards) + "</div>"
+
+
+        def control_action_cards(items: list[tuple[str, str, str]]) -> str:
+            return '<div class="control-action-grid">' + "".join(
+                '<div class="control-action-card">'
+                f'<div class="control-action-kicker">{html.escape(kicker)}</div>'
+                f'<div class="control-action-title">{html.escape(title)}</div>'
+                f'<div class="control-action-copy">{html.escape(copy)}</div>'
+                '</div>'
+                for kicker, title, copy in items
+            ) + "</div>"
 
 
         def operating_loop_cards() -> str:
@@ -759,20 +976,19 @@ def build_streamlit_app() -> str:
             st.markdown(
                 """
                 <div class="workbench-nav-shell">
-                    <div class="workbench-nav-eyebrow">Workbench sections</div>
-                    <div class="workbench-nav-title">Sidebar tabs stay visible. Only the selected workbench section renders on each rerun.</div>
+                    <div class="workbench-nav-eyebrow">Workbench nav</div>
+                    <div class="workbench-nav-title">Single-section render. Select an analysis surface.</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
-            st.caption("Bold fast tabs instead of hidden pages; switch sections without rendering every heavy diagnostic.")
+            st.caption("Only the selected surface renders on rerun.")
             for section in DASHBOARD_SECTIONS:
                 clicked = st.button(
                     visible_section_label(section),
                     key=f"workbench_tab_{section_key(section)}",
                     type="primary" if section == current else "secondary",
                     use_container_width=True,
-                    help=SECTION_DESCRIPTIONS.get(section, ""),
                 )
                 if clicked and section != current:
                     st.session_state["active_workbench_section"] = section
@@ -803,6 +1019,11 @@ def build_streamlit_app() -> str:
             "LightGBM_Conservative",
             "LightGBM_Shallow",
             "LightGBM_Robust",
+        }
+        SMOOTH_MODELS = {
+            "SmoothADAM_ZXZ",
+            "SmoothADAM_CCC",
+            "SmoothADAM_CustomPool",
         }
         BASELINE_MODELS = {
             "Naive",
@@ -840,10 +1061,11 @@ def build_streamlit_app() -> str:
         FAMILY_MENU_ORDER = {
             "statsforecast": 0,
             "mlforecast": 1,
-            "baseline": 2,
-            "ensemble": 3,
-            "custom": 4,
-            "unknown": 5,
+            "smooth": 2,
+            "baseline": 3,
+            "ensemble": 4,
+            "custom": 5,
+            "unknown": 6,
         }
         WINNER_METRIC_GUIDANCE = {
             "rmse": {
@@ -931,7 +1153,7 @@ def build_streamlit_app() -> str:
             return [col for col in priority if col in frame.columns] + [col for col in frame.columns if col not in priority]
 
 
-        FAMILY_VALUES = {"baseline", "statsforecast", "mlforecast", "custom", "ensemble", "unknown"}
+        FAMILY_VALUES = {"baseline", "statsforecast", "mlforecast", "smooth", "custom", "ensemble", "unknown"}
 
 
         def normalize_family_label(value) -> str:
@@ -946,6 +1168,7 @@ def build_streamlit_app() -> str:
                 "stats forecast": "statsforecast",
                 "mlforecast": "mlforecast",
                 "ml forecast": "mlforecast",
+                "smooth": "smooth",
                 "custom": "custom",
                 "ensemble": "ensemble",
                 "weightedensemble": "ensemble",
@@ -961,6 +1184,8 @@ def build_streamlit_app() -> str:
                 return "ensemble"
             if name.startswith("Custom_"):
                 return "custom"
+            if name in SMOOTH_MODELS:
+                return "smooth"
             if name in MLFORECAST_MODELS or name.startswith("LightGBM"):
                 return "mlforecast"
             if name in BASELINE_MODELS:
@@ -975,6 +1200,7 @@ def build_streamlit_app() -> str:
                 "baseline": "Baseline",
                 "statsforecast": "StatsForecast",
                 "mlforecast": "MLForecast",
+                "smooth": "Smooth",
                 "custom": "Custom",
                 "ensemble": "Ensemble",
                 "unknown": "Other",
@@ -996,6 +1222,8 @@ def build_streamlit_app() -> str:
                 if name in {"LinearRegression", "Ridge", "Ridge_Regularized", "BayesianRidge", "ElasticNet", "Huber"}:
                     return "Linear lag learner"
                 return "ML lag/date learner"
+            if family == "smooth":
+                return "Smooth ADAM candidate"
             if family == "baseline":
                 return "Benchmark baseline"
             if family == "ensemble":
@@ -1097,8 +1325,11 @@ def build_streamlit_app() -> str:
 
         def policy_reason_label(value) -> str:
             raw = str(value or "not_available")
-            if raw.startswith("min_history_below_auto_threshold"):
-                return raw.replace("min_history_below_auto_threshold", "minimum auto ML history gate not met")
+            if raw.startswith("min_history_below_auto_threshold") or raw.startswith("min_history_below_light_threshold"):
+                return (
+                    raw.replace("min_history_below_auto_threshold", "minimum legacy auto ML history gate not met")
+                    .replace("min_history_below_light_threshold", "minimum light ML history gate not met")
+                )
             if raw.startswith("min_history_below_threshold"):
                 return raw.replace("min_history_below_threshold", "minimum history gate not met")
             return raw.replace("_", " ")
@@ -1258,6 +1489,43 @@ def build_streamlit_app() -> str:
                     }
                 )
             return pd.DataFrame(rows)
+
+
+        def quote_cli_arg(value) -> str:
+            text = str(value)
+            if not text:
+                return '""'
+            if any(ch.isspace() for ch in text) or any(ch in text for ch in ['"', "'", "$", "&", "|", "<", ">"]):
+                return '"' + text.replace('"', '`"') + '"'
+            return text
+
+
+        def regenerated_forecast_command() -> str:
+            spec = manifest.get("spec", {}) if isinstance(manifest, dict) else {}
+            parts = ["uv", "run", "nixtla-scaffold", "forecast", "--input", "<input.csv>"]
+            horizon = spec.get("horizon")
+            if horizon:
+                parts.extend(["--horizon", str(horizon)])
+            freq = spec.get("freq")
+            if freq:
+                parts.extend(["--freq", str(freq)])
+            policy = spec.get("model_policy")
+            if policy:
+                parts.extend(["--model-policy", str(policy)])
+            output = Path(__file__).resolve().parent
+            parts.extend(["--output", str(output)])
+            levels = spec.get("levels") or []
+            for level in levels:
+                parts.extend(["--levels", str(level)])
+            for model in spec.get("model_allowlist") or []:
+                parts.extend(["--model", str(model)])
+            if spec.get("target_transform") and spec.get("target_transform") != "none":
+                parts.extend(["--target-transform", str(spec.get("target_transform"))])
+            if spec.get("normalization_factor_col"):
+                parts.extend(["--normalization-factor-col", str(spec.get("normalization_factor_col"))])
+            if spec.get("hierarchy_reconciliation") and spec.get("hierarchy_reconciliation") != "none":
+                parts.extend(["--hierarchy-reconciliation", str(spec.get("hierarchy_reconciliation"))])
+            return " ".join(quote_cli_arg(part) for part in parts)
 
 
         def policy_message_for_scope(scope: str) -> str:
@@ -1705,7 +1973,7 @@ def build_streamlit_app() -> str:
                 return view
             return view.style.set_properties(
                 subset=["Engine"],
-                **{"font-style": "italic", "font-size": "0.85em", "color": "#64748b"},
+                **{"font-style": "italic", "font-size": "0.85em", "color": "#aeb9c2"},
             )
 
 
@@ -2425,8 +2693,8 @@ def build_streamlit_app() -> str:
                 margin=dict(l=55, r=35, t=70, b=45),
                 hovermode="x unified",
                 legend=dict(orientation="h", y=-0.16),
-                plot_bgcolor="#fbfdff",
-                paper_bgcolor="#ffffff",
+                plot_bgcolor=CHART_BG,
+                paper_bgcolor=CHART_BG,
             )
             fig.update_yaxes(title_text="parent value", row=1, col=1)
             fig.update_yaxes(title_text="forecast coherence", row=2, col=1)
@@ -2501,8 +2769,8 @@ def build_streamlit_app() -> str:
                 margin=dict(l=55, r=170, t=35, b=45),
                 hovermode="x unified",
                 legend=dict(orientation="v", x=1.02, y=1),
-                plot_bgcolor="#fbfdff",
-                paper_bgcolor="#ffffff",
+                plot_bgcolor=CHART_BG,
+                paper_bgcolor=CHART_BG,
                 yaxis_title="historical + forecast value",
             )
             return fig
@@ -2552,8 +2820,8 @@ def build_streamlit_app() -> str:
                 hovermode="x unified",
                 legend=dict(orientation="h", y=-0.18),
                 yaxis_title="reconciled yhat",
-                plot_bgcolor="#fbfdff",
-                paper_bgcolor="#ffffff",
+                plot_bgcolor=CHART_BG,
+                paper_bgcolor=CHART_BG,
             )
             return fig
 
@@ -3465,143 +3733,730 @@ def build_streamlit_app() -> str:
             return fig
 
 
-        st.set_page_config(page_title="Forecast review workbench", layout="wide")
+        st.set_page_config(page_title="Forecast control workbench", layout="wide")
         st.markdown(
             """
             <style>
+            :root {
+                --font-ui: "Aptos", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+                --font-condensed: "Aptos Narrow", "Arial Narrow", "Segoe UI", Arial, sans-serif;
+                --font-data: "Cascadia Mono", "Consolas", "Roboto Mono", "Courier New", monospace;
+            }
+            html,
+            body,
+            .stApp {
+                font-family: var(--font-ui);
+                font-size: 14px;
+                font-variant-numeric: tabular-nums;
+            }
             .headline-card {
-                border: 1px solid #d8e2f3;
-                background: linear-gradient(135deg, #f4f8ff 0%, #e9f2ff 100%);
-                border-radius: 18px;
-                padding: 1.15rem 1.25rem;
-                box-shadow: 0 8px 24px rgba(23, 50, 77, 0.06);
-                margin-bottom: 0.75rem;
+                border: 1px solid #2a3640;
+                border-left: 3px solid #f2a900;
+                background: linear-gradient(135deg, #071014 0%, #0d171d 100%);
+                border-radius: 4px;
+                color: #d8e1e8;
+                font-family: var(--font-ui);
+                padding: 0.7rem 0.82rem;
+                box-shadow: none;
+                margin-bottom: 0.6rem;
             }
             .headline-kicker {
-                color: #516246;
-                font-size: 0.78rem;
-                font-weight: 800;
+                color: #f2a900;
+                font-size: 0.68rem;
+                font-weight: 850;
                 letter-spacing: 0.08em;
                 margin-bottom: 0.45rem;
                 text-transform: uppercase;
             }
             .headline-text {
-                color: #12304a;
-                font-size: 1.02rem;
-                font-weight: 650;
-                line-height: 1.55;
+                color: #eef4f7;
+                font-size: 0.95rem;
+                font-weight: 700;
+                line-height: 1.5;
             }
             .decision-grid {
                 display: grid;
-                gap: 0.75rem;
+                gap: 1px;
                 grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+                background: #26323b;
+                border: 1px solid #26323b;
                 margin: 0.2rem 0 0.95rem 0;
             }
             .decision-card {
-                border: 1px solid #e2e8f0;
-                border-radius: 16px;
-                background: #ffffff;
-                padding: 0.9rem 1rem;
-                box-shadow: 0 6px 18px rgba(15, 23, 42, 0.05);
+                border: 0;
+                border-left: 3px solid #697782;
+                border-radius: 0;
+                background: #0f181e;
+                color: #d8e1e8;
+                font-family: var(--font-ui);
+                padding: 0.52rem 0.62rem;
+                box-shadow: none;
             }
             .decision-label {
-                color: #64748b;
-                font-size: 0.76rem;
-                font-weight: 800;
-                letter-spacing: 0.04em;
+                color: #8a98a3;
+                font-size: 0.66rem;
+                font-weight: 850;
+                letter-spacing: 0.06em;
                 text-transform: uppercase;
             }
             .decision-value {
-                color: #0f172a;
-                font-size: 1.45rem;
-                font-weight: 800;
+                color: #eef4f7;
+                font-size: 1.15rem;
+                font-weight: 850;
                 line-height: 1.2;
                 margin-top: 0.28rem;
             }
-            .decision-detail {
-                color: #64748b;
-                font-size: 0.84rem;
+            .decision-detail,
+            .decision-note {
+                color: #aeb9c2;
+                font-size: 0.78rem;
                 line-height: 1.35;
                 margin-top: 0.3rem;
             }
             .insight-panel {
-                border: 1px solid #e2e8f0;
-                border-radius: 16px;
-                background: #fbfdff;
-                padding: 1rem 1.1rem;
-                margin-bottom: 0.85rem;
+                border: 1px solid #2a3640;
+                border-left: 3px solid #f2a900;
+                border-radius: 4px;
+                background: #0b1419;
+                color: #d8e1e8;
+                font-family: var(--font-ui);
+                padding: 0.68rem 0.78rem;
+                margin-bottom: 0.68rem;
             }
             .insight-panel h4 {
                 margin: 0 0 0.45rem 0;
-                color: #12304a;
+                color: #eef4f7;
+                font-size: 0.92rem;
+                letter-spacing: 0;
             }
             .insight-panel ul {
                 margin: 0.25rem 0 0 1.15rem;
                 padding: 0;
             }
+            .insight-panel li {
+                color: #aeb9c2;
+                font-size: 0.82rem;
+                line-height: 1.42;
+                margin-bottom: 0.18rem;
+            }
             .ops-grid {
                 display: grid;
-                gap: 0.75rem;
+                gap: 1px;
                 grid-template-columns: repeat(auto-fit, minmax(235px, 1fr));
+                background: #26323b;
+                border: 1px solid #26323b;
                 margin: 0.35rem 0 0.9rem 0;
             }
             .ops-card {
-                border: 1px solid #dbe4ef;
-                border-radius: 16px;
-                padding: 1rem;
-                background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
-                min-height: 140px;
+                border: 0;
+                border-radius: 0;
+                padding: 0.72rem 0.82rem;
+                background: #101a20;
+                color: #d8e1e8;
+                font-family: var(--font-ui);
+                min-height: 120px;
             }
             .ops-step {
-                color: #b65f32;
-                font-size: 0.78rem;
-                font-weight: 900;
+                color: #f2a900;
+                font-size: 0.66rem;
+                font-weight: 850;
                 letter-spacing: 0.06em;
                 text-transform: uppercase;
             }
             .ops-title {
-                color: #0f172a;
-                font-size: 1.02rem;
+                color: #eef4f7;
+                font-size: 0.92rem;
                 font-weight: 850;
                 margin: 0.32rem 0;
             }
             .ops-copy {
-                color: #475569;
-                font-size: 0.9rem;
+                color: #aeb9c2;
+                font-size: 0.8rem;
                 line-height: 1.42;
             }
-            .workbench-nav-shell {
-                border: 1px solid #dbe4ef;
-                border-radius: 18px;
-                background: linear-gradient(135deg, #fffaf6 0%, #f6f9ff 100%);
-                padding: 1rem 1.15rem;
-                margin: 1rem 0 0.55rem 0;
-                box-shadow: 0 10px 28px rgba(15, 23, 42, 0.06);
+            .stApp,
+            [data-testid="stAppViewContainer"],
+            [data-testid="stMain"] {
+                background: #060b0f;
+                color: #d8e1e8;
+                font-family: var(--font-ui);
             }
-            .workbench-nav-eyebrow {
-                color: #b65f32;
+            [data-testid="stHeader"] {
+                background: rgba(6, 11, 15, 0.96);
+                border-bottom: 1px solid #19242c;
+            }
+            [data-testid="stToolbar"] {
+                color: #8a98a3;
+            }
+            [data-testid="stMainBlockContainer"],
+            .main .block-container {
+                padding-top: 2.45rem;
+                padding-bottom: 2.2rem;
+            }
+            [data-testid="stMarkdownContainer"] h1,
+            [data-testid="stMarkdownContainer"] h2,
+            [data-testid="stMarkdownContainer"] h3,
+            [data-testid="stMarkdownContainer"] h4 {
+                color: #eef4f7;
+                font-family: var(--font-condensed);
+                letter-spacing: -0.02em;
+            }
+            [data-testid="stMarkdownContainer"] p,
+            [data-testid="stMarkdownContainer"] li,
+            [data-testid="stCaptionContainer"] p {
+                color: #aeb9c2;
+            }
+            [data-testid="stExpander"] {
+                background: #0b1419;
+                border: 1px solid #26323b;
+                border-radius: 4px;
+            }
+            [data-testid="stExpander"] details,
+            [data-testid="stExpander"] summary,
+            [data-testid="stExpander"] summary:hover,
+            [data-testid="stExpander"] div[role="button"] {
+                background: #0b1419 !important;
+                border-color: #26323b !important;
+                color: #d8e1e8 !important;
+                box-shadow: none !important;
+            }
+            [data-testid="stExpander"] summary *,
+            [data-testid="stExpander"] div[role="button"] * {
+                color: #d8e1e8 !important;
+                fill: #d8e1e8 !important;
+            }
+            [data-testid="stExpander"] summary:hover *,
+            [data-testid="stExpander"] div[role="button"]:hover * {
+                color: #f2a900 !important;
+                fill: #f2a900 !important;
+            }
+            [data-testid="stExpander"] summary p {
+                color: #d8e1e8;
+                font-family: var(--font-ui);
+            }
+            [data-testid="stAlert"] {
+                border-radius: 4px;
+            }
+            [data-testid="stCodeBlock"] {
+                background: #071014;
+                border: 1px solid #26323b;
+                border-radius: 4px;
+            }
+            [data-testid="stCodeBlock"] pre,
+            [data-testid="stCodeBlock"] code {
+                background: #071014 !important;
+                color: #d8e1e8 !important;
+                font-family: var(--font-data) !important;
+            }
+            div[data-testid="stButton"] > button {
+                border-radius: 2px;
+                min-height: 2.25rem;
+                border: 1px solid #2a3640;
+                background: #111b22;
+                color: #d8e1e8;
+                font-family: var(--font-data);
                 font-size: 0.78rem;
-                font-weight: 900;
+                font-weight: 800;
+                letter-spacing: 0;
+                box-shadow: none;
+            }
+            div[data-testid="stButton"] > button:hover {
+                border-color: #f2a900;
+                color: #f2a900;
+            }
+            div[data-baseweb="select"] > div,
+            div[data-baseweb="base-input"] > div,
+            div[data-baseweb="input"] input,
+            div[data-baseweb="textarea"] textarea {
+                background: #0b1419 !important;
+                border-color: #2a3640 !important;
+                color: #eef4f7 !important;
+                font-family: var(--font-data) !important;
+                box-shadow: none !important;
+            }
+            div[data-baseweb="select"] span,
+            div[data-baseweb="select"] div,
+            div[data-baseweb="select"] input,
+            div[data-baseweb="select"] svg,
+            div[data-baseweb="popover"] span,
+            div[role="listbox"] span,
+            li[role="option"] span {
+                color: #eef4f7 !important;
+                fill: #eef4f7 !important;
+                -webkit-text-fill-color: #eef4f7 !important;
+            }
+            div[data-baseweb="popover"],
+            div[role="listbox"],
+            ul[role="listbox"] {
+                background: #0b1419 !important;
+                border: 1px solid #2a3640 !important;
+                color: #eef4f7 !important;
+                font-family: var(--font-data) !important;
+            }
+            li[role="option"],
+            div[role="option"] {
+                background: #0b1419 !important;
+                color: #eef4f7 !important;
+            }
+            li[role="option"]:hover,
+            div[role="option"]:hover,
+            li[aria-selected="true"],
+            div[aria-selected="true"] {
+                background: #17242c !important;
+                color: #f2a900 !important;
+            }
+            [data-testid="stDataFrame"],
+            [data-testid="stTable"] {
+                background: #071014 !important;
+                border: 1px solid #2a3640 !important;
+                border-radius: 4px !important;
+                color: #d8e1e8 !important;
+                overflow: hidden;
+            }
+            [data-testid="stDataFrame"] * ,
+            [data-testid="stTable"] * {
+                color: #d8e1e8;
+                font-family: var(--font-data);
+            }
+            [data-testid="stDataFrame"] [role="columnheader"],
+            [data-testid="stDataFrame"] [role="gridcell"],
+            [data-testid="stTable"] th,
+            [data-testid="stTable"] td {
+                background: #071014 !important;
+                border-color: #1b2830 !important;
+            }
+            [data-testid="stDataFrame"] [role="columnheader"],
+            [data-testid="stTable"] th {
+                background: #101a20 !important;
+                color: #f2a900 !important;
+                font-weight: 850 !important;
+            }
+            [data-testid="stDataFrame"] canvas {
+                background: #071014 !important;
+            }
+            .terminal-dataframe-wrap {
+                background: #071014;
+                border: 1px solid #2a3640;
+                border-radius: 4px;
+                box-shadow: inset 0 1px 0 rgba(242, 169, 0, 0.08);
+                overflow: auto;
+                width: 100%;
+            }
+            .terminal-dataframe-wrap table,
+            table.terminal-dataframe {
+                border-collapse: collapse;
+                color: #d8e1e8;
+                font-family: var(--font-data);
+                font-size: 0.74rem;
+                font-variant-numeric: tabular-nums;
+                min-width: 100%;
+                width: 100%;
+            }
+            .terminal-dataframe-wrap thead th,
+            table.terminal-dataframe thead th {
+                background: #101a20 !important;
+                border-bottom: 1px solid #2a3640 !important;
+                color: #f2a900 !important;
+                font-weight: 850;
+                letter-spacing: 0.02em;
+                position: sticky;
+                text-align: left;
+                text-transform: uppercase;
+                top: 0;
+                z-index: 1;
+            }
+            .terminal-dataframe-wrap th,
+            .terminal-dataframe-wrap td,
+            table.terminal-dataframe th,
+            table.terminal-dataframe td {
+                border: 1px solid #1b2830 !important;
+                padding: 0.28rem 0.42rem;
+                vertical-align: top;
+                white-space: nowrap;
+            }
+            .terminal-dataframe-wrap tbody th,
+            .terminal-dataframe-wrap tbody td,
+            table.terminal-dataframe tbody th,
+            table.terminal-dataframe tbody td {
+                background: #071014 !important;
+                color: #d8e1e8 !important;
+            }
+            .terminal-dataframe-wrap tbody tr:nth-child(even) th,
+            .terminal-dataframe-wrap tbody tr:nth-child(even) td,
+            table.terminal-dataframe tbody tr:nth-child(even) th,
+            table.terminal-dataframe tbody tr:nth-child(even) td {
+                background: #0b1419 !important;
+            }
+            .terminal-dataframe-wrap tbody tr:hover th,
+            .terminal-dataframe-wrap tbody tr:hover td,
+            table.terminal-dataframe tbody tr:hover th,
+            table.terminal-dataframe tbody tr:hover td {
+                background: #17242c !important;
+                color: #eef4f7 !important;
+            }
+            [data-testid="stJson"] {
+                background: #071014 !important;
+                border: 1px solid #2a3640 !important;
+                color: #d8e1e8 !important;
+            }
+            .forecast-console-topbar {
+                background: #071014;
+                border: 1px solid #2a3640;
+                border-radius: 4px;
+                color: #d8e1e8;
+                font-family: var(--font-ui);
+                margin: 0.45rem 0 0.75rem 0;
+            }
+            .forecast-console-topline {
+                align-items: center;
+                background: #101a20;
+                border-bottom: 1px solid #2a3640;
+                display: flex;
+                flex-wrap: wrap;
+                gap: 0.85rem;
+                padding: 0.38rem 0.58rem;
+            }
+            .forecast-console-label {
+                color: #f2a900;
+                font-size: 0.72rem;
+                font-weight: 850;
                 letter-spacing: 0.08em;
                 text-transform: uppercase;
             }
-            .workbench-nav-title {
-                color: #12304a;
-                font-size: 1.03rem;
-                font-weight: 800;
-                line-height: 1.35;
-                margin-top: 0.25rem;
+            .forecast-console-caption {
+                color: #91a0aa;
+                font-size: 0.72rem;
+                font-weight: 700;
+                letter-spacing: 0.03em;
+                text-transform: uppercase;
             }
-            section[data-testid="stSidebar"] div[data-testid="stButton"] > button {
-                border-radius: 14px;
-                min-height: 3rem;
+            .forecast-console-body {
+                display: grid;
+                grid-template-columns: minmax(300px, 1.4fr) minmax(420px, 1fr);
+                gap: 1px;
+                background: #2a3640;
+            }
+            .forecast-console-titlebox {
+                background: #0b1419;
+                padding: 0.68rem 0.8rem;
+            }
+            .forecast-console-title {
+                color: #eef4f7;
+                font-family: var(--font-condensed);
+                font-size: 1.08rem;
+                font-weight: 850;
+                letter-spacing: 0.01em;
+                line-height: 1.15;
+                text-transform: uppercase;
+            }
+            .forecast-console-subtitle {
+                color: #aeb9c2;
+                font-size: 0.72rem;
+                line-height: 1.35;
+                margin-top: 0.32rem;
+            }
+            .forecast-console-metrics {
+                display: grid;
+                grid-template-columns: repeat(4, minmax(90px, 1fr));
+                gap: 1px;
+                background: #2a3640;
+            }
+            .forecast-console-metric {
+                background: #0f181e;
+                min-height: 3.45rem;
+                padding: 0.42rem 0.5rem;
+            }
+            .forecast-console-metric-label {
+                color: #8a98a3;
+                font-size: 0.64rem;
+                font-weight: 850;
+                letter-spacing: 0.05em;
+                text-transform: uppercase;
+            }
+            .forecast-console-metric-value {
+                color: #eef4f7;
+                font-family: var(--font-data);
+                font-size: 1.03rem;
+                font-weight: 850;
+                margin-top: 0.35rem;
+            }
+            .control-hero {
+                position: relative;
+                overflow: hidden;
+                border: 1px solid #2a3640;
+                border-radius: 6px;
+                background: #071014;
+                box-shadow: none;
+                color: #d8e1e8;
+                font-family: var(--font-ui);
+                margin: 0.2rem 0 0.9rem 0;
+                padding: 0;
+            }
+            .control-hero::before {
+                display: none;
+            }
+            .control-terminal-header {
+                align-items: center;
+                background: #101a20;
+                border-bottom: 1px solid #2a3640;
+                color: #80909c;
+                display: flex;
+                flex-wrap: wrap;
+                font-size: 0.72rem;
+                font-weight: 800;
+                gap: 0.8rem;
+                letter-spacing: 0.05em;
+                padding: 0.48rem 0.65rem;
+                text-transform: uppercase;
+            }
+            .control-terminal-header span {
+                border-right: 1px solid #33414b;
+                padding-right: 0.8rem;
+            }
+            .control-terminal-header span:last-child {
+                border-right: 0;
+                padding-right: 0;
+            }
+            .control-terminal-code {
+                color: #f2a900;
+            }
+            .control-hero-inner {
+                position: relative;
+                display: grid;
+                grid-template-columns: minmax(280px, 0.85fr) minmax(420px, 1.25fr);
+                gap: 0.7rem;
+                align-items: stretch;
+                padding: 0.75rem;
+            }
+            .control-hero-copy {
+                border: 1px solid #202c34;
+                background: #0b1419;
+                color: #d8e1e8;
+                padding: 0.7rem 0.8rem;
+            }
+            .control-eyebrow {
+                color: #f2a900;
+                font-size: 0.72rem;
+                font-weight: 850;
+                letter-spacing: 0.08em;
+                text-transform: uppercase;
+            }
+            .control-title {
+                color: #eef4f7;
+                font-family: var(--font-condensed);
+                font-size: clamp(1rem, 1.5vw, 1.25rem);
+                font-weight: 850;
+                line-height: 1.08;
+                letter-spacing: 0.01em;
+                margin-top: 0.38rem;
+                text-transform: uppercase;
+            }
+            .control-copy {
+                color: #aeb9c2;
+                font-size: 0.8rem;
+                line-height: 1.45;
+                max-width: 36rem;
+                margin-top: 0.55rem;
+            }
+            .control-stat-grid {
+                display: grid;
+                grid-template-columns: repeat(2, minmax(150px, 1fr));
+                gap: 1px;
+                background: #2a3640;
+                border: 1px solid #2a3640;
+            }
+            .control-stat-card {
+                border: 0;
+                border-left: 3px solid #5a6670;
+                border-radius: 0;
+                background: #0f181e;
+                padding: 0.55rem 0.65rem;
+                min-height: 4.35rem;
+                box-shadow: none;
+            }
+            .control-stat-card.status-ok { border-left-color: #1fda83; }
+            .control-stat-card.status-watch { border-left-color: #f2a900; }
+            .control-stat-card.status-risk { border-left-color: #ff4b4b; }
+            .control-stat-card.status-muted { border-left-color: #697782; }
+            .control-stat-label {
+                color: #8a98a3;
+                font-size: 0.66rem;
+                font-weight: 850;
+                letter-spacing: 0.06em;
+                text-transform: uppercase;
+            }
+            .control-stat-value {
+                color: #eef4f7;
+                font-family: var(--font-data);
+                font-size: 1.05rem;
                 font-weight: 850;
                 letter-spacing: -0.01em;
-                box-shadow: 0 5px 14px rgba(15, 23, 42, 0.06);
+                line-height: 1.1;
+                margin-top: 0.28rem;
+            }
+            .control-stat-detail {
+                color: #9ba8b2;
+                font-size: 0.72rem;
+                line-height: 1.28;
+                margin-top: 0.24rem;
+            }
+            .control-action-grid, .control-feature-grid {
+                display: grid;
+                gap: 1px;
+                grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+                margin: 0.35rem 0 1rem 0;
+                background: #26323b;
+                border: 1px solid #26323b;
+            }
+            .control-action-card, .control-feature-card {
+                border: 0;
+                border-radius: 0;
+                background: #101a20;
+                box-shadow: none;
+                padding: 0.62rem 0.72rem;
+            }
+            .control-action-kicker {
+                color: #f2a900;
+                font-family: var(--font-data);
+                font-size: 0.66rem;
+                font-weight: 850;
+                letter-spacing: 0.06em;
+                text-transform: uppercase;
+            }
+            .control-action-title, .control-feature-title {
+                color: #eef4f7;
+                font-size: 0.9rem;
+                font-weight: 850;
+                letter-spacing: -0.01em;
+            }
+            .control-action-title { margin-top: 0.18rem; }
+            .control-action-copy, .control-feature-artifact {
+                color: #aeb9c2;
+                font-size: 0.78rem;
+                line-height: 1.35;
+                margin-top: 0.28rem;
+            }
+            .control-feature-topline {
+                display: flex;
+                justify-content: space-between;
+                gap: 0.65rem;
+                align-items: flex-start;
+            }
+            .control-status-pill {
+                border-radius: 2px;
+                border: 1px solid #697782;
+                color: #b1bcc5;
+                background: #252f36;
+                font-family: var(--font-data);
+                font-size: 0.64rem;
+                font-weight: 850;
+                letter-spacing: 0.02em;
+                padding: 0.12rem 0.36rem;
+                text-transform: uppercase;
+                white-space: nowrap;
+            }
+            .control-status-pill.status-ok { background: #062b1b; border-color: #1fda83; color: #1fda83; }
+            .control-status-pill.status-watch { background: #2b2104; border-color: #f2a900; color: #f2a900; }
+            .control-status-pill.status-risk { background: #321012; border-color: #ff4b4b; color: #ff6b6b; }
+            .control-status-pill.status-muted { background: #252f36; border-color: #697782; color: #b1bcc5; }
+            .control-command {
+                background: #071014;
+                border: 1px solid #26323b;
+                border-radius: 4px;
+                color: #d8e1e8;
+                font-family: var(--font-data);
+                font-size: 0.78rem;
+                line-height: 1.45;
+                margin: 0.25rem 0 1rem 0;
+                overflow-x: auto;
+                padding: 0.78rem 0.9rem;
+                white-space: pre;
+            }
+            @media (max-width: 900px) {
+                .control-hero-inner { grid-template-columns: 1fr; }
+                .control-stat-grid { grid-template-columns: 1fr; }
+                .forecast-console-body { grid-template-columns: 1fr; }
+                .forecast-console-metrics { grid-template-columns: repeat(2, minmax(90px, 1fr)); }
+            }
+            section[data-testid="stSidebar"] {
+                background: #0c141a;
+                border-right: 1px solid #2a3640;
+            }
+            section[data-testid="stSidebar"] h1,
+            section[data-testid="stSidebar"] h2,
+            section[data-testid="stSidebar"] h3,
+            section[data-testid="stSidebar"] label,
+            section[data-testid="stSidebar"] p {
+                color: #d8e1e8;
+                font-family: var(--font-ui);
+            }
+            section[data-testid="stSidebar"] div[data-testid="stCaptionContainer"] p {
+                color: #8a98a3;
+                font-size: 0.72rem;
+                line-height: 1.35;
+            }
+            .workbench-nav-shell {
+                border: 1px solid #2a3640;
+                border-radius: 4px;
+                background: #071014;
+                padding: 0.65rem 0.72rem;
+                margin: 0.7rem 0 0.55rem 0;
+                box-shadow: none;
+                font-family: var(--font-ui);
+            }
+            .workbench-nav-eyebrow {
+                color: #f2a900;
+                font-size: 0.68rem;
+                font-weight: 850;
+                letter-spacing: 0.07em;
+                text-transform: uppercase;
+            }
+            .workbench-nav-title {
+                color: #d8e1e8;
+                font-size: 0.78rem;
+                font-weight: 800;
+                line-height: 1.32;
+                margin-top: 0.22rem;
+            }
+            section[data-testid="stSidebar"] div[data-testid="stButton"] > button {
+                border-radius: 2px;
+                min-height: 2.25rem;
+                border: 1px solid #2a3640;
+                background: #111b22;
+                color: #d8e1e8;
+                font-family: var(--font-data);
+                font-size: 0.78rem;
+                font-weight: 800;
+                letter-spacing: 0;
+                box-shadow: none;
+            }
+            section[data-testid="stSidebar"] div[data-testid="stButton"] > button[kind="primary"] {
+                background: #f2a900;
+                border-color: #f2a900;
+                color: #071014;
+            }
+            section[data-testid="stSidebar"] div[data-testid="stButton"] > button:hover {
+                border-color: #f2a900;
+                color: #f2a900;
             }
             section[data-testid="stSidebar"] div[data-testid="stSelectbox"] label p {
                 font-weight: 800;
                 letter-spacing: -0.01em;
+            }
+            section[data-testid="stSidebar"] div[data-baseweb="select"] > div {
+                background: #0b1419;
+                border-color: #2a3640;
+                color: #eef4f7;
+                font-family: var(--font-data);
+            }
+            section[data-testid="stSidebar"] div[data-baseweb="select"] span,
+            section[data-testid="stSidebar"] div[data-baseweb="select"] svg {
+                color: #eef4f7;
+                fill: #eef4f7;
+            }
+            section[data-testid="stSidebar"] [data-testid="stRadio"] label {
+                color: #d8e1e8;
+                font-family: var(--font-ui);
             }
             </style>
             """,
@@ -3611,6 +4466,10 @@ def build_streamlit_app() -> str:
         artifact_load_started = time.perf_counter()
         manifest = read_json("manifest.json")
         diagnostics = read_json("diagnostics.json")
+        control_pane_state = read_json("control_pane_state.json")
+        training_progress = pd.DataFrame(read_jsonl("training_progress.jsonl"))
+        refresh_manifest = read_json("refresh_manifest.json")
+        refresh_delta = prep_dates(read_csv("refresh_delta.csv"))
         ledger_context = read_json("ledger_context.json")
         if ledger_context and "Forecast ledger" not in DASHBOARD_SECTIONS:
             DASHBOARD_SECTIONS.insert(DASHBOARD_SECTIONS.index("Feeder outputs"), "Forecast ledger")
@@ -3627,6 +4486,7 @@ def build_streamlit_app() -> str:
         backtest_long = prep_dates(read_csv("backtest_long.csv"))
         series_summary = read_csv("series_summary.csv")
         series_features = read_csv("series_features.csv")
+        borrowed_strength_advisor = read_csv("borrowed_strength_advisor.csv")
         model_audit = read_csv("model_audit.csv")
         model_win_rates = read_csv("model_win_rates.csv")
         model_tradeoff_scores = read_csv("model_tradeoff_scores.csv")
@@ -3689,6 +4549,7 @@ def build_streamlit_app() -> str:
                 backtest_long,
                 series_summary,
                 series_features,
+                borrowed_strength_advisor,
                 model_audit,
                 model_win_rates,
                 model_tradeoff_scores,
@@ -3732,36 +4593,55 @@ def build_streamlit_app() -> str:
             st.stop()
 
         uids = sorted(forecast["unique_id"].astype(str).dropna().unique())
-        st.title("Forecast review workbench")
-        st.caption("Use this to inspect decision readiness, model disagreement, intervals, rolling-origin windows, residuals, and feeder-ready outputs.")
-
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Series", len(uids))
-        c2.metric("Horizon rows", int(forecast.groupby("unique_id").size().max()))
-        c3.metric("Candidate models", len(model_columns(all_models)))
+        horizon_rows = int(forecast.groupby("unique_id").size().max())
+        candidate_model_count = len(model_columns(all_models))
         if not selection.empty and "rmse" in selection.columns and selection["rmse"].notna().any():
-            c4.metric("Best selected RMSE", f"{pd.to_numeric(selection['rmse'], errors='coerce').min():,.2f}")
+            best_selected_rmse = f"{pd.to_numeric(selection['rmse'], errors='coerce').min():,.2f}"
         else:
-            c4.metric("Best selected RMSE", "N/A")
+            best_selected_rmse = "N/A"
+        st.markdown(
+            f"""
+            <div class="forecast-console-topbar">
+                <div class="forecast-console-topline">
+                    <span class="forecast-console-label">Forecast workbench</span>
+                    <span class="forecast-console-caption">Artifact-backed review</span>
+                </div>
+                <div class="forecast-console-body">
+                    <div class="forecast-console-titlebox">
+                        <div class="forecast-console-title">Forecast workbench</div>
+                        <div class="forecast-console-subtitle">Local artifacts only: champion, candidates, trust, and output files.</div>
+                    </div>
+                    <div class="forecast-console-metrics">
+                        <div class="forecast-console-metric"><div class="forecast-console-metric-label">Series</div><div class="forecast-console-metric-value">{len(uids)}</div></div>
+                        <div class="forecast-console-metric"><div class="forecast-console-metric-label">Horizon rows</div><div class="forecast-console-metric-value">{horizon_rows}</div></div>
+                        <div class="forecast-console-metric"><div class="forecast-console-metric-label">Candidates</div><div class="forecast-console-metric-value">{candidate_model_count}</div></div>
+                        <div class="forecast-console-metric"><div class="forecast-console-metric-label">Best RMSE</div><div class="forecast-console-metric-value">{html.escape(best_selected_rmse)}</div></div>
+                    </div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
         with st.sidebar:
             st.header("Controls")
             active_section = render_workbench_section_nav()
             st.divider()
             uid = st.selectbox("Series", uids)
-            champion_scope = st.radio(
-                "Champion lens",
-                CHAMPION_SCOPE_OPTIONS,
-                help="Switch the active champion between the tournament winner, the best StatsForecast/classical candidate, and the best MLForecast candidate.",
-            )
-            winner_metric = st.selectbox(
-                "Winner metric",
-                available_winner_metrics(uid),
-                index=0,
-                format_func=metric_label,
-                help="Choose the metric used to pick the active champion inside the selected lens. This changes the dashboard champion for review; it does not rewrite forecast.csv.",
-            )
-            with st.expander("When should I use each metric?"):
+            with st.expander("Champion controls", expanded=False):
+                champion_scope = st.radio(
+                    "Champion lens",
+                    CHAMPION_SCOPE_OPTIONS,
+                    help="Switch the active champion between the tournament winner, the best StatsForecast/classical candidate, and the best MLForecast candidate.",
+                )
+                winner_metric = st.selectbox(
+                    "Winner metric",
+                    available_winner_metrics(uid),
+                    index=0,
+                    format_func=metric_label,
+                    help="Choose the metric used to pick the active champion inside the selected lens. This changes the dashboard champion for review; it does not rewrite forecast.csv.",
+                )
+                st.markdown("**Metric guide**")
                 for metric in available_winner_metrics(uid):
                     guidance = WINNER_METRIC_GUIDANCE[metric]
                     direction = "higher is better" if guidance["direction"] == "higher" else "lower is better"
@@ -3785,26 +4665,222 @@ def build_streamlit_app() -> str:
             focus_key = f"models_to_investigate_{uid}"
             stored_focus_models = st.session_state.get(focus_key, default_models)
             sidebar_focus_default = [model for model in dedupe_models(stored_focus_models) if model in model_options] or default_models
-            focus_models = st.multiselect(
-                "Models to investigate",
-                model_options,
-                default=sidebar_focus_default,
-                format_func=lambda model: model_menu_label(uid, model, winner_metric),
-                help="These models are highlighted in forecast, CV, residual, interval, and audit sections. Clear the list to only use the active champion.",
-                key=focus_key,
-            )
+            with st.expander("Model investigation controls", expanded=active_section == "Model investigation"):
+                st.caption("Used by Model investigation and diagnostic pages. Forecast Review now keeps a fixed champion view plus an all-model view so this picker does not make the main review disappear.")
+                focus_models = st.multiselect(
+                    "Models to investigate",
+                    model_options,
+                    default=sidebar_focus_default,
+                    format_func=lambda model: model_menu_label(uid, model, winner_metric),
+                    help="These models are highlighted in model investigation, CV, residual, interval, and audit sections. Clear the list to only use the active champion.",
+                    key=focus_key,
+                )
+                show_context_models = st.toggle(
+                    "Show all other models in diagnostic charts",
+                    value=False,
+                    help="Turn this on for full all-candidate context in CV/model-investigation diagnostic charts. Forecast Review always has its own all-model chart.",
+                )
             if active_champion and active_champion not in focus_models:
                 focus_models = [active_champion, *focus_models]
-            show_context_models = st.toggle(
-                "Show all other models as faint context",
-                value=False,
-                help="Turn this on for full all-candidate context. Keeping it off makes the first-glance chart faster and highlights only the champion plus investigated models.",
-            )
             if PERF_DIAGNOSTICS:
                 with st.expander("Performance diagnostics", expanded=False):
                     st.metric("Artifact load/prep seconds", f"{artifact_load_seconds:.2f}")
                     st.metric("Loaded artifact rows", f"{artifact_row_count:,}")
                     st.caption("Set NIXTLA_SCAFFOLD_STREAMLIT_PERF=1 to show this panel. CSV/JSON reads are cached by file path, modified time, and size.")
+
+        if active_section == "Control Pane":
+            st.subheader("Control Pane")
+            policy_table = policy_resolution_table()
+            run_warnings = diagnostics.get("warnings") or manifest.get("warnings") or []
+            if not isinstance(run_warnings, list):
+                run_warnings = [run_warnings]
+            warning_count = len([warning for warning in run_warnings if str(warning).strip()])
+            trust_label = "N/A"
+            if not trust_summary.empty and "unique_id" in trust_summary.columns:
+                trust_rows = trust_summary[trust_summary["unique_id"].astype(str) == str(uid)]
+                if not trust_rows.empty:
+                    for trust_col in ["trust_level", "trust", "readiness", "horizon_trust_state"]:
+                        if trust_col in trust_rows.columns and pd.notna(trust_rows.iloc[0].get(trust_col)):
+                            trust_label = str(trust_rows.iloc[0].get(trust_col))
+                            break
+            smooth_status = "not requested"
+            if not policy_table.empty and "family" in policy_table.columns:
+                smooth_rows = policy_table[policy_table["family"].astype(str).str.lower() == "smooth"]
+                if not smooth_rows.empty:
+                    row = smooth_rows.iloc[0]
+                    if bool(row.get("ran")):
+                        smooth_status = "ran"
+                    elif bool(row.get("requested")):
+                        smooth_status = str(row.get("reason_if_not_ran") or "skipped")
+                    else:
+                        smooth_status = "not requested"
+            spec_payload = manifest.get("spec", {}) if isinstance(manifest, dict) else {}
+            control_state = control_pane_state if isinstance(control_pane_state, dict) else {}
+            control_overview = control_state.get("overview", {}) if isinstance(control_state.get("overview", {}), dict) else {}
+            selected_models = control_overview.get("selected_models", [])
+            selected_series_count = len(selected_models) if isinstance(selected_models, list) else 0
+            run_window = " -> ".join(
+                value
+                for value in [
+                    display_value(control_overview.get("history_start"), default=""),
+                    display_value(control_overview.get("forecast_end"), default=""),
+                ]
+                if value
+            ) or "window unavailable"
+            horizon_detail = f"h={display_value(control_overview.get('horizon', spec_payload.get('horizon')), default='?')} | freq={display_value(control_overview.get('freq', spec_payload.get('freq')), default='?')}"
+            progress_scored = 0
+            progress_selected = 0
+            progress_families = 0
+            if not training_progress.empty:
+                if "event" in training_progress.columns:
+                    progress_scored = int((training_progress["event"].astype(str) == "candidate_scored").sum())
+                    progress_families = int(training_progress["event"].astype(str).str.startswith("family_").sum())
+                if "status" in training_progress.columns:
+                    progress_selected = int((training_progress["status"].astype(str) == "selected").sum())
+            refresh_delta_rows = int(len(refresh_delta))
+            refresh_delta_types = "none"
+            if not refresh_delta.empty and "delta_type" in refresh_delta.columns:
+                refresh_delta_counts = refresh_delta["delta_type"].fillna("unknown").astype(str).value_counts()
+                refresh_delta_types = ", ".join(f"{name}: {int(count)}" for name, count in refresh_delta_counts.items())
+            refresh_status = "comparison available" if refresh_manifest or refresh_delta_rows else "not a refresh comparison"
+            refresh_artifact_detail = "refresh_manifest.json + appendix/refresh_delta.csv" if refresh_manifest or refresh_delta_rows else "training_progress.jsonl is still available for run progress"
+            st.markdown("#### Run status")
+            st.caption("Reads the saved run artifacts. Use the command below to rerun with different settings.")
+            st.markdown(
+                '<div class="control-stat-grid">'
+                + control_stat_card("Selected model", overall_selected or "N/A", f"{selected_series_count or 1} series in scope", overall_selected or "")
+                + control_stat_card("Active champion", active_champion or "N/A", "Used by the visual review sections", active_champion or "")
+                + control_stat_card("Trust / readiness", trust_label, horizon_detail, trust_label)
+                + control_stat_card("Warnings", str(warning_count), run_window, "warn" if warning_count else "ok")
+                + "</div>",
+                unsafe_allow_html=True,
+            )
+            state_feature_rows = control_state.get("feature_map", []) if isinstance(control_state, dict) else []
+            refresh_feature_row = {
+                "mechanism": "Refresh comparison",
+                "status": "available" if refresh_manifest or not refresh_delta.empty else "not present",
+                "agent-readable artifact": "refresh_manifest.json / appendix/refresh_delta.csv",
+            }
+            feature_rows = list(state_feature_rows) if state_feature_rows else [
+                    {
+                        "mechanism": "Standard/light model ladder",
+                        "status": model_policy_resolution.get("model_policy", spec_payload.get("model_policy", "unknown")) if isinstance(model_policy_resolution, dict) else spec_payload.get("model_policy", "unknown"),
+                        "agent-readable artifact": "manifest.json -> model_policy_resolution",
+                    },
+                    {
+                        "mechanism": "Smooth ADAM family",
+                        "status": smooth_status,
+                        "agent-readable artifact": "manifest.json -> model_policy_resolution.family=smooth",
+                    },
+                    {
+                        "mechanism": "BYO Excel comparison",
+                        "status": "available" if any(not frame.empty for frame in [byo_model_forecasts, byo_forecast_comparison, byo_comparison_summary, byo_external_backtest, byo_model_scores]) else "not present",
+                        "agent-readable artifact": "byo_model_manifest.json / forecast_comparison.csv",
+                    },
+                    {
+                        "mechanism": "Hierarchy coherence",
+                        "status": "available" if any(not frame.empty for frame in [hierarchy_reconciliation, hierarchy_rollup, hierarchy_coherence_pre, hierarchy_coherence_post]) else "not present",
+                        "agent-readable artifact": "hierarchy_reconciliation.csv / hierarchy_rollup.csv",
+                    },
+                    {
+                        "mechanism": "Drivers and assumptions",
+                        "status": "available" if any(not frame.empty for frame in [scenario_assumptions, known_future_regressors, driver_availability_audit, driver_experiment_summary]) else "not present",
+                        "agent-readable artifact": "scenario_assumptions.csv / driver_availability_audit.csv",
+                    },
+                    {
+                        "mechanism": "Borrowed-strength advisor",
+                        "status": "available" if not borrowed_strength_advisor.empty else "not present",
+                        "agent-readable artifact": "appendix/borrowed_strength_advisor.csv",
+                    },
+                    {
+                        "mechanism": "Forecast ledger",
+                        "status": "available" if ledger_context else "not present",
+                        "agent-readable artifact": "ledger_context.json",
+                    },
+                ]
+            if not any(str(row.get("mechanism", "")).lower() == "refresh comparison" for row in feature_rows if isinstance(row, dict)):
+                feature_rows.append(refresh_feature_row)
+            actions = [
+                ("1. Review forecast", "Open Forecast review next", "Check the headline, forecast path, and planning eligibility before sharing."),
+            ]
+            if warning_count:
+                actions.append(("2. Check caveats", "Resolve warnings", "Open Warnings below and diagnostics.json before treating this run as stakeholder-ready."))
+            else:
+                actions.append(("2. Check caveats", "No warnings recorded", "Still inspect trust, intervals, and residuals before locking an official planning view."))
+            if str(smooth_status).lower() in {"not requested", "not_requested", "not installed", "not_installed_or_not_enabled"}:
+                actions.append(("3. Optional depth", "Try the standard ladder", "For a higher-quality run, use --preset standard and add optional smooth only when license/install gates are accepted."))
+            if not any("byo" in str(row.get("mechanism", "")).lower() and "available" in str(row.get("status", "")).lower() for row in feature_rows if isinstance(row, dict)):
+                actions.append(("4. Optional comparison", "Attach BYO comparison", "Bring Excel-owned base/bull/bear forecasts in as comparison evidence without changing the scaffold champion."))
+            st.markdown("#### Next checks")
+            st.markdown(control_action_cards(actions[:4]), unsafe_allow_html=True)
+            st.markdown("#### Artifact availability")
+            st.markdown(control_feature_cards(feature_rows), unsafe_allow_html=True)
+            with st.expander("Feature map as table", expanded=False):
+                render_dataframe(pd.DataFrame(feature_rows), width="stretch", hide_index=True)
+            st.markdown("#### Refresh / progress lane")
+            st.caption("Run refreshes from the CLI so artifacts remain the source of truth. While a run is producing files, use the refresh button to re-read appended progress rows; completed refresh comparisons add `refresh_manifest.json` and `appendix/refresh_delta.csv`.")
+            if st.button("Refresh artifact reads", key="control_refresh_artifacts"):
+                st.cache_data.clear()
+                st.rerun()
+            st.markdown(
+                '<div class="control-stat-grid">'
+                + control_stat_card("Refresh status", refresh_status, refresh_artifact_detail, refresh_status)
+                + control_stat_card("Progress rows", str(int(len(training_progress))), "audit/training_progress.jsonl", "ok" if len(training_progress) else "muted")
+                + control_stat_card("Delta rows", str(refresh_delta_rows), "forecast/spec/trust/model changes", "ok" if refresh_delta_rows else "muted")
+                + control_stat_card("Delta types", compact_text(refresh_delta_types, 44), refresh_delta_types, "ok" if refresh_delta_rows else "muted")
+                + "</div>",
+                unsafe_allow_html=True,
+            )
+            if refresh_manifest or not refresh_delta.empty:
+                if refresh_manifest:
+                    previous_run = display_value(refresh_manifest.get("previous_run"), default="unknown previous run")
+                    current_run = display_value(refresh_manifest.get("current_run"), default="unknown current run")
+                    st.caption(f"Completed refresh comparison: previous `{previous_run}` -> current `{current_run}`.")
+                if not refresh_delta.empty:
+                    preview_cols = [
+                        col
+                        for col in ["delta_type", "unique_id", "ds", "field", "previous_value", "current_value", "absolute_delta", "pct_delta", "status", "note"]
+                        if col in refresh_delta.columns
+                    ]
+                    render_dataframe(refresh_delta[preview_cols].head(200), width="stretch", hide_index=True)
+                with st.expander("Refresh manifest", expanded=False):
+                    st.json(refresh_manifest or {})
+            else:
+                st.info("No completed refresh comparison artifacts were found for this run. A normal forecast still shows candidate/model progress above; refresh deltas appear after comparing a current run to a previous run.")
+            st.markdown("#### Rerun command")
+            st.caption("Replace `<input.csv>` with the original input path when rerunning. Changing levers here is explicit: copy/edit/run the command rather than silently mutating artifacts.")
+            rerun_command = control_state.get("generated_command") or regenerated_forecast_command()
+            st.markdown(f'<pre class="control-command">{html.escape(str(rerun_command))}</pre>', unsafe_allow_html=True)
+            with st.expander("Progress and handoff artifacts", expanded=False):
+                st.caption("Agents can inspect `control_pane_state.json`; humans can review `audit/training_progress.jsonl` for model family availability, scored candidates, selected models, and warnings.")
+                st.markdown(
+                    '<div class="control-stat-grid">'
+                    + control_stat_card("Progress rows", str(int(len(training_progress))), "JSONL evidence rows", "ok" if len(training_progress) else "muted")
+                    + control_stat_card("Family events", str(progress_families), "requested/ran/skipped families", "ok" if progress_families else "muted")
+                    + control_stat_card("Scored candidates", str(progress_scored), "backtest leaderboard rows", "ok" if progress_scored else "muted")
+                    + control_stat_card("Selected rows", str(progress_selected), "champion decisions", "ok" if progress_selected else "muted")
+                    + "</div>",
+                    unsafe_allow_html=True,
+                )
+                if not training_progress.empty:
+                    display_cols = [col for col in ["phase", "event", "status", "family", "model", "unique_id", "reason"] if col in training_progress.columns]
+                    render_dataframe(training_progress[display_cols].head(200), width="stretch", hide_index=True)
+                else:
+                    st.info("No training progress rows were found yet. Completed runs should include `audit/training_progress.jsonl`.")
+                with st.expander("Raw control pane state", expanded=False):
+                    st.json(control_state or {})
+            if not policy_table.empty:
+                with st.expander("Model policy resolution", expanded=False):
+                    render_dataframe(policy_table, width="stretch", hide_index=True)
+            if run_warnings:
+                with st.expander("Warnings and caveats", expanded=True):
+                    for warning in run_warnings[:20]:
+                        if str(warning).strip():
+                            st.warning(str(warning))
+                    if len(run_warnings) > 20:
+                        st.caption(f"{len(run_warnings) - 20} additional warnings omitted from this quick pane; open diagnostics.json for the full list.")
+            with st.expander("Current run spec", expanded=False):
+                st.json(spec_payload or {})
 
         headline_series = {
             str(row.get("unique_id")): row.get("paragraph")
@@ -3874,102 +4950,102 @@ def build_streamlit_app() -> str:
                 st.caption(f"Trust rubric: {TRUST_RUBRIC_TEXT}")
                 st.caption(f"Interval glossary: {INTERVAL_GLOSSARY_TEXT}")
             with st.expander("All series trust summary"):
-                st.dataframe(display_trust_summary(trust_summary), width="stretch", hide_index=True)
+                render_dataframe(display_trust_summary(trust_summary), width="stretch", hide_index=True)
         if active_section == "Forecast review":
-            st.subheader("Copy/paste wide summary")
-            st.caption("Human-readable wide table for pasting into planning docs. Date columns stay clean; actuals, forecasts, and selected interval bounds appear as labeled rows under each series. Forecast rows default to the active champion by series; switch the model selector for challenger-model copy/paste. Blank cells mean that series/model has no value or interval bound for that date; official machine-readable values remain in `history.csv`, `forecast.csv`, and `forecast_long.csv`.")
-            history_period_count = int(history["ds"].dropna().nunique()) if not history.empty and "ds" in history.columns else 0
-            forecast_period_count = int(forecast["ds"].dropna().nunique()) if not forecast.empty and "ds" in forecast.columns else 0
-            wide_top_cols = st.columns([1.05, 1.05, 1.9])
-            wide_source = wide_top_cols[0].selectbox(
-                "Wide summary values",
-                WIDE_SUMMARY_SOURCE_OPTIONS,
-                index=0,
-                help="Actuals use history.csv y; Forecast uses the selected model feed; Actuals + forecast stitches recent actuals to future model forecasts.",
-            )
-            wide_rows = wide_top_cols[1].radio(
-                "Rows",
-                WIDE_SUMMARY_ROW_OPTIONS,
-                index=0,
-                horizontal=True,
-                help="Use all series for portfolio copy/paste, or only the selected sidebar series for focused review.",
-            )
-            explicit_wide_models = [model for model in dedupe_models([active_champion, selected_model(uid), *model_options]) if model.lower() != "none"]
-            wide_model_options = [
-                WIDE_SUMMARY_MODEL_CHAMPION,
-                WIDE_SUMMARY_MODEL_SELECTED,
-                *explicit_wide_models,
-            ]
-            wide_model = wide_top_cols[2].selectbox(
-                "Forecast model",
-                wide_model_options,
-                index=0,
-                format_func=lambda choice: wide_summary_model_label(choice, uid, active_champion, winner_metric),
-                disabled=wide_source == "Actuals",
-                help="Default uses the active champion from the sidebar champion lens. Pick an explicit model to copy challenger forecasts and intervals.",
-            )
-            preview_interval_model = wide_summary_model_for_uid(uid, uid, wide_model, champion_scope, winner_metric, active_champion)
-            interval_options = selected_interval_levels(uid, preview_interval_model) if wide_source != "Actuals" else []
-            wide_bottom_cols = st.columns([1.05, 1.35, 1, 1])
-            wide_units = wide_bottom_cols[0].selectbox(
-                "Display units",
-                WIDE_SUMMARY_VALUE_OPTIONS,
-                index=0,
-                help="Display-only formatting. Download forecast.csv/history.csv for unformatted source values.",
-            )
-            wide_interval_levels = wide_bottom_cols[1].multiselect(
-                "Prediction intervals",
-                [80, 95],
-                default=interval_options,
-                disabled=wide_source == "Actuals",
-                help="Adds indented lo/hi rows for the selected forecast model when interval bounds exist. Empty selection shows point forecasts only.",
-            )
-            wide_actual_periods = int(
-                wide_bottom_cols[2].number_input(
-                    "Actual periods",
-                    min_value=0,
-                    max_value=history_period_count,
-                    value=min(12, history_period_count),
-                    step=1,
-                    disabled=wide_source == "Forecast",
-                    help="Most recent history periods to include as columns.",
+            with st.expander("Copy/paste wide summary", expanded=False):
+                st.caption("Human-readable wide table for pasting into planning docs. Date columns stay clean; actuals, forecasts, and selected interval bounds appear as labeled rows under each series. Forecast rows default to the active champion by series; switch the model selector for challenger-model copy/paste. Blank cells mean that series/model has no value or interval bound for that date; official machine-readable values remain in `history.csv`, `forecast.csv`, and `forecast_long.csv`.")
+                history_period_count = int(history["ds"].dropna().nunique()) if not history.empty and "ds" in history.columns else 0
+                forecast_period_count = int(forecast["ds"].dropna().nunique()) if not forecast.empty and "ds" in forecast.columns else 0
+                wide_top_cols = st.columns([1.05, 1.05, 1.9])
+                wide_source = wide_top_cols[0].selectbox(
+                    "Wide summary values",
+                    WIDE_SUMMARY_SOURCE_OPTIONS,
+                    index=0,
+                    help="Actuals use history.csv y; Forecast uses the selected model feed; Actuals + forecast stitches recent actuals to future model forecasts.",
                 )
-            )
-            wide_forecast_periods = int(
-                wide_bottom_cols[3].number_input(
-                    "Forecast periods",
-                    min_value=0,
-                    max_value=forecast_period_count,
-                    value=forecast_period_count,
-                    step=1,
+                wide_rows = wide_top_cols[1].radio(
+                    "Rows",
+                    WIDE_SUMMARY_ROW_OPTIONS,
+                    index=0,
+                    horizontal=True,
+                    help="Use all series for portfolio copy/paste, or only the selected sidebar series for focused review.",
+                )
+                explicit_wide_models = [model for model in dedupe_models([active_champion, selected_model(uid), *model_options]) if model.lower() != "none"]
+                wide_model_options = [
+                    WIDE_SUMMARY_MODEL_CHAMPION,
+                    WIDE_SUMMARY_MODEL_SELECTED,
+                    *explicit_wide_models,
+                ]
+                wide_model = wide_top_cols[2].selectbox(
+                    "Forecast model",
+                    wide_model_options,
+                    index=0,
+                    format_func=lambda choice: wide_summary_model_label(choice, uid, active_champion, winner_metric),
                     disabled=wide_source == "Actuals",
-                    help="Future forecast periods to include as columns.",
+                    help="Default uses the active champion from the sidebar champion lens. Pick an explicit model to copy challenger forecasts and intervals.",
                 )
-            )
-            wide_summary = wide_summary_table(
-                wide_source,
-                wide_rows,
-                uid,
-                wide_units,
-                wide_actual_periods,
-                wide_forecast_periods,
-                wide_model,
-                champion_scope,
-                winner_metric,
-                active_champion,
-                wide_interval_levels,
-            )
-            if wide_summary.empty:
-                st.info("No rows are available for the selected wide summary controls.")
-            else:
-                st.dataframe(wide_summary, width="stretch", hide_index=True)
-                st.download_button(
-                    "Download wide summary CSV",
-                    wide_summary.to_csv(index=False).encode("utf-8"),
-                    file_name="forecast_wide_summary.csv",
-                    mime="text/csv",
-                    help="Downloads the displayed wide summary, including the selected display units.",
+                preview_interval_model = wide_summary_model_for_uid(uid, uid, wide_model, champion_scope, winner_metric, active_champion)
+                interval_options = selected_interval_levels(uid, preview_interval_model) if wide_source != "Actuals" else []
+                wide_bottom_cols = st.columns([1.05, 1.35, 1, 1])
+                wide_units = wide_bottom_cols[0].selectbox(
+                    "Display units",
+                    WIDE_SUMMARY_VALUE_OPTIONS,
+                    index=0,
+                    help="Display-only formatting. Download forecast.csv/history.csv for unformatted source values.",
                 )
+                wide_interval_levels = wide_bottom_cols[1].multiselect(
+                    "Prediction intervals",
+                    [80, 95],
+                    default=interval_options,
+                    disabled=wide_source == "Actuals",
+                    help="Adds indented lo/hi rows for the selected forecast model when interval bounds exist. Empty selection shows point forecasts only.",
+                )
+                wide_actual_periods = int(
+                    wide_bottom_cols[2].number_input(
+                        "Actual periods",
+                        min_value=0,
+                        max_value=history_period_count,
+                        value=min(12, history_period_count),
+                        step=1,
+                        disabled=wide_source == "Forecast",
+                        help="Most recent history periods to include as columns.",
+                    )
+                )
+                wide_forecast_periods = int(
+                    wide_bottom_cols[3].number_input(
+                        "Forecast periods",
+                        min_value=0,
+                        max_value=forecast_period_count,
+                        value=forecast_period_count,
+                        step=1,
+                        disabled=wide_source == "Actuals",
+                        help="Future forecast periods to include as columns.",
+                    )
+                )
+                wide_summary = wide_summary_table(
+                    wide_source,
+                    wide_rows,
+                    uid,
+                    wide_units,
+                    wide_actual_periods,
+                    wide_forecast_periods,
+                    wide_model,
+                    champion_scope,
+                    winner_metric,
+                    active_champion,
+                    wide_interval_levels,
+                )
+                if wide_summary.empty:
+                    st.info("No rows are available for the selected wide summary controls.")
+                else:
+                    render_dataframe(wide_summary, width="stretch", hide_index=True)
+                    st.download_button(
+                        "Download wide summary CSV",
+                        wide_summary.to_csv(index=False).encode("utf-8"),
+                        file_name="forecast_wide_summary.csv",
+                        mime="text/csv",
+                        help="Downloads the displayed wide summary, including the selected display units.",
+                    )
         horizon_message = active_model_horizon_summary(uid, active_champion)
         horizon_severity = horizon_message_severity(horizon_message)
         if horizon_severity == "error":
@@ -3983,14 +5059,14 @@ def build_streamlit_app() -> str:
         if not target_transform_audit.empty:
             with st.expander("Target transformation audit", expanded=False):
                 st.caption("Raw, normalized, and modeled target values. Log/log1p forecasts are inverse-transformed for reporting; factor-normalized forecasts remain in normalized units unless future factors are supplied externally.")
-                st.dataframe(target_transform_audit.head(2000), width="stretch", hide_index=True)
+                render_dataframe(target_transform_audit.head(2000), width="stretch", hide_index=True)
         policy_table = policy_resolution_table()
         if not policy_table.empty:
             with st.expander("Model policy resolution", expanded=False):
                 allowlist = model_policy_resolution.get("model_allowlist", []) if isinstance(model_policy_resolution, dict) else []
                 allowlist_note = f" model_allowlist={', '.join(str(model) for model in allowlist)}." if allowlist else ""
                 st.caption(f"model_policy={model_policy_resolution.get('model_policy', 'unknown')}.{allowlist_note} `all` means all eligible open-source families; skipped or unavailable families are explicit.")
-                st.dataframe(policy_table, width="stretch", hide_index=True)
+                render_dataframe(policy_table, width="stretch", hide_index=True)
 
         st.caption(f"Active section: {active_section}. Only this workbench section renders on rerun; switch sections from the sidebar when you need deeper diagnostics.")
 
@@ -4001,7 +5077,7 @@ def build_streamlit_app() -> str:
             if not picker_guide.empty:
                 with st.expander("Model picker guide: rank, engine, and role", expanded=True):
                     st.caption("Rank comes from the current winner metric. Engine labels distinguish StatsForecast/classical, MLForecast, baseline, ensemble, custom, and other candidates; the native guide table italicizes the Engine column when Streamlit dataframe styling is available.")
-                    st.dataframe(model_picker_guide_style(picker_guide), width="stretch", hide_index=True)
+                    render_dataframe(model_picker_guide_style(picker_guide), width="stretch", hide_index=True)
             investigation = model_investigation_table(uid, dedupe_models(focus_models), active_champion=active_champion, metric=winner_metric)
             inv_cols = st.columns(4)
             inv_cols[0].metric("Active champion", active_champion or "N/A")
@@ -4009,11 +5085,11 @@ def build_streamlit_app() -> str:
             inv_cols[2].metric("Investigated models", len(dedupe_models(focus_models)))
             inv_cols[3].metric("Available candidates", len(model_options))
             if not investigation.empty:
-                st.dataframe(investigation, width="stretch", hide_index=True)
+                render_dataframe(investigation, width="stretch", hide_index=True)
             st.subheader("Model tradeoffs / Pareto frontier")
             st.caption("Pareto highlights non-dominated models across complete RMSE/MAE backtest metrics for analyst review. WAPE and scale-free metrics stay diagnostic; Pareto does not override the official selected model or `forecast.csv`.")
             if not model_pareto_frontier.empty:
-                st.plotly_chart(pareto_tradeoff_chart(uid), width="stretch", key="pareto_tradeoff_chart")
+                render_plotly_chart(pareto_tradeoff_chart(uid), width="stretch", key="pareto_tradeoff_chart")
                 pareto_view = model_pareto_frontier[model_pareto_frontier["unique_id"].astype(str) == uid].copy()
                 pareto_cols = [
                     col
@@ -4032,7 +5108,7 @@ def build_streamlit_app() -> str:
                     ]
                     if col in pareto_view.columns
                 ]
-                st.dataframe(pareto_view[pareto_cols].head(1000), width="stretch", hide_index=True)
+                render_dataframe(pareto_view[pareto_cols].head(1000), width="stretch", hide_index=True)
             else:
                 st.info("No Pareto frontier rows are available. Runs without backtest metrics produce an empty schema for this review lens.")
             st.subheader("Focused future forecast")
@@ -4048,7 +5124,7 @@ def build_streamlit_app() -> str:
                 )
             else:
                 st.caption("Focused future forecast has no interval-bearing selected models; lines show point forecasts only.")
-            st.plotly_chart(
+            render_plotly_chart(
                 forecast_chart(uid, show_all_models=False, champion=active_champion, focus_models=focus_models),
                 width="stretch",
                 key="investigation_forecast_chart",
@@ -4065,7 +5141,7 @@ def build_streamlit_app() -> str:
                         key=f"model_investigation_cutoff_{uid}",
                     )
                     st.subheader("Focused rolling-origin window")
-                    st.plotly_chart(
+                    render_plotly_chart(
                         backtest_chart(
                             uid,
                             cutoff,
@@ -4085,53 +5161,65 @@ def build_streamlit_app() -> str:
                         ]
                         if "model" in metrics_view.columns and focus_models:
                             metrics_view = metrics_view[metrics_view["model"].astype(str).isin(dedupe_models(focus_models))]
-                        st.dataframe(metrics_view.sort_values("rmse").head(50), width="stretch", hide_index=True)
+                        render_dataframe(metrics_view.sort_values("rmse").head(50), width="stretch", hide_index=True)
                     if not backtest_long.empty:
                         view = backtest_long[(backtest_long["unique_id"].astype(str) == uid) & (backtest_long["cutoff"] == cutoff)]
                         if "model" in view.columns and focus_models:
                             view = view[view["model"].astype(str).isin(dedupe_models(focus_models))]
-                        st.dataframe(view.head(500), width="stretch", hide_index=True)
+                        render_dataframe(view.head(500), width="stretch", hide_index=True)
                 else:
                     st.info("No rolling-origin windows are available for this series.")
             else:
                 st.info("No backtest predictions are available for focused model investigation.")
 
         if active_section == "Forecast review":
-            st.subheader("Tournament lens")
+            st.subheader("Forecast model snapshot")
             lens_cols = st.columns(4)
             lens_cols[0].metric("Champion lens", champion_scope.replace("Best ", ""))
             lens_cols[1].metric("Active champion", active_champion or "N/A")
             lens_cols[2].metric("Winner metric", metric_label(winner_metric))
-            lens_cols[3].metric("Investigated models", len(dedupe_models(focus_models)))
+            lens_cols[3].metric("Available candidates", len(model_options))
             family_view = family_summary(uid)
             if not family_view.empty:
-                st.dataframe(family_view, width="stretch", hide_index=True)
-            st.subheader("Candidate model context")
-            hidden_count = other_candidate_count(uid, champion=active_champion, focus_models=focus_models)
-            if hidden_count:
-                st.caption(f"{hidden_count} other candidates are shown as faint unlabeled context lines. Labels are reserved for the active champion and investigated models.")
-            chart_models = model_columns(all_models) if show_context_models else dedupe_models([active_champion, *focus_models])
-            chart_interval_models = [model for model in chart_models if selected_interval_levels(uid, model)]
+                with st.expander("Family summary", expanded=False):
+                    render_dataframe(family_view, width="stretch", hide_index=True)
+            champion_review_models = dedupe_models([active_champion, *top_weighted(uid, champion=active_champion)])
+            st.subheader("Champion decision view")
+            st.caption("Active champion plus weighted alternatives. Independent of the Model investigation picker.")
+            chart_interval_models = [model for model in champion_review_models if selected_interval_levels(uid, model)]
             chart_interval_levels = sorted({level for model in chart_interval_models for level in selected_interval_levels(uid, model)})
             if chart_interval_models:
                 st.caption(
-                    f"First-glance chart includes interval bands for {len(chart_interval_models)} candidate model(s): "
+                    f"Champion view includes interval bands for {len(chart_interval_models)} candidate model(s): "
                     f"{', '.join(str(level) + '%' for level in chart_interval_levels)} where available. "
                     "Check the Prediction intervals tab for calibration and row-level review."
                 )
             else:
-                st.warning("No prediction interval bands were written for the models currently shown. The faint gray spread is model disagreement, not calibrated uncertainty.")
-            st.plotly_chart(
-                forecast_chart(uid, show_all_models=show_context_models, champion=active_champion, focus_models=focus_models),
+                st.warning("No prediction interval bands were written for the champion decision view.")
+            render_plotly_chart(
+                forecast_chart(uid, show_all_models=False, champion=active_champion, focus_models=champion_review_models),
                 width="stretch",
                 key="forecast_context_chart",
             )
-            st.caption("Use the Model investigation tab for the dedicated model picker and focused comparison charts.")
+            with st.expander("All candidate model spread", expanded=True):
+                st.caption("Every candidate forecast as context; highlighted lines show the active champion and weighted alternatives. Spread is disagreement, not uncertainty.")
+                render_plotly_chart(
+                    forecast_chart(uid, show_all_models=True, champion=active_champion, focus_models=champion_review_models),
+                    width="stretch",
+                    key="forecast_all_models_chart",
+                )
+            st.caption("Use the Model investigation tab for the dedicated picker when you want custom model comparisons.")
             if not series_summary.empty:
-                st.dataframe(series_summary[series_summary["unique_id"].astype(str) == uid], width="stretch", hide_index=True)
+                with st.expander("Series summary", expanded=False):
+                    render_dataframe(series_summary[series_summary["unique_id"].astype(str) == uid], width="stretch", hide_index=True)
             if not series_features.empty:
-                st.caption("Forecastability features are advisory signals for the next experiment loop; they do not change model selection.")
-                st.dataframe(series_features[series_features["unique_id"].astype(str) == uid], width="stretch", hide_index=True)
+                with st.expander("Forecastability features", expanded=False):
+                    st.caption("Forecastability features are advisory signals for the next experiment loop; they do not change model selection.")
+                    render_dataframe(series_features[series_features["unique_id"].astype(str) == uid], width="stretch", hide_index=True)
+            if not borrowed_strength_advisor.empty:
+                with st.expander("Borrowed-strength guidance", expanded=False):
+                    st.caption("Borrowed-strength guidance is advisory only. It does not anchor, pool, or override the official selected forecast.")
+                    render_dataframe(borrowed_strength_advisor[borrowed_strength_advisor["unique_id"].astype(str) == uid], width="stretch", hide_index=True)
 
         if active_section == "CV window player":
             if backtest.empty or "cutoff" not in backtest.columns:
@@ -4184,7 +5272,7 @@ def build_streamlit_app() -> str:
                     cutoff = cutoffs[st.session_state[state_key]]
                     st.markdown(f"**Window {st.session_state[state_key] + 1} of {len(cutoffs)}** | cutoff `{pd.Timestamp(cutoff).date()}`")
                     st.subheader("All backtested candidate models")
-                    st.plotly_chart(
+                    render_plotly_chart(
                         backtest_chart(
                             uid,
                             cutoff,
@@ -4205,12 +5293,12 @@ def build_streamlit_app() -> str:
                         ]
                         if "model" in metrics_view.columns and focus_models:
                             metrics_view = metrics_view[metrics_view["model"].astype(str).isin(dedupe_models(focus_models))]
-                        st.dataframe(metrics_view.sort_values("rmse").head(50), width="stretch", hide_index=True)
+                        render_dataframe(metrics_view.sort_values("rmse").head(50), width="stretch", hide_index=True)
                     if not backtest_long.empty:
                         view = backtest_long[(backtest_long["unique_id"].astype(str) == uid) & (backtest_long["cutoff"] == cutoff)]
                         if "model" in view.columns and focus_models:
                             view = view[view["model"].astype(str).isin(dedupe_models(focus_models))]
-                        st.dataframe(view.head(500), width="stretch", hide_index=True)
+                        render_dataframe(view.head(500), width="stretch", hide_index=True)
                     if autoplay and len(cutoffs) > 1:
                         st.caption(f"Auto-advance is active. Next window in {autoplay_delay:.1f}s.")
                         time.sleep(float(autoplay_delay))
@@ -4225,7 +5313,7 @@ def build_streamlit_app() -> str:
             if not interval_guide.empty:
                 with st.expander("Interval model picker guide: rank and engine", expanded=False):
                     st.caption("Interval model menus also use `#rank | model | engine`; use the rank and Engine columns to separate StatsForecast/classical intervals from MLForecast intervals.")
-                    st.dataframe(model_picker_guide_style(interval_guide), width="stretch", hide_index=True)
+                    render_dataframe(model_picker_guide_style(interval_guide), width="stretch", hide_index=True)
             rank_lookup = model_rank_map(uid, winner_metric)
             preferred_interval_models = dedupe_models(
                 [
@@ -4258,27 +5346,27 @@ def build_streamlit_app() -> str:
             interval_cols[4].metric("Model/date rows", len(interval_future))
             st.caption(f"Interval glossary: {INTERVAL_GLOSSARY_TEXT}")
             if interval_levels and interval_models:
-                st.plotly_chart(prediction_interval_focus_chart(uid, interval_models), width="stretch", key="prediction_interval_focus_chart")
-                st.plotly_chart(prediction_interval_width_chart(uid, interval_models), width="stretch", key="prediction_interval_width_chart")
+                render_plotly_chart(prediction_interval_focus_chart(uid, interval_models), width="stretch", key="prediction_interval_focus_chart")
+                render_plotly_chart(prediction_interval_width_chart(uid, interval_models), width="stretch", key="prediction_interval_width_chart")
                 if not interval_summary.empty:
                     st.subheader("Future interval width summary")
-                    st.dataframe(interval_summary, width="stretch", hide_index=True)
+                    render_dataframe(interval_summary, width="stretch", hide_index=True)
             else:
                 st.warning("No prediction interval bands are available for this series/model set. Use calibrated lower/upper bands when planning ranges matter; model spread is not a prediction interval.")
             st.subheader("Empirical calibration evidence")
             if not interval_diagnostics.empty:
                 st.caption("This compares nominal interval coverage to rolling-origin empirical coverage. Coverage below target means ranges were too narrow historically.")
-                st.plotly_chart(interval_calibration_chart(uid, interval_models), width="stretch", key="interval_focus_calibration_plot")
+                render_plotly_chart(interval_calibration_chart(uid, interval_models), width="stretch", key="interval_focus_calibration_plot")
                 interval_view = interval_diagnostics[interval_diagnostics["unique_id"].astype(str) == uid]
                 if "model" in interval_view.columns and interval_models:
                     interval_view = interval_view[interval_view["model"].astype(str).isin(dedupe_models(interval_models))]
-                st.dataframe(interval_view.head(1000), width="stretch", hide_index=True)
+                render_dataframe(interval_view.head(1000), width="stretch", hide_index=True)
             else:
                 st.info("No empirical interval diagnostics are available. Future interval bands, if present, should be treated as future-only or model-assumption ranges until rolling-origin coverage evidence exists.")
             st.subheader("Forecast rows with interval fields")
             interval_columns = ordered_model_feed_columns(interval_future)
             if interval_columns:
-                st.dataframe(interval_future[interval_columns].head(1000), width="stretch", hide_index=True)
+                render_dataframe(interval_future[interval_columns].head(1000), width="stretch", hide_index=True)
             else:
                 st.info("No interval-bearing forecast rows were found for the selected interval models.")
 
@@ -4289,25 +5377,25 @@ def build_streamlit_app() -> str:
                 table = model_score_table(uid)
                 if not table.empty:
                     sort_col = winner_metric if winner_metric in table.columns else ("rmse" if "rmse" in table.columns else table.columns[0])
-                    st.dataframe(table.sort_values(sort_col, ascending=metric_direction(sort_col) != "higher").head(1000), width="stretch", hide_index=True)
+                    render_dataframe(table.sort_values(sort_col, ascending=metric_direction(sort_col) != "higher").head(1000), width="stretch", hide_index=True)
                 else:
                     st.info("No model audit table available.")
                 st.subheader("Investigated model comparison")
                 investigation = model_investigation_table(uid, dedupe_models(focus_models))
                 if not investigation.empty:
-                    st.dataframe(investigation, width="stretch", hide_index=True)
+                    render_dataframe(investigation, width="stretch", hide_index=True)
                 else:
                     st.info("Pick models in the Model investigation tab to compare them here.")
                 st.subheader("Win rate vs benchmark")
                 if not model_win_rates.empty:
-                    st.plotly_chart(benchmark_win_rate_chart(), width="stretch", key="benchmark_win_rate_chart")
-                    st.dataframe(model_win_rates.head(1000), width="stretch", hide_index=True)
+                    render_plotly_chart(benchmark_win_rate_chart(), width="stretch", key="benchmark_win_rate_chart")
+                    render_dataframe(model_win_rates.head(1000), width="stretch", hide_index=True)
                 else:
                     st.info("No benchmark win-rate table available.")
             with right:
                 st.subheader("Weights")
                 if not weights.empty:
-                    st.dataframe(weights[weights["unique_id"].astype(str) == uid].sort_values("weight", ascending=False), width="stretch", hide_index=True)
+                    render_dataframe(weights[weights["unique_id"].astype(str) == uid].sort_values("weight", ascending=False), width="stretch", hide_index=True)
                 else:
                     st.info("No model weights available.")
             st.subheader("Heuristic residual checks")
@@ -4323,58 +5411,58 @@ def build_streamlit_app() -> str:
                     st.warning("Residual checks flagged warnings. Treat the forecast as review-needed until the residual pattern is explained.")
                 elif "insufficient" in status_values:
                     st.info("Residual check sample is small. Treat these diagnostics as directional.")
-                st.dataframe(residual_test_view.head(1000), width="stretch", hide_index=True)
+                render_dataframe(residual_test_view.head(1000), width="stretch", hide_index=True)
             else:
                 st.info("No residual test summary available.")
             st.subheader("Residual diagnostics by horizon")
             if not residual_diagnostics.empty:
                 st.caption("Residual views follow the models selected in the Model investigation tab. The ACF/white-noise panel uses the first investigated model so it remains readable.")
-                st.plotly_chart(residual_horizon_chart(uid, focus_models), width="stretch", key="residual_horizon_plot")
+                render_plotly_chart(residual_horizon_chart(uid, focus_models), width="stretch", key="residual_horizon_plot")
                 res_left, res_mid, res_right = st.columns(3)
                 with res_left:
-                    st.plotly_chart(residual_time_chart(uid, focus_models), width="stretch", key="residual_time_plot")
+                    render_plotly_chart(residual_time_chart(uid, focus_models), width="stretch", key="residual_time_plot")
                 with res_mid:
-                    st.plotly_chart(residual_distribution_chart(uid, focus_models), width="stretch", key="residual_distribution_plot")
+                    render_plotly_chart(residual_distribution_chart(uid, focus_models), width="stretch", key="residual_distribution_plot")
                 with res_right:
-                    st.plotly_chart(residual_acf_chart(uid, focus_models), width="stretch", key="residual_acf_plot")
+                    render_plotly_chart(residual_acf_chart(uid, focus_models), width="stretch", key="residual_acf_plot")
                     st.caption(residual_white_noise_verdict(uid, focus_models))
                 outliers = residual_outlier_table(uid, focus_models)
                 if not outliers.empty:
                     st.warning("Residual outliers detected (|standardized residual| >= 3). Map these dates to known events before trusting the model.")
-                    st.dataframe(outliers.head(100), width="stretch", hide_index=True)
+                    render_dataframe(outliers.head(100), width="stretch", hide_index=True)
                 diagnostics_view = residual_diagnostics[residual_diagnostics["unique_id"].astype(str) == uid]
                 if "model" in diagnostics_view.columns and focus_models:
                     diagnostics_view = diagnostics_view[diagnostics_view["model"].astype(str).isin(dedupe_models(focus_models))]
-                st.dataframe(diagnostics_view.head(1000), width="stretch", hide_index=True)
+                render_dataframe(diagnostics_view.head(1000), width="stretch", hide_index=True)
             else:
                 st.info("No residual diagnostics available.")
             st.subheader("Prediction interval calibration")
             if not interval_diagnostics.empty:
                 st.caption("Interval diagnostics are empirical rolling-origin checks; future-only or adjusted-not-recalibrated bands need extra review before planning use.")
-                st.plotly_chart(interval_calibration_chart(uid, focus_models), width="stretch", key="interval_calibration_plot")
+                render_plotly_chart(interval_calibration_chart(uid, focus_models), width="stretch", key="interval_calibration_plot")
                 interval_view = interval_diagnostics[interval_diagnostics["unique_id"].astype(str) == uid]
                 if "model" in interval_view.columns and focus_models:
                     interval_view = interval_view[interval_view["model"].astype(str).isin(dedupe_models(focus_models))]
-                st.dataframe(interval_view.head(1000), width="stretch", hide_index=True)
+                render_dataframe(interval_view.head(1000), width="stretch", hide_index=True)
             else:
                 st.info("No empirical interval diagnostics available. Future interval bands, if present, should be treated as future-only until rolling-origin coverage evidence is available.")
             st.subheader("MLForecast interpretability")
             render_mlforecast_explainability_guide()
             if not model_explainability.empty:
-                st.plotly_chart(feature_importance_chart(focus_models), width="stretch", key="feature_importance_plot")
+                render_plotly_chart(feature_importance_chart(focus_models), width="stretch", key="feature_importance_plot")
                 explainability_view = model_explainability.copy()
                 if "model" in explainability_view.columns and focus_models:
                     explainability_view = explainability_view[explainability_view["model"].astype(str).isin(dedupe_models(focus_models))]
                 if explainability_view.empty:
                     st.info("No MLForecast feature importance rows match the currently investigated models.")
                 else:
-                    st.dataframe(explainability_view.sort_values(["model", "importance"], ascending=[True, False]), width="stretch", hide_index=True)
+                    render_dataframe(explainability_view.sort_values(["model", "importance"], ascending=[True, False]), width="stretch", hide_index=True)
             else:
-                st.info("No MLForecast feature importance available. Use model policy auto/all with enough history and installed MLForecast/LightGBM dependencies.")
+                st.info("No MLForecast feature importance available. Use model policy light/all with enough history and installed MLForecast/LightGBM dependencies.")
             st.subheader("Feature selection receipts")
             st.caption("Descriptive evidence only: these receipts explain feature inclusion and model-reported importance, but they do not auto-prune features or override backtest selection.")
             if not feature_selection_receipts.empty:
-                st.dataframe(feature_selection_receipts, width="stretch", hide_index=True)
+                render_dataframe(feature_selection_receipts, width="stretch", hide_index=True)
             else:
                 st.info("No feature-selection receipt rows were produced for this run.")
 
@@ -4394,7 +5482,7 @@ def build_streamlit_app() -> str:
                     if isinstance(warning, str) and warning:
                         st.warning(warning)
                     st.markdown(f"**Interpretation:** {row.get('interpretation', 'No interpretation available.')}")
-                st.dataframe(seasonality_diagnostics, width="stretch", hide_index=True)
+                render_dataframe(seasonality_diagnostics, width="stretch", hide_index=True)
             else:
                 st.info("No seasonality diagnostics are available.")
             st.subheader("Seasonal year overlay")
@@ -4444,7 +5532,7 @@ def build_streamlit_app() -> str:
                     st.caption(f"Model overlay: {model_menu_label(uid, seasonal_overlay_model, winner_metric)}. Forecast rows use `forecast_long.csv` yhat when available, with `all_models.csv` only as a fallback.")
                 elif seasonal_overlay_model:
                     st.warning("The selected model has no future forecast rows available for this seasonal overlay, so only actual-year context is shown.")
-                st.plotly_chart(
+                render_plotly_chart(
                     seasonality_year_profile_chart(
                         uid,
                         year_start_month,
@@ -4455,13 +5543,13 @@ def build_streamlit_app() -> str:
                     key="seasonality_year_profile_chart",
                 )
                 with st.expander("Seasonal year overlay data"):
-                    st.dataframe(seasonal_profile.head(2000), width="stretch", hide_index=True)
+                    render_dataframe(seasonal_profile.head(2000), width="stretch", hide_index=True)
             else:
                 st.info("No actual or selected-model forecast rows are available for a seasonal year overlay.")
             st.subheader("Additive decomposition evidence")
             if not seasonality_decomposition.empty:
-                st.plotly_chart(seasonality_decomposition_chart(uid), width="stretch", key="seasonality_decomposition_plot")
-                st.dataframe(
+                render_plotly_chart(seasonality_decomposition_chart(uid), width="stretch", key="seasonality_decomposition_plot")
+                render_dataframe(
                     seasonality_decomposition[seasonality_decomposition["unique_id"].astype(str) == uid].head(500),
                     width="stretch",
                     hide_index=True,
@@ -4478,7 +5566,7 @@ def build_streamlit_app() -> str:
                 if not hierarchy_reconciliation.empty:
                     methods = sorted(hierarchy_reconciliation.get("applied_method", pd.Series(dtype=str)).astype(str).dropna().unique())
                     st.success(f"Hierarchy reconciliation is enabled. Applied method(s): {', '.join(methods) or 'recorded in table'}. Unreconciled forecasts and pre/post gap audits are saved under audit/.")
-                    st.dataframe(hierarchy_reconciliation, width="stretch", hide_index=True)
+                    render_dataframe(hierarchy_reconciliation, width="stretch", hide_index=True)
                 else:
                     st.caption("Current forecasts are independent per node unless reconciliation is enabled. This view compares selected parent forecasts with the sum of their immediate children.")
                 level_summary = (
@@ -4488,24 +5576,24 @@ def build_streamlit_app() -> str:
                     .agg(series_count=("unique_id", "nunique"))
                     .sort_values(["hierarchy_depth", "hierarchy_level"])
                 )
-                st.dataframe(level_summary, width="stretch", hide_index=True)
+                render_dataframe(level_summary, width="stretch", hide_index=True)
                 parent_options = hierarchy_parent_options()
                 if parent_options:
                     parent_id = st.selectbox("Parent node", parent_options)
                     st.subheader("Parent history + forecast")
-                    st.plotly_chart(hierarchy_rollup_chart(parent_id), width="stretch", key="hierarchy_rollup_plot")
+                    render_plotly_chart(hierarchy_rollup_chart(parent_id), width="stretch", key="hierarchy_rollup_plot")
                     if not hierarchy_rollup.empty and "parent_unique_id" in hierarchy_rollup.columns:
                         st.subheader("Hierarchy roll-up output")
                         rollup_view = hierarchy_rollup[hierarchy_rollup["parent_unique_id"].astype(str) == parent_id].copy()
                         st.caption("This is the appendix/hierarchy_rollup.csv slice for the selected parent: history and selected forecast beside immediate-child sums and child coverage.")
-                        st.dataframe(rollup_view.head(1000), width="stretch", hide_index=True)
+                        render_dataframe(rollup_view.head(1000), width="stretch", hide_index=True)
                     st.subheader("Children history + forecast")
-                    st.plotly_chart(hierarchy_children_chart(parent_id), width="stretch", key="hierarchy_children_plot")
+                    render_plotly_chart(hierarchy_children_chart(parent_id), width="stretch", key="hierarchy_children_plot")
                     if not hierarchy_reconciliation_comparison.empty:
                         st.subheader("Bottom-up vs top-down method comparison")
                         st.caption("This appears when the run was produced with `--hierarchy-reconciliation both`. Bottom-up is the primary output by default; top-down is saved as a comparison path for sparse/noisy children.")
-                        st.plotly_chart(hierarchy_method_comparison_chart(parent_id), width="stretch", key="hierarchy_method_comparison_plot")
-                        st.dataframe(
+                        render_plotly_chart(hierarchy_method_comparison_chart(parent_id), width="stretch", key="hierarchy_method_comparison_plot")
+                        render_dataframe(
                             hierarchy_reconciliation_comparison[
                                 hierarchy_reconciliation_comparison["unique_id"].astype(str).isin([parent_id, *hierarchy_children(parent_id)])
                             ].head(1000),
@@ -4519,23 +5607,23 @@ def build_streamlit_app() -> str:
                             contribution_view["abs_child_share"] = pd.to_numeric(contribution_view["child_share_of_parent"], errors="coerce").abs()
                             contribution_view = contribution_view.sort_values("abs_child_share", ascending=False)
                         st.caption("Use this table to tell which child nodes drive parent totals and parent-minus-child gaps.")
-                        st.dataframe(contribution_view.head(1000), width="stretch", hide_index=True)
+                        render_dataframe(contribution_view.head(1000), width="stretch", hide_index=True)
                 if not hierarchy_coherence.empty:
                     st.subheader("Coherence gaps")
                     display = hierarchy_coherence.copy()
                     if "gap_pct" in display.columns:
                         display["abs_gap_pct"] = pd.to_numeric(display["gap_pct"], errors="coerce").abs()
                         display = display.sort_values("abs_gap_pct", ascending=False)
-                    st.dataframe(display.head(1000), width="stretch", hide_index=True)
+                    render_dataframe(display.head(1000), width="stretch", hide_index=True)
                     if not hierarchy_coherence_pre.empty or not hierarchy_coherence_post.empty:
                         st.subheader("Pre/post reconciliation gap audit")
                         cols = st.columns(2)
                         with cols[0]:
                             st.caption("Before reconciliation")
-                            st.dataframe(hierarchy_coherence_pre.head(1000), width="stretch", hide_index=True)
+                            render_dataframe(hierarchy_coherence_pre.head(1000), width="stretch", hide_index=True)
                         with cols[1]:
                             st.caption("After reconciliation")
-                            st.dataframe(hierarchy_coherence_post.head(1000), width="stretch", hide_index=True)
+                            render_dataframe(hierarchy_coherence_post.head(1000), width="stretch", hide_index=True)
                     if not hierarchy_backtest_comparison.empty:
                         st.subheader("Reconciled vs unreconciled backtest comparison")
                         st.caption("This compares selected-model rolling-origin errors before and after applying the reconciliation method. Reconciliation guarantees coherence, but it can improve or worsen node-level accuracy.")
@@ -4545,7 +5633,7 @@ def build_streamlit_app() -> str:
                             worsened = int((comparison["abs_error_delta"] > 0).sum())
                             improved = int((comparison["abs_error_delta"] < 0).sum())
                             st.info(f"Reconciliation improved {improved} selected backtest row(s) and worsened {worsened} row(s) by absolute error; review level-specific tradeoffs before planning.")
-                        st.dataframe(comparison.head(1000), width="stretch", hide_index=True)
+                        render_dataframe(comparison.head(1000), width="stretch", hide_index=True)
                 else:
                     st.warning("Hierarchy metadata exists, but hierarchy_coherence.csv is empty.")
 
@@ -4590,25 +5678,25 @@ def build_streamlit_app() -> str:
                 if driver_explainability_view.empty:
                     st.info("No feature-importance rows match the currently investigated models.")
                 else:
-                    st.plotly_chart(feature_importance_chart(focus_models), width="stretch", key="driver_feature_importance_plot")
+                    render_plotly_chart(feature_importance_chart(focus_models), width="stretch", key="driver_feature_importance_plot")
                     sort_columns = [col for col in ["model", "importance"] if col in driver_explainability_view.columns]
                     if sort_columns:
                         driver_explainability_view = driver_explainability_view.sort_values(sort_columns, ascending=[col != "importance" for col in sort_columns])
-                    st.dataframe(driver_explainability_view.head(1000), width="stretch", hide_index=True)
+                    render_dataframe(driver_explainability_view.head(1000), width="stretch", hide_index=True)
             else:
-                st.info("No MLForecast feature importance available. Run with model policy auto/all, enough history, and MLForecast dependencies to populate model_explainability.csv.")
+                st.info("No MLForecast feature importance available. Run with model policy light/all, enough history, and MLForecast dependencies to populate model_explainability.csv.")
             if not scenario_assumptions.empty:
                 st.subheader("Scenario assumptions")
-                st.dataframe(scenario_assumptions, width="stretch", hide_index=True)
+                render_dataframe(scenario_assumptions, width="stretch", hide_index=True)
             if not scenario_forecast.empty:
                 st.subheader("Scenario forecast preview")
                 scenario_view = scenario_forecast.copy()
                 if "unique_id" in scenario_view.columns:
                     scenario_view = scenario_view[scenario_view["unique_id"].astype(str) == uid]
-                st.dataframe(scenario_view.head(1000), width="stretch", hide_index=True)
+                render_dataframe(scenario_view.head(1000), width="stretch", hide_index=True)
             if not known_future_regressors.empty:
                 st.subheader("Known-future regressor declarations")
-                st.dataframe(known_future_regressors, width="stretch", hide_index=True)
+                render_dataframe(known_future_regressors, width="stretch", hide_index=True)
             if not driver_availability_audit.empty:
                 st.subheader("Driver audit distribution")
                 if "audit_status" in driver_availability_audit.columns:
@@ -4620,18 +5708,18 @@ def build_streamlit_app() -> str:
                         .rename_axis("audit_status")
                         .reset_index(name="regressor_count")
                     )
-                    st.dataframe(distribution, width="stretch", hide_index=True)
+                    render_dataframe(distribution, width="stretch", hide_index=True)
                 st.subheader("Driver availability audit")
-                st.dataframe(driver_availability_audit, width="stretch", hide_index=True)
+                render_dataframe(driver_availability_audit, width="stretch", hide_index=True)
             if not driver_model_features.empty:
                 st.subheader("MLForecast driver feature gate")
-                st.dataframe(driver_model_features, width="stretch", hide_index=True)
+                render_dataframe(driver_model_features, width="stretch", hide_index=True)
             if not driver_model_cv_delta.empty:
                 st.subheader("Driver model CV evidence")
-                st.dataframe(driver_model_cv_delta, width="stretch", hide_index=True)
+                render_dataframe(driver_model_cv_delta, width="stretch", hide_index=True)
             if not driver_experiment_summary.empty:
                 st.subheader("Driver experiment summary")
-                st.dataframe(driver_experiment_summary, width="stretch", hide_index=True)
+                render_dataframe(driver_experiment_summary, width="stretch", hide_index=True)
 
         if active_section == "Forecast ledger":
             st.subheader("Forecast ledger")
@@ -4707,7 +5795,7 @@ def build_streamlit_app() -> str:
                 st.subheader("Forecasts as they moved over time")
                 st.caption("Latest actuals are a clean line; registered forecast versions are lines too. Official locks are emphasized, and non-lock refreshes use lighter shades so the version history is visible without overpowering the chart.")
                 if not ledger_snapshot.empty:
-                    st.plotly_chart(
+                    render_plotly_chart(
                         ledger_forecast_evolution_chart(ledger_snapshot, ledger_actuals, ledger_history, ledger_locks, ledger_uid, selected_version_labels),
                         width="stretch",
                         key="ledger_forecast_evolution",
@@ -4776,28 +5864,28 @@ def build_streamlit_app() -> str:
                 st.subheader("Audit tables")
                 st.caption("The ledger remains Power BI-ready: these CSV mirrors are stable feeder tables for folder ingestion, semantic models, and monthly forecast-vs-actual tracking.")
                 with st.expander("Registered versions", expanded=False):
-                    st.dataframe(ledger_versions.head(1000), width="stretch", hide_index=True)
+                    render_dataframe(ledger_versions.head(1000), width="stretch", hide_index=True)
                 with st.expander("Official locks", expanded=False):
                     st.caption("Multiple locks are allowed: March lock, April lock, leadership submission, and other submitted views remain filterable instead of being overwritten.")
-                    st.dataframe(ledger_locks.head(1000), width="stretch", hide_index=True)
+                    render_dataframe(ledger_locks.head(1000), width="stretch", hide_index=True)
                 with st.expander("Selected-lock vs latest delta rows", expanded=False):
-                    st.dataframe(ledger_deltas.head(1000), width="stretch", hide_index=True)
+                    render_dataframe(ledger_deltas.head(1000), width="stretch", hide_index=True)
                 with st.expander("Forecast performance rows", expanded=False):
-                    st.dataframe(ledger_performance.head(1000), width="stretch", hide_index=True)
+                    render_dataframe(ledger_performance.head(1000), width="stretch", hide_index=True)
                 with st.expander("Forecast vs landed actual row detail", expanded=False):
-                    st.dataframe(ledger_actuals.head(1000), width="stretch", hide_index=True)
+                    render_dataframe(ledger_actuals.head(1000), width="stretch", hide_index=True)
                 with st.expander("Actual revision history", expanded=False):
-                    st.dataframe(ledger_revisions.head(1000), width="stretch", hide_index=True)
+                    render_dataframe(ledger_revisions.head(1000), width="stretch", hide_index=True)
                 with st.expander("Latest historicals used in ledger visuals", expanded=False):
                     st.caption("The evolution chart uses `corrected_y` from corrected_actuals.csv when available, otherwise the latest actual revision. Normalized history remains in the corrected/normalized actuals audit table so it is not mixed silently with raw-scale forecasts.")
-                    st.dataframe(ledger_history.head(1000), width="stretch", hide_index=True)
+                    render_dataframe(ledger_history.head(1000), width="stretch", hide_index=True)
                 with st.expander("Adjustment audit", expanded=False):
                     st.caption("Corrections and business-model normalizations are audited separately from raw actuals. Applying corrected/normalized history to a forecast requires an explicit user action; it is never silent.")
-                    st.dataframe(ledger_adjustments.head(1000), width="stretch", hide_index=True)
+                    render_dataframe(ledger_adjustments.head(1000), width="stretch", hide_index=True)
                 with st.expander("Forward-looking regime changes", expanded=False):
-                    st.dataframe(ledger_regimes.head(1000), width="stretch", hide_index=True)
+                    render_dataframe(ledger_regimes.head(1000), width="stretch", hide_index=True)
                 with st.expander("Corrected / normalized actuals preview", expanded=False):
-                    st.dataframe(ledger_corrected.head(1000), width="stretch", hide_index=True)
+                    render_dataframe(ledger_corrected.head(1000), width="stretch", hide_index=True)
 
         if active_section == "BYO / Finance model":
             st.subheader("BYO / Finance model")
@@ -4892,7 +5980,7 @@ def build_streamlit_app() -> str:
                             hovermode="x unified",
                             legend_title="Model / scenario / source",
                         )
-                        st.plotly_chart(fig, width="stretch")
+                        render_plotly_chart(fig, width="stretch")
                     else:
                         st.info("No aligned BYO comparison rows are available for the selected series/filter.")
 
@@ -4910,7 +5998,7 @@ def build_streamlit_app() -> str:
                         "hierarchy_level",
                         "sheet",
                     ]
-                    st.dataframe(compare_view[[column for column in delta_cols if column in compare_view.columns]].head(500), width="stretch", hide_index=True)
+                    render_dataframe(compare_view[[column for column in delta_cols if column in compare_view.columns]].head(500), width="stretch", hide_index=True)
 
                 if not byo_comparison_summary.empty:
                     st.markdown("#### Comparison summary")
@@ -4930,7 +6018,7 @@ def build_streamlit_app() -> str:
                         "avg_abs_delta_yhat_vs_scaffold",
                         "avg_pct_delta_vs_scaffold",
                     ]
-                    st.dataframe(summary[[column for column in summary_cols if column in summary.columns]].head(500), width="stretch", hide_index=True)
+                    render_dataframe(summary[[column for column in summary_cols if column in summary.columns]].head(500), width="stretch", hide_index=True)
 
                 if not byo_model_scores.empty:
                     st.markdown("#### Cutoff-labeled BYO scoring")
@@ -4949,13 +6037,13 @@ def build_streamlit_app() -> str:
                         "start",
                         "end",
                     ]
-                    st.dataframe(byo_model_scores[[column for column in score_cols if column in byo_model_scores.columns]].head(500), width="stretch", hide_index=True)
+                    render_dataframe(byo_model_scores[[column for column in score_cols if column in byo_model_scores.columns]].head(500), width="stretch", hide_index=True)
                 elif not byo_external_backtest.empty:
                     st.info("BYO scoring details exist, but no grouped BYO score summary was found. Open external_backtest_long.csv for row-level diagnostics.")
 
                 if not byo_model_contract.empty:
                     with st.expander("BYO contract and source lineage", expanded=False):
-                        st.dataframe(byo_model_contract.head(500), width="stretch", hide_index=True)
+                        render_dataframe(byo_model_contract.head(500), width="stretch", hide_index=True)
 
         if active_section == "Feeder outputs":
             st.subheader("Consolidated feeder files")
@@ -4965,6 +6053,7 @@ def build_streamlit_app() -> str:
                 - `appendix/backtest_long.csv`: rolling-origin predictions in long format with actuals, errors, interval bounds, and coverage flags.
                 - `appendix/series_summary.csv`: one row per series for analyst review and model feeds.
                 - `appendix/series_features.csv`: forecastability features and per-series recommended next experiment step for agent iteration; advisory only.
+                - `appendix/borrowed_strength_advisor.csv`: sparse-series guidance for parent anchoring, reference-class review, panel-pool review, or independent treatment; advisory only.
                 - `appendix/model_audit.csv`: leaderboard enriched with weights and selected flags.
                 - `appendix/model_win_rates.csv`: cross-series win rates against SeasonalNaive/Naive benchmarks.
                 - `appendix/model_tradeoff_scores.csv`, `appendix/model_pareto_frontier.csv`: broad tradeoff scores plus RMSE/MAE non-dominated Pareto alternatives for review only; WAPE and scale-free metrics remain diagnostic, and official forecasts still come from `forecast.csv`.
@@ -4987,9 +6076,9 @@ def build_streamlit_app() -> str:
             )
             st.subheader("appendix/forecast_long.csv")
             st.caption("Model feed columns keep `yhat`, `yhat_lo_80`, `yhat_hi_80`, `yhat_lo_95`, and `yhat_hi_95` adjacent so point forecasts and interval levels can be read together.")
-            st.dataframe(forecast_long[ordered_model_feed_columns(forecast_long)].head(1000), width="stretch", hide_index=True)
+            render_dataframe(forecast_long[ordered_model_feed_columns(forecast_long)].head(1000), width="stretch", hide_index=True)
             st.subheader("appendix/backtest_long.csv")
-            st.dataframe(backtest_long[ordered_model_feed_columns(backtest_long)].head(1000), width="stretch", hide_index=True)
+            render_dataframe(backtest_long[ordered_model_feed_columns(backtest_long)].head(1000), width="stretch", hide_index=True)
         '''
     ).strip() + "\n"
 
@@ -5397,6 +6486,7 @@ def _backtest_svg(payload: dict[str, Any], series_id: str, cutoff: Any) -> str:
 
 def _payload_from_run(run: ForecastRun) -> dict[str, Any]:
     from nixtla_scaffold.outputs import (
+        build_borrowed_strength_advisor,
         build_forecast_long,
         build_feature_selection_receipts,
         build_hierarchy_backtest_comparison,
@@ -5432,6 +6522,7 @@ def _payload_from_run(run: ForecastRun) -> dict[str, Any]:
         "model_tradeoff_scores": _records(build_model_tradeoff_scores(run)),
         "model_pareto_frontier": _records(build_model_pareto_frontier(run)),
         "feature_selection_receipts": _records(build_feature_selection_receipts(run)),
+        "borrowed_strength_advisor": _records(build_borrowed_strength_advisor(run)),
         "residual_tests": _records(build_residual_test_summary(run)),
         "trust_summary": _records(build_trust_summary(run)),
         "target_transform_audit": _records(run.transformation_audit),
@@ -5488,6 +6579,7 @@ def _payload_from_directory(run_dir: Path) -> dict[str, Any]:
         "model_tradeoff_scores": _read_artifact_records(run_dir, "model_tradeoff_scores.csv"),
         "model_pareto_frontier": _read_artifact_records(run_dir, "model_pareto_frontier.csv"),
         "feature_selection_receipts": _read_artifact_records(run_dir, "feature_selection_receipts.csv"),
+        "borrowed_strength_advisor": _read_artifact_records(run_dir, "borrowed_strength_advisor.csv"),
         "residual_tests": _read_artifact_records(run_dir, "residual_tests.csv"),
         "trust_summary": _read_artifact_records(run_dir, "trust_summary.csv"),
         "target_transform_audit": _read_artifact_records(run_dir, "target_transform_audit.csv"),
@@ -5958,6 +7050,18 @@ def _interval_summary(row: dict[str, Any]) -> str:
 
 def _output_item(name: str, description: str) -> str:
     return f'<div class="output-item"><strong><code>{_esc(name)}</code></strong><span class="footnote">{_esc(description)}</span></div>'
+
+
+def _borrowed_strength_section(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return ""
+    return f"""
+    <section class="panel" style="margin-bottom:14px">
+      <h2>Borrowed-strength advisor</h2>
+      <p class="footnote">This advisory screen flags sparse or low-trust series that may need parent anchoring, reference-class review, or panel-pool review. It is review-only: it does not change champion selection, reconcile values, or override <code>forecast.csv</code>.</p>
+      {_table(rows, ["unique_id", "history_observations", "history_depth_bucket", "forecastability_score_0_100", "trust_level", "anchor_guidance", "anchor_unique_id", "anchor_type", "reason", "recommended_next_action", "advisory_only"], limit=24)}
+    </section>
+    """
 
 
 def _target_transform_section(rows: list[dict[str, Any]]) -> str:

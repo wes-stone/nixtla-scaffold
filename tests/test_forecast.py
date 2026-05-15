@@ -11,7 +11,7 @@ from nixtla_scaffold.citations import FPPY_CITATION
 from nixtla_scaffold.cli import _coerce_sheet, main
 from nixtla_scaffold.drivers import DriverFeatureBundle
 from nixtla_scaffold.forecast import _apply_shrinkage_toward_last_actual
-from nixtla_scaffold.model_families import canonical_model_name
+from nixtla_scaffold.model_families import canonical_model_name, model_family
 from nixtla_scaffold.models import (
     ModelResult,
     _add_weighted_ensemble_to_cv,
@@ -33,6 +33,23 @@ from nixtla_scaffold.outputs import (
 from nixtla_scaffold.profile import profile_dataset
 from nixtla_scaffold.reports import write_report_artifacts_from_directory
 import nixtla_scaffold.models as model_module
+
+
+class _FakeSmoothModule:
+    class ADAM:
+        def __init__(self, *, model, h, holdout=False, fast=True, verbose=0, lags=None):
+            self.model = model
+            self.last_value = 0.0
+
+        def fit(self, y):
+            self.last_value = float(y[-1])
+            return self
+
+        def predict(self, horizon):
+            return pd.DataFrame({"mean": [self.last_value + step for step in range(1, horizon + 1)]})
+
+    class AutoADAM(ADAM):
+        pass
 
 
 def _common_support_cv_frame() -> pd.DataFrame:
@@ -166,6 +183,8 @@ def test_model_allowlist_accepts_stats_sklearn_alias_and_keeps_plain_ridge_mlfor
     pytest.importorskip("sklearn")
     assert canonical_model_name("ridge") == "Ridge"
     assert canonical_model_name("stats sklearn ridge") == "StatsSklearn_Ridge"
+    assert canonical_model_name("smooth adam zxz") == "SmoothADAM_ZXZ"
+    assert model_family("SmoothADAM_ZXZ") == "smooth"
     df = pd.DataFrame(
         {
             "unique_id": ["Revenue"] * 36,
@@ -197,7 +216,7 @@ def test_model_allowlist_accepts_stats_sklearn_alias_and_keeps_plain_ridge_mlfor
             horizon=6,
             freq="MS",
             levels=(),
-            model_policy="auto",
+            model_policy="light",
             model_allowlist=("ridge",),
             weighted_ensemble=False,
             verbose=False,
@@ -282,7 +301,7 @@ def test_model_allowlist_accepts_friendly_arima_aliases_and_filters_tournament()
             horizon=3,
             freq="ME",
             levels=(),
-            model_policy="auto",
+            model_policy="light",
             model_allowlist=("arima", "arima mstl"),
             weighted_ensemble=False,
             verbose=False,
@@ -330,6 +349,38 @@ def test_model_allowlist_accepts_mstl_feature_arima_alias() -> None:
     assert run.spec.model_allowlist == ("AutoARIMA_MSTLFeatures",)
     assert run.manifest()["spec"]["model_allowlist"] == ["AutoARIMA_MSTLFeatures"]
     assert "AutoARIMA_MSTLFeatures" in set(run.backtest_metrics["model"])
+
+
+def test_mstl_feature_arima_backtests_on_mature_rolling_origin_folds() -> None:
+    values = [100 + i * 4 + (18 if i % 12 == 11 else 0) - (8 if i % 12 == 6 else 0) for i in range(48)]
+    df = pd.DataFrame(
+        {
+            "unique_id": ["Revenue"] * len(values),
+            "ds": pd.date_range("2022-07-31", periods=len(values), freq="ME"),
+            "y": values,
+        }
+    )
+
+    run = run_forecast(
+        df,
+        ForecastSpec(
+            horizon=12,
+            freq="ME",
+            levels=(),
+            model_policy="statsforecast",
+            model_allowlist=("arima mstl features",),
+            weighted_ensemble=False,
+            verbose=False,
+        ),
+    )
+
+    metrics = run.backtest_metrics[run.backtest_metrics["model"] == "AutoARIMA_MSTLFeatures"].iloc[0]
+    assert "AutoARIMA_MSTLFeatures" in run.all_models.columns
+    assert run.all_models["AutoARIMA_MSTLFeatures"].notna().all()
+    assert int(metrics["observations"]) == 24
+    assert int(metrics["cv_windows"]) == 2
+    assert any("AutoARIMA_MSTLFeatures backtested on 2 of 3 rolling-origin folds" in warning for warning in run.warnings)
+    assert not any("AutoARIMA_MSTLFeatures backtest skipped because the shortest rolling-origin" in warning for warning in run.warnings)
 
 
 def test_mstl_feature_arima_runs_for_eligible_series_in_mixed_history_panel() -> None:
@@ -384,7 +435,7 @@ def test_model_allowlist_ml_only_failure_does_not_fallback_to_disallowed_models(
     monkeypatch.setattr(model_module, "forecast_with_mlforecast", fail_mlforecast)
 
     with pytest.raises(ImportError, match="model_allowlist requested only MLForecast models"):
-        run_forecast(df, ForecastSpec(horizon=3, freq="ME", model_policy="auto", model_allowlist=("LightGBM",)))
+        run_forecast(df, ForecastSpec(horizon=3, freq="ME", model_policy="light", model_allowlist=("LightGBM",)))
 
 
 def test_model_allowlist_ml_only_resolution_marks_classical_families_skipped(monkeypatch) -> None:
@@ -427,7 +478,7 @@ def test_model_allowlist_ml_only_resolution_marks_classical_families_skipped(mon
 
     monkeypatch.setattr(model_module, "forecast_with_mlforecast", fake_mlforecast)
 
-    run = run_forecast(df, ForecastSpec(horizon=3, freq="ME", model_policy="auto", model_allowlist=("LightGBM",)))
+    run = run_forecast(df, ForecastSpec(horizon=3, freq="ME", model_policy="light", model_allowlist=("LightGBM",)))
 
     resolution_by_family = {row["family"]: row for row in run.model_policy_resolution["families"]}
     assert resolution_by_family["baseline"]["reason_if_not_ran"] == "skipped_by_model_allowlist"
@@ -451,7 +502,7 @@ def test_model_allowlist_disallows_baseline_fallback_when_statsforecast_unavaila
     monkeypatch.setattr(model_module, "forecast_with_statsforecast", fail_statsforecast)
 
     with pytest.raises(RuntimeError, match="baseline fallback would violate model_allowlist"):
-        run_forecast(df, ForecastSpec(horizon=3, freq="ME", model_policy="auto", model_allowlist=("arima",)))
+        run_forecast(df, ForecastSpec(horizon=3, freq="ME", model_policy="light", model_allowlist=("arima",)))
 
 
 def test_mlforecast_rolling_feature_policy_adds_audited_lag_transforms() -> None:
@@ -849,7 +900,7 @@ def test_mlforecast_ladder_uses_multiple_regressor_families() -> None:
     assert not run.model_explainability.empty
 
 
-def test_auto_policy_uses_shared_cv_windows_for_statsforecast_and_mlforecast() -> None:
+def test_light_policy_uses_shared_cv_windows_for_statsforecast_and_mlforecast() -> None:
     pytest.importorskip("mlforecast")
     pytest.importorskip("sklearn")
     df = pd.DataFrame(
@@ -860,7 +911,7 @@ def test_auto_policy_uses_shared_cv_windows_for_statsforecast_and_mlforecast() -
         }
     )
 
-    run = run_forecast(df, ForecastSpec(horizon=6, freq="MS", model_policy="auto", strict_cv_horizon=True, verbose=False))
+    run = run_forecast(df, ForecastSpec(horizon=6, freq="MS", model_policy="light", strict_cv_horizon=True, verbose=False))
 
     metrics = run.backtest_metrics.set_index("model")
     stats_contract = metrics.loc["AutoARIMA", ["selection_horizon", "cv_windows", "cv_step_size"]].to_dict()
@@ -871,7 +922,7 @@ def test_auto_policy_uses_shared_cv_windows_for_statsforecast_and_mlforecast() -
     assert ml_cutoffs == stats_cutoffs
 
 
-def test_auto_policy_attempts_mlforecast_when_cv_feasible_below_regressor_gate(monkeypatch) -> None:
+def test_light_policy_attempts_mlforecast_when_cv_feasible_below_regressor_gate(monkeypatch) -> None:
     df = pd.DataFrame(
         {
             "unique_id": ["Revenue"] * 12,
@@ -898,7 +949,7 @@ def test_auto_policy_attempts_mlforecast_when_cv_feasible_below_regressor_gate(m
 
     run = run_forecast(
         df,
-        ForecastSpec(horizon=2, freq="MS", levels=(), model_policy="auto", weighted_ensemble=False, verbose=False),
+        ForecastSpec(horizon=2, freq="MS", levels=(), model_policy="light", weighted_ensemble=False, verbose=False),
     )
 
     assert calls == [12]
@@ -907,10 +958,10 @@ def test_auto_policy_attempts_mlforecast_when_cv_feasible_below_regressor_gate(m
     assert families["mlforecast"]["ran"]
     assert families["mlforecast"]["contributed_models"] == ["LinearRegression"]
     assert "LinearRegression" in run.all_models.columns
-    assert not any("MLForecast skipped for model_policy='auto'" in warning for warning in run.warnings)
+    assert not any("MLForecast skipped for model_policy='light'" in warning for warning in run.warnings)
 
 
-def test_auto_policy_discloses_mlforecast_feasibility_skip(monkeypatch) -> None:
+def test_light_policy_discloses_mlforecast_feasibility_skip(monkeypatch) -> None:
     df = pd.DataFrame(
         {
             "unique_id": ["Revenue"] * 6,
@@ -920,22 +971,27 @@ def test_auto_policy_discloses_mlforecast_feasibility_skip(monkeypatch) -> None:
     )
 
     def fail_if_called(*args, **kwargs):
-        raise AssertionError("MLForecast should not be called when auto feasibility fails")
+        raise AssertionError("MLForecast should not be called when light feasibility fails")
 
     monkeypatch.setattr(model_module, "forecast_with_statsforecast", model_module.forecast_with_baselines)
     monkeypatch.setattr(model_module, "forecast_with_mlforecast", fail_if_called)
+    monkeypatch.setattr(model_module, "_smooth_package_installed", lambda: False)
 
-    run = run_forecast(df, ForecastSpec(horizon=2, freq="MS", model_policy="auto", verbose=False))
+    run = run_forecast(df, ForecastSpec(horizon=2, freq="MS", model_policy="light", verbose=False))
 
     families = {row["family"]: row for row in run.model_policy_resolution["families"]}
     assert families["mlforecast"]["requested"]
     assert not families["mlforecast"]["eligible"]
     assert not families["mlforecast"]["ran"]
-    assert "min_history_below_auto_threshold" in families["mlforecast"]["reason_if_not_ran"]
-    assert any("MLForecast skipped for model_policy='auto'" in warning for warning in run.warnings)
+    assert "min_history_below_light_threshold" in families["mlforecast"]["reason_if_not_ran"]
+    assert not families["smooth"]["requested"]
+    assert not families["smooth"]["eligible"]
+    assert not families["smooth"]["ran"]
+    assert families["smooth"]["reason_if_not_ran"] == "not_requested"
+    assert any("MLForecast skipped for model_policy='light'" in warning for warning in run.warnings)
 
 
-def test_model_policy_all_discloses_mlforecast_history_gate() -> None:
+def test_standard_policy_runs_smooth_when_optional_dependency_is_available(monkeypatch) -> None:
     df = pd.DataFrame(
         {
             "unique_id": ["Revenue"] * 6,
@@ -943,6 +999,127 @@ def test_model_policy_all_discloses_mlforecast_history_gate() -> None:
             "y": [100 + i * 3 for i in range(6)],
         }
     )
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("MLForecast should not be called when light feasibility fails")
+
+    monkeypatch.setattr(model_module, "forecast_with_statsforecast", model_module.forecast_with_baselines)
+    monkeypatch.setattr(model_module, "forecast_with_mlforecast", fail_if_called)
+    monkeypatch.setattr(model_module, "_smooth_package_installed", lambda: True)
+    monkeypatch.setattr(model_module, "_smooth_package_version", lambda: "1.0.3")
+    monkeypatch.setattr(model_module, "_smooth_package_installed", lambda: True)
+    monkeypatch.setattr(model_module, "_load_smooth_module", lambda: _FakeSmoothModule)
+
+    run = run_forecast(
+        df,
+        ForecastSpec(horizon=2, freq="MS", levels=(), model_policy="standard", weighted_ensemble=False, verbose=False),
+    )
+
+    families = {row["family"]: row for row in run.model_policy_resolution["families"]}
+    assert families["smooth"]["requested"]
+    assert families["smooth"]["eligible"]
+    assert families["smooth"]["ran"]
+    assert families["smooth"]["contributed_models"] == ["SmoothADAM_CCC", "SmoothADAM_CustomPool", "SmoothADAM_ZXZ"]
+    assert "SmoothADAM_ZXZ" in run.all_models.columns
+    assert "smooth optional dependency active: version=1.0.3, license=LGPL-2.1" in run.warnings
+
+
+def test_standard_policy_discloses_smooth_unavailable_when_extra_missing(monkeypatch) -> None:
+    df = pd.DataFrame(
+        {
+            "unique_id": ["Revenue"] * 8,
+            "ds": pd.date_range("2025-01-01", periods=8, freq="MS"),
+            "y": [100 + i * 3 for i in range(8)],
+        }
+    )
+
+    monkeypatch.setattr(model_module, "forecast_with_statsforecast", model_module.forecast_with_baselines)
+    monkeypatch.setattr(model_module, "_smooth_package_installed", lambda: False)
+
+    run = run_forecast(
+        df,
+        ForecastSpec(horizon=2, freq="MS", levels=(), model_policy="standard", weighted_ensemble=False, verbose=False),
+    )
+
+    families = {row["family"]: row for row in run.model_policy_resolution["families"]}
+    assert families["smooth"]["requested"]
+    assert not families["smooth"]["eligible"]
+    assert not families["smooth"]["ran"]
+    assert families["smooth"]["reason_if_not_ran"] == "not_installed_or_not_enabled"
+
+
+def test_smooth_only_allowlist_runs_without_classical_families(monkeypatch) -> None:
+    df = pd.DataFrame(
+        {
+            "unique_id": ["Revenue"] * 12,
+            "ds": pd.date_range("2025-01-01", periods=12, freq="MS"),
+            "y": [100 + i * 3 for i in range(12)],
+        }
+    )
+    monkeypatch.setattr(model_module, "_smooth_package_version", lambda: "1.0.3")
+    monkeypatch.setattr(model_module, "_load_smooth_module", lambda: _FakeSmoothModule)
+
+    run = run_forecast(
+        df,
+        ForecastSpec(
+            horizon=2,
+            freq="MS",
+            levels=(),
+            model_policy="light",
+            model_allowlist=("smooth adam zxz",),
+            weighted_ensemble=False,
+            verbose=False,
+        ),
+    )
+
+    families = {row["family"]: row for row in run.model_policy_resolution["families"]}
+    assert not families["baseline"]["ran"]
+    assert families["baseline"]["reason_if_not_ran"] == "skipped_by_model_allowlist"
+    assert not families["statsforecast"]["ran"]
+    assert families["statsforecast"]["reason_if_not_ran"] == "skipped_by_model_allowlist"
+    assert not families["mlforecast"]["ran"]
+    assert families["mlforecast"]["reason_if_not_ran"] == "skipped_by_model_allowlist"
+    assert families["smooth"]["ran"]
+    assert families["smooth"]["contributed_models"] == ["SmoothADAM_ZXZ"]
+    assert list(run.forecast["model"].unique()) == ["SmoothADAM_ZXZ"]
+
+
+def test_mixed_allowlist_raises_when_requested_smooth_is_unavailable(monkeypatch) -> None:
+    df = pd.DataFrame(
+        {
+            "unique_id": ["Revenue"] * 12,
+            "ds": pd.date_range("2025-01-01", periods=12, freq="MS"),
+            "y": [100 + i * 3 for i in range(12)],
+        }
+    )
+    monkeypatch.setattr(model_module, "forecast_with_statsforecast", model_module.forecast_with_baselines)
+    monkeypatch.setattr(model_module, "_smooth_package_installed", lambda: False)
+
+    with pytest.raises(ImportError, match="smooth is unavailable"):
+        run_forecast(
+            df,
+            ForecastSpec(
+                horizon=2,
+                freq="MS",
+                levels=(),
+                model_policy="light",
+                model_allowlist=("naive", "smooth adam zxz"),
+                weighted_ensemble=False,
+                verbose=False,
+            ),
+        )
+
+
+def test_model_policy_all_discloses_mlforecast_history_gate(monkeypatch) -> None:
+    df = pd.DataFrame(
+        {
+            "unique_id": ["Revenue"] * 6,
+            "ds": pd.date_range("2025-01-01", periods=6, freq="MS"),
+            "y": [100 + i * 3 for i in range(6)],
+        }
+    )
+
+    monkeypatch.setattr(model_module, "_smooth_package_installed", lambda: False)
 
     run = run_forecast(df, ForecastSpec(horizon=2, freq="MS", model_policy="all", verbose=False))
 
@@ -952,7 +1129,11 @@ def test_model_policy_all_discloses_mlforecast_history_gate() -> None:
     assert families["mlforecast"]["requested"]
     assert not families["mlforecast"]["eligible"]
     assert not families["mlforecast"]["ran"]
-    assert "min_history_below_auto_threshold" in families["mlforecast"]["reason_if_not_ran"]
+    assert "min_history_below_light_threshold" in families["mlforecast"]["reason_if_not_ran"]
+    assert families["smooth"]["requested"]
+    assert not families["smooth"]["eligible"]
+    assert not families["smooth"]["ran"]
+    assert families["smooth"]["reason_if_not_ran"] == "not_installed_or_not_enabled"
     assert any("MLForecast skipped for model_policy='all'" in warning for warning in run.warnings)
 
 
@@ -1501,7 +1682,7 @@ def test_mixed_history_series_forecasts_short_series_without_backtest_metrics() 
     assert set(forecast_long["planning_eligibility_scope"]) == {"horizon_validation_only"}
 
 
-def test_auto_policy_backtests_eligible_series_in_mixed_history_panel() -> None:
+def test_light_policy_backtests_eligible_series_in_mixed_history_panel() -> None:
     df = pd.concat(
         [
             pd.DataFrame(
@@ -1691,6 +1872,7 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert (appendix / "model_pareto_frontier.csv").exists()
     assert (appendix / "feature_selection_receipts.csv").exists()
     assert (appendix / "series_features.csv").exists()
+    assert (appendix / "borrowed_strength_advisor.csv").exists()
     assert (appendix / "model_window_metrics.csv").exists()
     assert (appendix / "residual_diagnostics.csv").exists()
     assert (appendix / "interval_diagnostics.csv").exists()
@@ -1709,6 +1891,8 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert (output_dir / "streamlit_requirements.txt").exists()
     assert (output_dir / "run_streamlit.ps1").exists()
     assert (output_dir / "run_streamlit.cmd").exists()
+    assert (output_dir / "control_pane_state.json").exists()
+    assert (output_dir / "audit" / "training_progress.jsonl").exists()
     assert (output_dir / "OPEN_ME_FIRST.html").exists()
     assert (output_dir / "output" / "index.html").exists()
     assert (output_dir / "output" / "forecast_review.xlsx").exists()
@@ -1731,6 +1915,8 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert diagnostics["llm_triage_summary"]["model_pareto_frontier_rows"] > 0
     assert "feature_selection_receipt_rows" in diagnostics["llm_triage_summary"]
     assert diagnostics["llm_triage_summary"]["series_feature_rows"] > 0
+    assert diagnostics["llm_triage_summary"]["borrowed_strength_advisor_rows"] > 0
+    assert "borrowed_strength_guidance_distribution" in diagnostics["llm_triage_summary"]
     assert "model_weights" in diagnostics
     assert "trust_summary" in diagnostics
     assert "reproducibility" in diagnostics
@@ -1746,6 +1932,8 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert "model_pareto_frontier_top_rows" in llm_context["portfolio_tables"]
     assert "feature_selection_receipts_top_rows" in llm_context["portfolio_tables"]
     assert "series_features" in llm_context["portfolio_tables"]
+    assert "borrowed_strength_advisor" in llm_context["portfolio_tables"]
+    assert "borrowed_strength_advice" in llm_context["series_reviews"][0]
     assert "recommended_questions" in llm_context
     manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
     assert len(manifest["reproducibility"]["data_hash_sha256"]) == 64
@@ -1756,11 +1944,14 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert manifest["outputs"]["model_pareto_frontier"] == "appendix/model_pareto_frontier.csv"
     assert manifest["outputs"]["feature_selection_receipts"] == "appendix/feature_selection_receipts.csv"
     assert manifest["outputs"]["series_features"] == "appendix/series_features.csv"
+    assert manifest["outputs"]["borrowed_strength_advisor"] == "appendix/borrowed_strength_advisor.csv"
     assert manifest["outputs"]["trust_summary"] == "appendix/trust_summary.csv"
     assert manifest["outputs"]["llm_context"] == "llm_context.json"
     assert manifest["outputs"]["streamlit_requirements"] == "streamlit_requirements.txt"
     assert manifest["outputs"]["streamlit_launcher_ps1"] == "run_streamlit.ps1"
     assert manifest["outputs"]["streamlit_launcher_cmd"] == "run_streamlit.cmd"
+    assert manifest["outputs"]["control_pane_state"] == "control_pane_state.json"
+    assert manifest["outputs"]["training_progress"] == "audit/training_progress.jsonl"
     assert manifest["outputs"]["output_open_first"] == "OPEN_ME_FIRST.html"
     assert manifest["outputs"]["output_workbook"] == "output/forecast_review.xlsx"
     assert manifest["outputs"]["output_forecast"] == "output/forecast_for_review.csv"
@@ -1772,6 +1963,20 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert policy_families["baseline"]["requested"]
     assert policy_families["baseline"]["ran"]
     assert policy_families["statsforecast"]["reason_if_not_ran"] == "not_requested"
+    control_state = json.loads((output_dir / "control_pane_state.json").read_text(encoding="utf-8"))
+    assert control_state["schema_version"] == "nixtla_scaffold.control_pane.v1"
+    assert control_state["generated_command"].startswith("uv run nixtla-scaffold forecast")
+    assert control_state["artifacts"]["training_progress"] == "audit/training_progress.jsonl"
+    assert control_state["artifacts"]["borrowed_strength_advisor"] == "appendix/borrowed_strength_advisor.csv"
+    assert any(item["mechanism"] == "Smooth ADAM family" for item in control_state["feature_map"])
+    assert any(item["mechanism"] == "Borrowed-strength advisor" for item in control_state["feature_map"])
+    progress_rows = [
+        json.loads(line)
+        for line in (output_dir / "audit" / "training_progress.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert any(row["phase"] == "model_policy" and row["family"] == "baseline" for row in progress_rows)
+    assert any(row["phase"] == "model_selection" and row["status"] == "selected" for row in progress_rows)
     assert "audit/backtest_windows.csv" in "\n".join(diagnostics["next_diagnostic_steps"])
     assert "OPEN_ME_FIRST.html" in "\n".join(diagnostics["next_diagnostic_steps"])
     assert "streamlit_requirements.txt" in "\n".join(diagnostics["next_diagnostic_steps"])
@@ -1779,6 +1984,7 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert "appendix/model_pareto_frontier.csv" in "\n".join(diagnostics["next_diagnostic_steps"])
     assert "appendix/feature_selection_receipts.csv" in "\n".join(diagnostics["next_diagnostic_steps"])
     assert "appendix/series_features.csv" in "\n".join(diagnostics["next_diagnostic_steps"])
+    assert "appendix/borrowed_strength_advisor.csv" in "\n".join(diagnostics["next_diagnostic_steps"])
     assert "appendix/trust_summary.csv" in "\n".join(diagnostics["next_diagnostic_steps"])
     assert "audit/seasonality_diagnostics.csv" in "\n".join(diagnostics["next_diagnostic_steps"])
     assert "executive_headline.paragraph" in "\n".join(diagnostics["next_diagnostic_steps"])
@@ -1804,6 +2010,8 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert executive_paragraph in decoded_report
     assert "Rolling-origin fixed-axis filmstrip" in decoded_report
     assert "Decision summary" in decoded_report
+    assert "Borrowed-strength advisor" in decoded_report
+    assert "appendix/borrowed_strength_advisor.csv" in decoded_report
     assert "series-decision-card" in decoded_report
     assert "decision-detail-grid" in decoded_report
     assert "Use <code>appendix/trust_summary.csv</code> for the raw wide table" in decoded_report
@@ -1837,7 +2045,7 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     review_decision = pd.read_csv(output_dir / "output" / "decision_summary.csv")
     assert {"unique_id", "trust_level", "selected_model", "caveats", "next_actions"}.issubset(review_decision.columns)
     review_workbook = pd.ExcelFile(output_dir / "output" / "forecast_review.xlsx")
-    assert {"Start Here", "Forecast", "Decision Summary", "Model Leaderboard", "Watchouts", "File Guide"}.issubset(
+    assert {"Start Here", "Forecast", "Decision Summary", "Model Leaderboard", "Watchouts", "Borrowed Strength", "File Guide"}.issubset(
         set(review_workbook.sheet_names)
     )
     forecast = pd.read_csv(output_dir / "forecast.csv")
@@ -1898,6 +2106,16 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     }.issubset(model_pareto_frontier.columns)
     feature_receipts = pd.read_csv(appendix / "feature_selection_receipts.csv")
     assert {"feature", "feature_role", "final_decision", "cv_evidence_status"}.issubset(feature_receipts.columns)
+    borrowed_strength = pd.read_csv(appendix / "borrowed_strength_advisor.csv")
+    assert {
+        "unique_id",
+        "history_observations",
+        "anchor_guidance",
+        "anchor_type",
+        "recommended_next_action",
+        "advisory_only",
+    }.issubset(borrowed_strength.columns)
+    assert borrowed_strength["advisory_only"].all()
     window_metrics = pd.read_csv(appendix / "model_window_metrics.csv")
     assert {"unique_id", "cutoff", "model", "rmse", "mase", "rmsse"}.issubset(window_metrics.columns)
     residual_diagnostics = pd.read_csv(appendix / "residual_diagnostics.csv")
@@ -1948,6 +2166,7 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert {"unique_id", "ds", "observed", "trend", "seasonal", "remainder"}.issubset(seasonality_decomposition.columns)
     workbook = pd.ExcelFile(output_dir / "forecast.xlsx")
     assert "Trust Summary" in workbook.sheet_names
+    assert "Borrowed Strength" in workbook.sheet_names
     assert "Model Tradeoffs" in workbook.sheet_names
     assert "Pareto Frontier" in workbook.sheet_names
     assert "Residual Tests" in workbook.sheet_names
@@ -1986,6 +2205,28 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert "Currency (millions)" in streamlit_app
     assert "forecast_model" in streamlit_app
     assert "forecast_wide_summary.csv" in streamlit_app
+    assert '"Control Pane"' in streamlit_app
+    assert "Reads the saved run artifacts" in streamlit_app
+    assert "Artifact availability" in streamlit_app
+    assert "Smooth ADAM family" in streamlit_app
+    assert "Rerun command" in streamlit_app
+    assert 'read_json("control_pane_state.json")' in streamlit_app
+    assert 'read_jsonl("training_progress.jsonl")' in streamlit_app
+    assert 'read_json("refresh_manifest.json")' in streamlit_app
+    assert 'read_csv("refresh_delta.csv")' in streamlit_app
+    assert 'read_csv("borrowed_strength_advisor.csv")' in streamlit_app
+    assert "Borrowed-strength guidance is advisory only" in streamlit_app
+    assert "Progress and handoff artifacts" in streamlit_app
+    assert "Refresh / progress lane" in streamlit_app
+    assert "Refresh artifact reads" in streamlit_app
+    assert "apply_terminal_chart_theme" in streamlit_app
+    assert "render_plotly_chart" in streamlit_app
+    assert "terminal_dataframe" in streamlit_app
+    assert "render_dataframe" in streamlit_app
+    assert "terminal-dataframe-wrap" in streamlit_app
+    assert "table.terminal-dataframe" in streamlit_app
+    assert '[data-testid="stExpander"] summary:hover' in streamlit_app
+    assert "-webkit-text-fill-color: #eef4f7" in streamlit_app
     assert '"Forecast ledger"' in streamlit_app
     assert 'read_json("ledger_context.json")' in streamlit_app
     assert "official forecast locks" in streamlit_app
@@ -2015,7 +2256,11 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert 'read_csv("residual_tests.csv")' in streamlit_app
     assert "Heuristic residual checks" in streamlit_app
     assert "structural-break checks" in streamlit_app
-    assert "First-glance chart includes interval bands" in streamlit_app
+    assert "Champion controls" in streamlit_app
+    assert "Model investigation controls" in streamlit_app
+    assert "Champion decision view" in streamlit_app
+    assert "All candidate model spread" in streamlit_app
+    assert "Champion view includes interval bands" in streamlit_app
     assert "Focused future forecast interval ownership" in streamlit_app
     assert "the legend names each interval band" in streamlit_app
     assert "Point forecasts and bands come from the same `forecast_long.csv` model feed" in streamlit_app
@@ -2029,10 +2274,10 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert "Prediction interval focus" in streamlit_app
     assert "st.cache_data" in streamlit_app
     assert "cached_read_csv" in streamlit_app
-    assert "Workbench section" in streamlit_app
-    assert "Sidebar tabs stay visible" in streamlit_app
-    assert "Only the selected workbench section renders on each rerun" in streamlit_app
-    assert "fast tabs instead of hidden pages" in streamlit_app
+    assert "Workbench nav" in streamlit_app
+    assert "Single-section render" in streamlit_app
+    assert "Only the selected surface renders on rerun" in streamlit_app
+    assert "forecast-console-topbar" in streamlit_app
     assert "workbench_tab_" in streamlit_app
     assert "section_key(section)" in streamlit_app
     assert "render_workbench_section_nav" in streamlit_app
@@ -2070,8 +2315,11 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert "on_change=sync_cutoff_slider" in streamlit_app
     assert "Auto-advance is active" in streamlit_app
     assert "Auto-advance loops until you switch it off" in streamlit_app
-    assert "other candidates are shown as faint unlabeled context lines" in streamlit_app
-    assert "No prediction interval bands were written for the models currently shown" in streamlit_app
+    assert "Every candidate forecast as context" in streamlit_app
+    assert "--font-ui" in streamlit_app
+    assert "--font-data" in streamlit_app
+    assert "Aptos" in streamlit_app
+    assert "No prediction interval bands were written for the champion decision view" in streamlit_app
     assert "The faint gray spread is model disagreement, not calibrated uncertainty" in streamlit_app
     assert "Check the Prediction intervals tab for calibration and row-level review" in streamlit_app
     assert "interval_method_label" in streamlit_app

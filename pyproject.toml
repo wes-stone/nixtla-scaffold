@@ -44,6 +44,7 @@ dependencies = [
 dev = ["pytest>=8.0"]
 hierarchy = ["hierarchicalforecast>=1.0"]
 ml = ["lightgbm>=4.0", "mlforecast>=1.0"]
+smooth = ["smooth>=1.0.3,<2"]
 neural = ["neuralforecast>=2.0"]
 datasets = [
     "datasetsforecast>=1.0.0",

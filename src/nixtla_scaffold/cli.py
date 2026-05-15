@@ -55,9 +55,11 @@ from nixtla_scaffold.setup import (
 )
 from nixtla_scaffold.workbench_qa import GOLDEN_SCENARIOS, WORKBENCH_QA_SCENARIOS, run_workbench_qa
 
-MODEL_POLICY_CHOICES = ["auto", "baseline", "statsforecast", "mlforecast", "all"]
+MODEL_POLICY_CHOICES = ["standard", "light", "auto", "baseline", "statsforecast", "mlforecast", "all"]
 MODEL_POLICY_HELP = (
-    "Model family policy: auto runs StatsForecast and attempts MLForecast when the data can support ML CV; "
+    "Model family policy: standard runs StatsForecast, attempts feasible MLForecast, and attempts optional smooth ADAM; "
+    "light runs the slim StatsForecast + feasible MLForecast path without smooth by default; "
+    "auto is a legacy alias for light; "
     "baseline runs only simple benchmarks; statsforecast runs classical/open-source statistical models; "
     "mlforecast runs MLForecast only and raises if unavailable; all runs every eligible open-source family "
     "and raises on eligible MLForecast failure."
@@ -80,11 +82,11 @@ def main(argv: list[str] | None = None) -> int:
     setup_cmd.add_argument("--time-col", default="ds")
     setup_cmd.add_argument("--id-col", default="unique_id")
     setup_cmd.add_argument("--id-value", default=None, help="Series ID to inject for one-metric query results")
-    setup_cmd.add_argument("--preset", choices=PRESET_NAMES, default="finance", help="Starter forecast preset for generated commands/config")
+    setup_cmd.add_argument("--preset", choices=PRESET_NAMES, default="standard", help="Starter forecast preset for generated commands/config")
     setup_cmd.add_argument("--horizon", type=int, default=12)
     setup_cmd.add_argument("--freq", default=None)
     setup_cmd.add_argument("--intervals", choices=INTERVAL_MODES, default="auto")
-    setup_cmd.add_argument("--model-families", nargs="+", choices=MODEL_FAMILIES, default=["auto"])
+    setup_cmd.add_argument("--model-families", nargs="+", choices=MODEL_FAMILIES, default=["standard"])
     setup_cmd.add_argument("--exploration-mode", action=argparse.BooleanOptionalAction, default=True)
     setup_cmd.add_argument("--mcp-regressor-search", action=argparse.BooleanOptionalAction, default=False)
     setup_cmd.add_argument("--outputs", nargs="+", default=["all"], help="Outputs to produce: all csv excel html base64_html streamlit diagnostics model_card")
@@ -100,14 +102,14 @@ def main(argv: list[str] | None = None) -> int:
 
     forecast_cmd = sub.add_parser("forecast", help="Run an explainable forecast")
     _add_input_args(forecast_cmd)
-    forecast_cmd.add_argument("--preset", choices=PRESET_NAMES, default=None, help="Opinionated defaults: quick, finance, strict, or hierarchy")
+    forecast_cmd.add_argument("--preset", choices=PRESET_NAMES, default=None, help="Opinionated defaults: quick, standard, strict, or hierarchy; finance is a legacy alias for standard")
     forecast_cmd.add_argument("--horizon", type=int, default=12)
     forecast_cmd.add_argument("--freq", default=None)
     forecast_cmd.add_argument("--season-length", type=int, default=None)
     forecast_cmd.add_argument("--levels", nargs="+", type=int, default=[80, 95], help="Prediction interval levels, e.g. --levels 80 95")
     forecast_cmd.add_argument("--unit-label", default=None, help="Optional unit/currency label for headline values, e.g. $, USD, seats, ARR")
     forecast_cmd.add_argument("--fill-method", choices=["ffill", "zero", "interpolate", "drop"], default="ffill")
-    forecast_cmd.add_argument("--model-policy", choices=MODEL_POLICY_CHOICES, default="auto", help=MODEL_POLICY_HELP)
+    forecast_cmd.add_argument("--model-policy", choices=MODEL_POLICY_CHOICES, default="light", help=MODEL_POLICY_HELP)
     _add_model_allowlist_args(forecast_cmd)
     forecast_cmd.add_argument("--target-transform", choices=["none", "log", "log1p"], default="none", help="Optional target transform for modeling; outputs are inverse-transformed for reporting")
     forecast_cmd.add_argument("--normalization-factor-col", default=None, help="Positive factor column used to normalize y before modeling, e.g. price_factor, fx_rate, inflation_index")
@@ -190,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
     compare_models_cmd.add_argument("--levels", nargs="+", type=int, default=[80, 95])
     compare_models_cmd.add_argument("--unit-label", default=None)
     compare_models_cmd.add_argument("--fill-method", choices=["ffill", "zero", "interpolate", "drop"], default="ffill")
-    compare_models_cmd.add_argument("--model-policy", choices=MODEL_POLICY_CHOICES, default="auto", help=MODEL_POLICY_HELP)
+    compare_models_cmd.add_argument("--model-policy", choices=MODEL_POLICY_CHOICES, default="light", help=MODEL_POLICY_HELP)
     _add_model_allowlist_args(compare_models_cmd)
     compare_models_cmd.add_argument("--target-transform", choices=["none", "log", "log1p"], default="none")
     compare_models_cmd.add_argument("--normalization-factor-col", default=None)
@@ -221,7 +223,7 @@ def main(argv: list[str] | None = None) -> int:
     experiment_cmd.add_argument("--levels", nargs="+", type=int, default=[80, 95])
     experiment_cmd.add_argument("--unit-label", default=None)
     experiment_cmd.add_argument("--fill-method", choices=["ffill", "zero", "interpolate", "drop"], default="ffill")
-    experiment_cmd.add_argument("--model-policy", choices=MODEL_POLICY_CHOICES, default="auto", help=MODEL_POLICY_HELP)
+    experiment_cmd.add_argument("--model-policy", choices=MODEL_POLICY_CHOICES, default="light", help=MODEL_POLICY_HELP)
     _add_model_allowlist_args(experiment_cmd)
     experiment_cmd.add_argument("--target-transform", choices=["none", "log", "log1p"], default="none")
     experiment_cmd.add_argument("--normalization-factor-col", default=None)
@@ -302,7 +304,7 @@ def main(argv: list[str] | None = None) -> int:
     ingest_cmd.add_argument("--levels", nargs="+", type=int, default=[80, 95], help="Prediction interval levels when forecasting after ingest")
     ingest_cmd.add_argument("--unit-label", default=None, help="Optional unit/currency label for headline values when forecasting after ingest")
     ingest_cmd.add_argument("--fill-method", choices=["ffill", "zero", "interpolate", "drop"], default="ffill")
-    ingest_cmd.add_argument("--model-policy", choices=MODEL_POLICY_CHOICES, default="auto", help=MODEL_POLICY_HELP)
+    ingest_cmd.add_argument("--model-policy", choices=MODEL_POLICY_CHOICES, default="light", help=MODEL_POLICY_HELP)
     _add_model_allowlist_args(ingest_cmd)
     ingest_cmd.add_argument("--target-transform", choices=["none", "log", "log1p"], default="none")
     ingest_cmd.add_argument("--normalization-factor-col", default=None)
@@ -409,13 +411,13 @@ def main(argv: list[str] | None = None) -> int:
     lab_cmd = sub.add_parser("scenario-lab", help="Run synthetic forecast scenarios and score accuracy/ease/validity")
     lab_cmd.add_argument("--count", type=int, default=100)
     lab_cmd.add_argument("--output", default="runs/scenario_lab")
-    lab_cmd.add_argument("--model-policy", choices=["auto", "baseline", "statsforecast"], default="auto")
+    lab_cmd.add_argument("--model-policy", choices=["standard", "light", "auto", "baseline", "statsforecast"], default="light")
     lab_cmd.add_argument("--seed", type=int, default=42)
 
     qa_cmd = sub.add_parser("workbench-qa", help="Run golden forecast workbench QA scenarios")
     qa_cmd.add_argument("--output", default="runs/workbench_qa", help="Folder for QA summary and generated runs")
     qa_cmd.add_argument("--scenarios", nargs="+", choices=WORKBENCH_QA_SCENARIOS, default=list(GOLDEN_SCENARIOS))
-    qa_cmd.add_argument("--model-policy", choices=["auto", "baseline", "statsforecast", "mlforecast", "all"], default="baseline")
+    qa_cmd.add_argument("--model-policy", choices=MODEL_POLICY_CHOICES, default="baseline")
     qa_cmd.add_argument("--app-test", action=argparse.BooleanOptionalAction, default=True, help="Run Streamlit AppTest for generated dashboards")
     qa_cmd.add_argument("--app-test-timeout", type=int, default=90, help="Streamlit AppTest timeout in seconds for each generated dashboard")
 
@@ -424,14 +426,14 @@ def main(argv: list[str] | None = None) -> int:
     release_cmd.add_argument(
         "--extended",
         action="store_true",
-        help="Run a stricter local release profile: at least 20 auto-policy scenarios, all-family workbench QA, and required ml/hierarchy extras",
+            help="Run a stricter local release profile: at least 20 light-policy scenarios, all-family workbench QA, and required ml/hierarchy extras",
     )
     release_cmd.add_argument("--build", action=argparse.BooleanOptionalAction, default=True, help="Build wheel/sdist and inspect package contents")
     release_cmd.add_argument("--install-smoke", action=argparse.BooleanOptionalAction, default=True, help="Install the built wheel in an isolated venv and smoke public APIs")
     release_cmd.add_argument("--scenario-count", type=int, default=8, help="Deterministic scenario-lab count for numeric gates")
-    release_cmd.add_argument("--scenario-model-policy", choices=["auto", "baseline", "statsforecast"], default="baseline")
+    release_cmd.add_argument("--scenario-model-policy", choices=["standard", "light", "auto", "baseline", "statsforecast"], default="baseline")
     release_cmd.add_argument("--workbench-qa", action=argparse.BooleanOptionalAction, default=True, help="Run generated workbench QA scenarios")
-    release_cmd.add_argument("--workbench-model-policy", choices=["auto", "baseline", "statsforecast", "mlforecast", "all"], default="baseline")
+    release_cmd.add_argument("--workbench-model-policy", choices=MODEL_POLICY_CHOICES, default="baseline")
     release_cmd.add_argument("--app-test", action=argparse.BooleanOptionalAction, default=True, help="Run Streamlit AppTest inside workbench QA")
     release_cmd.add_argument("--app-test-timeout", type=int, default=90, help="Streamlit AppTest timeout in seconds for workbench QA dashboards")
     release_cmd.add_argument("--live-streamlit", action=argparse.BooleanOptionalAction, default=True, help="Launch one generated dashboard and check HTTP health")

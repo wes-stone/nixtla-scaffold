@@ -40,7 +40,7 @@ def run_scenario_lab(
     *,
     count: int = 100,
     output_dir: str | Path = "runs/scenario_lab",
-    model_policy: str = "auto",
+    model_policy: str = "light",
     seed: int = 42,
 ) -> dict[str, Any]:
     out = Path(output_dir)

@@ -128,17 +128,19 @@ Preset shortcut:
 | Preset | Use when |
 |--------|----------|
 | `quick` | Fast first read / smoke run with baseline ladder |
-| `finance` | Standard serious finance forecast with full audit/trust artifacts |
+| `standard` | Standard serious finance forecast with full audit/trust artifacts |
 | `strict` | High-stakes run requiring backtests and full-horizon CV champion selection |
 | `hierarchy` | Parent/child planning totals need coherent reconciliation |
 
 Flags override presets:
 
 ```powershell
-uv run nixtla-scaffold forecast --input data.csv --preset finance --horizon 6 --unit-label "$" --output runs\finance
+uv run nixtla-scaffold forecast --input data.csv --preset standard --horizon 6 --unit-label "$" --output runs\standard
 uv run nixtla-scaffold forecast --input data.csv --preset hierarchy --hierarchy-reconciliation mint_ols --output runs\hierarchy_mint
 uv run nixtla-scaffold guide presets
 ```
+
+`finance` remains accepted as a legacy alias for `standard`, but new commands and generated configs should use `standard`.
 
 ---
 
@@ -275,17 +277,18 @@ The scaffold expects: `unique_id`, `ds`, `y` columns.
 **From CSV/Excel (direct):**
 ```powershell
 uv run nixtla-scaffold profile --input data.csv
-uv run nixtla-scaffold forecast --input data.csv --preset finance --horizon 6 --output runs\my_forecast
+uv run nixtla-scaffold forecast --input data.csv --preset standard --horizon 6 --output runs\my_forecast
 ```
 
 **From CSV/Excel with custom column names:**
 ```powershell
-uv run nixtla-scaffold forecast --input plan.xlsx --sheet Data --id-col Product --time-col Month --target-col Revenue --preset finance --horizon 6 --output runs\plan
+uv run nixtla-scaffold forecast --input plan.xlsx --sheet Data --id-col Product --time-col Month --target-col Revenue --preset standard --horizon 6 --output runs\plan
 ```
 
 **Runnable onboarding examples:**
 ```powershell
 uv run --with jupyter jupyter lab examples\feature_tour\forecast_feature_tour.ipynb
+uv run python examples\air_tourism_demo\forecast_air_tourism_demo.py --output runs\air_tourism_demo
 uv run python examples\quickstart_csv\forecast_quick.py
 uv run python examples\serious_finance_forecast\forecast_finance.py
 uv run python examples\custom_finance_model\forecast_custom.py
@@ -293,7 +296,7 @@ uv run python examples\hierarchy_reconciliation\forecast_hierarchy.py
 uv run --extra datasets python examples\datasetsforecast_tourism_small\forecast_tourism_small.py --allow-download
 ```
 
-Use `examples\feature_tour\forecast_feature_tour.ipynb` when a user wants a guided demo or a map of all major features; it stays no-bloat by using synthetic data, baseline models, and generated run artifacts. Use `examples\quickstart_csv` for the five-minute first forecast, `examples\serious_finance_forecast` for target normalization plus event overlays, `examples\custom_finance_model` when a finance-owned MoM/FY-seasonality model should enter the tournament as an audited custom challenger, `examples\hierarchy_reconciliation` when parent/child totals need to tie, and `examples\datasetsforecast_tourism_small` only for opt-in public real-data validation with DatasetsForecast.
+Use `examples\feature_tour\forecast_feature_tour.ipynb` when a user wants a guided demo or a map of all major features; it stays no-bloat by using synthetic data, baseline models, and generated run artifacts. Use `examples\air_tourism_demo` when demoing the serious Control Pane from a fast AirPassengers baseline to a fuller driver-audit run and optional TourismSmall hierarchy. Use `examples\quickstart_csv` for the five-minute first forecast, `examples\serious_finance_forecast` for target normalization plus event overlays, `examples\custom_finance_model` when a finance-owned MoM/FY-seasonality model should enter the tournament as an audited custom challenger, `examples\hierarchy_reconciliation` when parent/child totals need to tie, and `examples\datasetsforecast_tourism_small` only for opt-in public real-data validation with DatasetsForecast.
 
 **With finance target transforms / normalization:**
 ```powershell
@@ -309,7 +312,7 @@ uv run nixtla-scaffold forecast --input data.csv --horizon 6 --normalization-fac
 ```powershell
 # First, run your query via the appropriate MCP and save results to a file
 # Then ingest it:
-uv run nixtla-scaffold ingest --input query_result.json --source kusto --query-file my_query.kql --id-value "My Metric" --time-col day_dt --target-col revenue --output runs\input.csv --forecast-output runs\forecast_demo --preset finance --freq ME --horizon 6
+uv run nixtla-scaffold ingest --input query_result.json --source kusto --query-file my_query.kql --id-value "My Metric" --time-col day_dt --target-col revenue --output runs\input.csv --forecast-output runs\forecast_demo --preset standard --freq ME --horizon 6
 
 # If one forecast needs multiple query extracts, use a source pipeline:
 uv run nixtla-scaffold pipeline run --config examples\contoso_dax_pipeline\pipeline.yaml --output runs\contoso_dax_pipeline
@@ -343,7 +346,7 @@ deterministic ContosoSales-shaped data. Set `KUSTO_MODE=live` after installing
 ```python
 from nixtla_scaffold import forecast_spec_preset, run_forecast
 
-run = run_forecast(df, forecast_spec_preset("finance", horizon=6))
+run = run_forecast(df, forecast_spec_preset("standard", horizon=6))
 run.to_directory("runs/my_forecast")
 ```
 
@@ -465,7 +468,7 @@ Run feature work in this order:
 8. **Stress test**: Compare selected model vs naive, seasonal naive, plan, prior-year, and business judgment.
 9. **Operationalize**: Save feature source query, refresh timing, future-value assumption, and leakage verdict.
 
-`experiment_recommendation.md` and `experiment_llm_context.json` include an `autoresearch_next_iteration` block. Treat it as the next agent-friendly loop seed: one hypothesis, one metric family (`avg_rmse` primary with `avg_mae` and RMSE/MAE Pareto status as secondary review), one executor, and one fixed budget. WAPE is diagnostic/business-readable context only; do not use it to rank experiments. MCPs make it easy to run many targeted experiments that used to be manual, but do not overdo it: change one driver family or assumption at a time, keep variant caps low, and stop when metric/trust improvement stalls. Also review the generated human-context questions and candidate-driver hypotheses before blindly iterating; a detected driver like `rolling_minutes` should prompt a leakage/future-availability conversation and then a one-driver experiment, not automatic feature stuffing. The keep rule is explicit: keep a variant only if RMSE improves or ties with no worse MAE/Pareto review and no new trust/horizon caveats.
+`experiment_recommendation.md` and `experiment_llm_context.json` include an `autoresearch_next_iteration` block. Treat it as the next agent-friendly loop seed: one hypothesis, one metric family (`avg_rmse` primary with `avg_mae` and RMSE/MAE Pareto status as secondary review), one executor, and one fixed budget. WAPE is diagnostic/business-readable context only; do not use it to rank experiments. MCPs make it easy to run many targeted experiments that used to be manual, but do not overdo it: change one driver family or assumption at a time, keep variant caps low, and stop when metric/trust improvement stalls. Also review the generated human-context questions and candidate-driver hypotheses before blindly iterating; a detected driver like `rolling_minutes` should prompt a leakage/future-availability conversation and then a one-driver experiment, not automatic feature stuffing. Candidate-driver records include same-period correlation plus a within-series lag screen; positive `best_lag` means the driver leads the target by that many periods, and lag evidence must never be inferred by shifting across `unique_id` boundaries. The keep rule is explicit: keep a variant only if RMSE improves or ties with no worse MAE/Pareto review and no new trust/horizon caveats.
 
 #### E. How to communicate current limitations
 
@@ -496,6 +499,7 @@ Every forecast run produces these artifacts:
 | `backtest_long.csv` | Primary validation-feed output: one row per cutoff/series/model/date with actuals, forecasts, errors, interval bounds, and coverage flags |
 | `series_summary.csv` | One-row-per-series decision table with selected model, RMSE/MAE/MASE/RMSSE/WAPE, CV horizon contract, seasonality, and top alternatives |
 | `series_features.csv` | Cheap deterministic forecastability features and `recommended_experiment_next_step` for agent review; advisory only, never model-selection input |
+| `borrowed_strength_advisor.csv` | Advisory sparse-series guidance for independent, parent-anchored, reference-class, or panel-pool review; never changes champion selection or `forecast.csv` |
 | `model_audit.csv` | Model leaderboard enriched with weights and selected/challenger flags |
 | `model_win_rates.csv` | Cross-series win rates versus SeasonalNaive or Naive benchmarks |
 | `model_tradeoff_scores.csv` | Per-series/model RMSE/MAE/WAPE/MASE/RMSSE/absolute-bias scores for multi-objective review |
@@ -761,9 +765,12 @@ MFLES, AutoMFLES. AutoMFLES must be parameterized with a valid `test_size`; do n
 **Tier 8 — StatsForecast sklearn feature regressions** (seasonal series with enough rows and sklearn installed):
 StatsSklearn_LinearRegression, StatsSklearn_Ridge, StatsSklearn_Lasso. These use StatsForecast `SklearnModel` to train one sklearn estimator per series with trend plus Fourier features from `utilsforecast.feature_engineering`. They are distinct from MLForecast sklearn models: use aliases like `stats sklearn ridge` for these per-series StatsForecast regressions, while plain `ridge` remains the MLForecast lag/date Ridge candidate.
 
-**Tier 9 — Machine learning** (`auto`/`all` when ML rolling-origin validation is feasible; deeper 30-row gate for ML-only allowlists and opt-in regressors):
+**Tier 9 — Machine learning** (`standard`/`light`/`all` when ML rolling-origin validation is feasible; deeper 30-row gate for ML-only allowlists and opt-in regressors):
 MLForecast with lag/date features across sklearn and LightGBM families when installed: LinearRegression, Ridge, Ridge_Regularized, BayesianRidge, ElasticNet, Huber, RandomForest, ExtraTrees, GradientBoosting, HistGradientBoosting, KNeighbors, LightGBM, LightGBM_Conservative, LightGBM_Shallow, LightGBM_Robust.
 MLForecast uses Nixtla `PredictionIntervals` for conformal future bands when the history, horizon, and lag plan can support at least two calibration windows. If long seasonal lags would make calibration impossible, the scaffold can drop only the interval-incompatible lags and discloses that in warnings.
+
+**Tier 10 — Optional smooth ADAM** (`standard`/`all` when `uv sync --extra smooth` has installed the LGPL-2.1 `smooth` package, or explicit smooth allowlists):
+SmoothADAM_ZXZ, SmoothADAM_CCC, SmoothADAM_CustomPool. These are point-forecast ADAM candidates that enter the serious standard tournament when installed; `light` stays slim unless smooth is explicitly allowlisted. If the extra is absent, standard/all runs continue and `model_policy_resolution` reports `not_installed_or_not_enabled`. When explicitly allowlisted, smooth import/runtime failures raise instead of silently downgrading.
 
 ### Selection Pipeline
 1. **Adaptive backtest**: Per-series rolling-origin CV with window count, horizon, and step size adapted to history depth and seasonality — NOT one-size-fits-all
@@ -774,7 +781,7 @@ MLForecast uses Nixtla `PredictionIntervals` for conformal future bands when the
 6. **CV horizon contract**: `selection_horizon`, `requested_horizon`, `cv_windows`, and `cv_horizon_matches_requested` are written to selection/audit outputs; `trust_summary.csv`, `forecast.csv`, and `forecast_long.csv` also expose `horizon_trust_state`, `validated_through_horizon`, and row-level `planning_eligible`
 7. **James-Stein shrinkage**: Post-processing that blends forecast toward last actual based on backtest residual variance while shifting selected-model intervals with the point forecast
 8. **ZeroForecast**: Added for intermittent demand series (≥35% zeros)
-9. **Candidate failure isolation**: StatsForecast and MLForecast try the full ladder first, then retry individual models when one candidate fails. A model that cannot produce intervals may still keep its point forecast; failed candidates are disclosed in warnings instead of collapsing the engine to baselines.
+9. **Candidate failure isolation**: StatsForecast, MLForecast, and smooth candidates disclose failed/skipped models without collapsing default `standard` runs. A model that cannot produce intervals may still keep its point forecast; failed candidates are disclosed in warnings instead of collapsing the engine to baselines.
 
 ### Adaptive Backtest Windows
 
@@ -793,24 +800,25 @@ The backtest adapts per series instead of using fixed windows:
 
 | Policy | CLI flag | What runs |
 |--------|----------|-----------|
-| `auto` | `--model-policy auto` | StatsForecast + MLForecast when optional extras are installed and the panel can support a short ML rolling-origin CV with lag features |
-| `all` | `--model-policy all` | Every eligible open-source family; eligible MLForecast failures raise, infeasible history/horizon skips are disclosed |
+| `standard` | `--model-policy standard` | StatsForecast + MLForecast when feasible + optional smooth ADAM when the `smooth` extra is installed |
+| `light` | `--model-policy light` | StatsForecast + MLForecast when feasible; no smooth by default |
+| `all` | `--model-policy all` | Every eligible open-source family; eligible MLForecast failures raise, infeasible history/horizon skips are disclosed, smooth remains optional unless allowlisted |
 | `statsforecast` | `--model-policy statsforecast` | StatsForecast only |
 | `mlforecast` | `--model-policy mlforecast` | MLForecast only |
 | `baseline` | `--model-policy baseline` | Naive/Drift/Average only |
 
-Default serious runs should not require the user to know to force ML. `finance` uses `auto`: it attempts MLForecast when feasible and writes skipped/ran details to CLI `Model families:`, warnings, and `manifest.json -> model_policy_resolution`. Do not promise ML always runs; if it skips, explain the reason and suggest adding history, shortening strict horizons, installing the `ml` extra, or using `--model-policy mlforecast` only for exploratory forced ML.
+`auto` remains accepted as a legacy alias for `light`, and `finance` remains accepted as a legacy alias for the `standard` preset. Default serious runs should not require the user to know to force ML or smooth. `standard` attempts MLForecast when feasible, attempts smooth ADAM when `uv sync --extra smooth` has installed the optional package, and writes skipped/ran details to CLI `Model families:`, warnings, and `manifest.json -> model_policy_resolution`. `light` is the slim path and does not request smooth unless a user explicitly allowlists smooth models. Do not promise optional families always run; if one skips, explain the reason and suggest adding history, shortening strict horizons, installing the relevant extra, or using a narrow allowlist only for exploratory forced runs.
 
 Favorite-model allowlist:
 
 ```powershell
-uv run nixtla-scaffold forecast --input data.csv --preset finance --horizon 6 --model arima --model "arima mstl" --model "arima mstl features" --output runs\arima_favorites
-uv run nixtla-scaffold forecast --input data.csv --preset finance --horizon 6 --model-allowlist arima "arima mstl" "arima mstl features" --no-weighted-ensemble --output runs\literal_arima_favorites
+uv run nixtla-scaffold forecast --input data.csv --preset standard --horizon 6 --model arima --model "arima mstl" --model "arima mstl features" --output runs\arima_favorites
+uv run nixtla-scaffold forecast --input data.csv --preset standard --horizon 6 --model-allowlist arima "arima mstl" "arima mstl features" --no-weighted-ensemble --output runs\literal_arima_favorites
 ```
 
-Aliases are canonicalized, so `arima` becomes `AutoARIMA`, `arima mstl` / `mstl arima` becomes `MSTL_AutoARIMA`, and `arima mstl features` becomes `AutoARIMA_MSTLFeatures`. This is a real model tournament allowlist, not just a UI preference: non-allowlisted StatsForecast/MLForecast/baseline candidates are skipped and `manifest.json -> model_policy_resolution.model_allowlist` records the canonical set. If `--weighted-ensemble` remains enabled, `WeightedEnsemble` is derived only from the allowlisted candidates; use `--no-weighted-ensemble` when the user wants literal model outputs only.
+Aliases are canonicalized, so `arima` becomes `AutoARIMA`, `arima mstl` / `mstl arima` becomes `MSTL_AutoARIMA`, `arima mstl features` becomes `AutoARIMA_MSTLFeatures`, and `smooth adam zxz` becomes `SmoothADAM_ZXZ`. This is a real model tournament allowlist, not just a UI preference: non-allowlisted StatsForecast/MLForecast/baseline/smooth candidates are skipped and `manifest.json -> model_policy_resolution.model_allowlist` records the canonical set. If `--weighted-ensemble` remains enabled, `WeightedEnsemble` is derived only from the allowlisted candidates; use `--no-weighted-ensemble` when the user wants literal model outputs only.
 
-Do not describe `MSTL_AutoARIMA` and `AutoARIMA_MSTLFeatures` as the same model. `MSTL_AutoARIMA` is StatsForecast MSTL with AutoARIMA as the trend forecaster; `AutoARIMA_MSTLFeatures` uses Nixtla `mstl_decomposition` to generate trend/seasonal exogenous features and then fits AutoARIMA with `X_df`. Normal `auto` / `statsforecast` runs should include every eligible classical candidate; if a panel has mixed history lengths, the MSTL-feature candidate should run for eligible long-history series and disclose skipped short-history series instead of being globally disabled.
+Do not describe `MSTL_AutoARIMA` and `AutoARIMA_MSTLFeatures` as the same model. `MSTL_AutoARIMA` is StatsForecast MSTL with AutoARIMA as the trend forecaster; `AutoARIMA_MSTLFeatures` uses Nixtla `mstl_decomposition` to generate trend/seasonal exogenous features and then fits AutoARIMA with `X_df`. Normal `light` / `statsforecast` runs should include every eligible classical candidate; if a panel has mixed history lengths, the MSTL-feature candidate should run for eligible long-history series and disclose skipped short-history series instead of being globally disabled.
 
 Strict evaluation option:
 
@@ -906,7 +914,7 @@ Review rule: reconciliation improves planning coherence, not necessarily indepen
 When a user says "forecast this" without clear specs:
 
 ```powershell
-uv run nixtla-scaffold setup --workspace runs\my_workspace --data-source kusto --preset finance --series-count single --target-name revenue --time-col date --horizon 6 --freq ME --model-families statsforecast --exploration-mode
+uv run nixtla-scaffold setup --workspace runs\my_workspace --data-source kusto --preset standard --series-count single --target-name revenue --time-col date --horizon 6 --freq ME --model-families statsforecast --exploration-mode
 ```
 
 This creates:
@@ -958,7 +966,7 @@ from nixtla_scaffold import (
 )
 
 # Preset-based forecast
-run = run_forecast("data.csv", forecast_spec_preset("finance", horizon=6, freq="ME"))
+run = run_forecast("data.csv", forecast_spec_preset("standard", horizon=6, freq="ME"))
 
 # Basic forecast
 run = run_forecast("data.csv", ForecastSpec(horizon=6))
@@ -968,7 +976,7 @@ spec = ForecastSpec(
     horizon=6,
     freq="ME",
     levels=(80, 95),
-    model_policy="auto",          # "auto", "baseline", "statsforecast"
+    model_policy="standard",      # "standard", "light", "baseline", "statsforecast"
     fill_method="ffill",          # "ffill", "interpolate", "zero", "drop"
     strict_cv_horizon=False,       # True = select only on CV h matching horizon
     weighted_ensemble=True,
@@ -1004,7 +1012,7 @@ run.to_excel("runs/output/forecast.xlsx")
 Run 100 synthetic scenarios to validate the scaffold:
 
 ```powershell
-uv run nixtla-scaffold scenario-lab --count 100 --model-policy auto --output runs\lab
+uv run nixtla-scaffold scenario-lab --count 100 --model-policy light --output runs\lab
 ```
 
 Scores: validity (35%), accuracy (35%), ease (20%), explainability (10%).
@@ -1036,7 +1044,7 @@ uv run nixtla-scaffold release-gates --extended --output runs\release_gates_exte
 uv run nixtla-scaffold release-gates --output runs\release_gates_datasets --no-build --no-install-smoke --no-workbench-qa --no-live-streamlit --scenario-count 2 --require-optional datasets
 ```
 
-The CLI prints a compact verdict by default and writes `release_gate_summary.md`, `release_gate_summary.json`, and `release_gate_results.csv`. It checks package metadata, wheel/sdist contents, isolated wheel install smoke including the installed console script, deterministic scenario-lab numeric thresholds, a quick forecast golden with interval-containment checks when intervals exist, artifact hygiene, optional-extra availability, generated workbench QA, and one live Streamlit HTTP health smoke in the current Python environment. Use `--json` only when an agent needs the full nested payload in stdout. Use `--require-optional ml hierarchy` when a release must prove optional MLForecast or HierarchicalForecast extras are installed, or `--require-optional datasets` when validating the optional DatasetsForecast real-data smoke. Use `--extended` for a stricter local release profile that runs at least 20 auto-policy scenarios, uses all-family workbench QA defaults, and requires the `ml` plus `hierarchy` extras.
+The CLI prints a compact verdict by default and writes `release_gate_summary.md`, `release_gate_summary.json`, and `release_gate_results.csv`. It checks package metadata, wheel/sdist contents, isolated wheel install smoke including the installed console script, deterministic scenario-lab numeric thresholds, a quick forecast golden with interval-containment checks when intervals exist, artifact hygiene, optional-extra availability, generated workbench QA, and one live Streamlit HTTP health smoke in the current Python environment. Use `--json` only when an agent needs the full nested payload in stdout. Use `--require-optional ml hierarchy` when a release must prove optional MLForecast or HierarchicalForecast extras are installed, or `--require-optional datasets` when validating the optional DatasetsForecast real-data smoke. Use `--extended` for a stricter local release profile that runs at least 20 light-policy scenarios, uses all-family workbench QA defaults, and requires the `ml` plus `hierarchy` extras.
 
 Read `release_gate_summary.md` first. It contains the one-glance headline, failed gates, remediation hints, provenance, git-SHA unavailable reason when relevant, scenario archetype scores, thresholds, and exit codes. Release-gate exit codes are `0` passed, `1` gate failure, and `2` CLI/runtime error.
 
