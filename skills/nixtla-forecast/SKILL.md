@@ -115,7 +115,7 @@ uv run --with-requirements streamlit_requirements.txt streamlit run .\streamlit_
 | `report` | Regenerates HTML/Streamlit report artifacts | When you need to share results |
 | `ingest` | Converts MCP/query exports to canonical forecast input | When data comes from Kusto/DAX/SQL |
 | `pipeline` | Runs or refreshes script-backed source extracts into one canonical forecast input with provenance | When one forecast depends on several Kusto/DAX/SQL/Python queries |
-| `byo-model` | Imports, compares, and scores Excel-owned finance model forecast outputs with scenarios and rollups | When FP&A owns Base/Bull/Bear driver forecasts in Excel and wants side-by-side triangulation |
+| `byo-model` | Imports, compares, scores, and recommends automation for finance-owned model outputs with scenarios, rollups, customer/SKU detail, and PxQ metadata | When FP&A owns Base/Bull/Bear driver forecasts in Excel/Python and wants side-by-side triangulation plus operationalization |
 | `status` | Scans local run folders and summarizes latest runs, artifact health, trust counts, refresh/ledger context, and next actions | When the user asks "where is the latest run?" or an agent needs a starting point |
 | `doctor` | Checks one run for missing artifacts, trust/horizon caveats, refresh deltas, and ledger linkage without mutating the run | Before sharing or operationalizing a run |
 | `drift` | Rolls up existing refresh deltas and ledger performance into CSV/JSON/Markdown drift evidence | After refreshes or actuals land |
@@ -547,6 +547,7 @@ Every forecast run produces these artifacts:
 | `streamlit_app.py` / `run_streamlit.ps1` | Interactive dashboard with cached local artifact loading, polished sidebar **Workbench section** button tabs that keep every section visible while rendering only the active heavy section on rerun. Forecast review owns the styled executive headline card, copy-safe code block, copy/paste wide summary controls for Actuals/Forecast/Actuals + forecast with Raw/Thousands/Millions/Currency displays, active-champion default forecast model selection, optional interval lo/hi columns for the selected model, decision/action cards for watchouts and current model next actions, and a forecast operating loop for connecting refreshes end to end, adding drivers/regressors, and tracking forecast performance over time. When `ledger_context.json` exists, a lazy Forecast ledger section opens with one clean line chart: latest actuals/history, official locks emphasized, and recent non-lock forecast versions as lighter lines before collapsing the raw ledger audit tables for deeper review. It also includes champion lens controls for best overall vs best StatsForecast/classical vs best MLForecast, active champion horizon/interval banners, winner-metric guidance, first-glance forecast charts, dedicated Model investigation with Pareto tradeoffs, fixed-axis CV window player, Prediction intervals, Model audit, Seasonality, Hierarchy, Assumptions & Drivers with regressor visual evidence plus ML feature importance, Feeder outputs, and pre/post reconciliation review when enabled. Set `NIXTLA_SCAFFOLD_STREAMLIT_PERF=1` before launching to show artifact-load diagnostics in the sidebar. Use `.\run_streamlit.ps1` from the run folder, or `uv run --with-requirements streamlit_requirements.txt streamlit run .\streamlit_app.py` if script execution is restricted. |
 | `ledger_context.json` | Optional pointer written when a run is registered in a forecast ledger; lets `report.html` and the Streamlit workbench discover ledger exports. |
 | `runs\forecast_ledger\exports\*.csv` | Power BI-ready forecast ledger mirrors: versions, snapshots, official locks, actual revisions, forecast-vs-actuals, performance, selected-lock deltas, adjustments, corrected actuals, and regime changes. |
+| `byo_model\byo_model_automation.md` | Optional BYO model automation guide with refresh loop, cutoff snapshots, known-as-of lineage, metric-definition guardrails, and customer/SKU/PxQ ownership guidance. |
 | `forecast.xlsx` | Excel workbook with all sheets |
 | `best_practice_receipts.csv` | FPPy compliance audit trail |
 
@@ -558,6 +559,16 @@ Use `--unit-label` when the user cares about currency or business units in the e
 uv run nixtla-scaffold explain --run runs\my_forecast
 uv run nixtla-scaffold report --run runs\my_forecast
 ```
+
+### Step 4.25: BYO Model Automation and Explainability
+
+When finance needs the Excel-style story behind a SKU/customer forecast, keep the bridge logic inside the finance-owned BYO model or its exported detail tables. Use `byo-model` to import, compare, score, and operationalize that model rather than creating a separate bridge that appears to replace selected `yhat`.
+
+```powershell
+uv run nixtla-scaffold byo-model compare --run runs\my_forecast --file finance_model.xlsx --sheet Base Bull Bear --group-cols ProductGroup ProductLine Product --main-model-preference Base
+```
+
+Recommended BYO exports should include `scenario_name`, `model_version`, `owner`, `cutoff`, and `known_as_of` where applicable. Customer/SKU, `purchase_type`, `quantity`/`seats`, `unit_price`/`rate`, renewal, SKU migration, and hierarchy fields can travel as metadata for lineage and storytelling. The workflow writes `byo_model_automation.md` with suggested refresh steps: automate the workbook/model export, preserve cutoff snapshots, score after actuals land, and keep ARR/billed/net revenue definitions explicit upstream.
 
 ### Step 4.5: Refreshability and Model Drift
 

@@ -124,15 +124,15 @@ nixtla-scaffold score-external --external finance_snapshots.csv --actuals actual
 
 This writes `external_backtest_long.csv`, `external_model_metrics.csv`, and `external_scoring_manifest.json`. Scoring joins on `unique_id` + `ds`, requires `cutoff < ds`, and fails closed for future-only forecasts, non-positive `--season-length` / `--horizon`, duplicate actual `unique_id`/`ds` rows, or zero matched actuals. Missing actuals are kept as `missing_actual` diagnostics in the long file but excluded from metrics. MASE/RMSSE scales are computed only from actual history available at each row's cutoff; rows disclose `scale_basis` / `effective_season_length`, and metrics include `scale_basis_distribution`. Bias is `sum(yhat - y_actual) / sum(abs(y_actual))`, so positive bias means the external model overstated actuals.
 
-### BYO Excel finance models
+## BYO Excel finance models
 
-Use `byo-model` when the external forecast lives in an Excel driver model with multiple versions such as Base/Bull/Bear and product rollups. BYO Excel forecasts are still imported forecast outputs for triangulation; they do not become training data and do not override `forecast.csv` or champion selection.
+Use `byo-model` when the external forecast lives in an Excel/Python driver model with multiple versions such as Base/Bull/Bear, product rollups, customer/SKU detail, purchase-type logic, renewal assumptions, or PxQ calculations. BYO forecasts are imported forecast outputs for triangulation and operationalization; they do not become training data and do not override `forecast.csv` or champion selection.
 
 Preferred long-form sheet shape:
 
 | Required | Recommended | Optional |
 | -------- | ----------- | -------- |
-| `ds`, `yhat` | ordered grouping columns such as `ProductGroup`, `ProductLine`, `Product` | `cutoff`, `owner`, `currency`, `unit_label`, `model_version`, `notes` |
+| `ds`, `yhat` | ordered grouping columns such as `ProductGroup`, `ProductLine`, `Product` | `cutoff`, `known_as_of`, `owner`, `currency`, `unit_label`, `model_version`, `notes`, customer/SKU/PxQ detail columns |
 
 If `unique_id` is absent and `--group-cols` is supplied, IDs are generated from the ordered grouping columns and explicit derived-sum rollups are added for `Total` and each prefix level. Workbook subtotal rows with labels such as `Total` or `Subtotal` are rejected so rollups are not double counted.
 
@@ -150,7 +150,7 @@ uv run nixtla-scaffold byo-model compare --run runs\byo_excel_example\scaffold_r
 uv run nixtla-scaffold byo-model score --file runs\byo_excel_example\finance_snapshots.xlsx --actuals runs\byo_excel_example\actuals.csv --sheet Base Bull Bear --group-cols ProductGroup ProductLine Product --output runs\byo_excel_example\scores
 ```
 
-The compare workflow writes `byo_model_forecasts.csv`, `byo_model_contract.csv`, `forecast_comparison.csv`, `forecast_comparison_summary.csv`, `byo_model_comparison_summary.csv`, and `byo_model_manifest.json`. Generated Streamlit reports discover a sibling `byo_model` folder and add a **BYO / Finance model** section with scenario filters, hierarchy-level filters, a scaffold-vs-BYO line chart, delta table, contract lineage, and score summaries when available.
+The compare workflow writes `byo_model_forecasts.csv`, `byo_model_contract.csv`, `forecast_comparison.csv`, `forecast_comparison_summary.csv`, `byo_model_comparison_summary.csv`, `byo_model_automation.md`, and `byo_model_manifest.json`. The automation artifact recommends how to turn the finance-owned model into a refreshable loop: executable export step, cutoff snapshots, known-as-of lineage, scoring after actuals land, and explicit metric definitions for ARR vs billed/net revenue vs units. Generated Streamlit reports discover a sibling `byo_model` folder and add a **BYO / Finance model** section with scenario filters, hierarchy-level filters, automation recommendations, a scaffold-vs-BYO line chart, delta table, contract lineage, and score summaries when available.
 
 Executable custom models are also supported as **optional challengers** in the normal forecast tournament. The default refresh path does not change; custom models only run when supplied explicitly:
 

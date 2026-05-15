@@ -25,6 +25,10 @@ def _write_byo_workbook(path, *, include_cutoff: bool = False) -> None:
             "Product": ["Seats", "Usage"],
             "ds": ["2026-01-31", "2026-01-31"],
             "yhat": [110.0, 55.0],
+            "customer_id": ["Northwind", "Contoso"],
+            "sku": ["Seats", "Usage"],
+            "quantity": [11, 5],
+            "unit_price": [10.0, 11.0],
             **({"cutoff": ["2025-12-31", "2025-12-31"]} if include_cutoff else {}),
         }
     )
@@ -54,7 +58,12 @@ def test_byo_model_ingest_multisheet_generates_scenarios_and_rollups(tmp_path) -
 
     out = tmp_path / "out"
     assert (out / "byo_model_forecasts.csv").exists()
-    assert json.loads((out / "byo_model_manifest.json").read_text())["operation"] == "ingest"
+    assert (out / "byo_model_automation.md").exists()
+    manifest = json.loads((out / "byo_model_manifest.json").read_text())
+    assert manifest["operation"] == "ingest"
+    assert manifest["outputs"]["automation"] == "byo_model_automation.md"
+    assert "customer_id" in manifest["automation_recommendations"]["detected_detail_columns"]
+    assert "finance-owned driver models" in (out / "byo_model_automation.md").read_text(encoding="utf-8").lower()
 
 
 def test_byo_model_grouped_import_rejects_workbook_subtotal_rows(tmp_path) -> None:
@@ -108,6 +117,7 @@ def test_byo_model_compare_writes_grouped_summary(tmp_path) -> None:
     assert result.comparison.manifest["alignment"]["rows_aligned"] >= 3
     assert result.manifest["main_model_preference"] == "Base"
     assert result.manifest["main_model_preference_scope"] == "display_only"
+    assert result.manifest["automation_recommendations"]["operation"] == "compare"
     assert "hierarchy_level" in result.byo_summary.columns
     assert "ProductGroup" in result.byo_summary.columns
 

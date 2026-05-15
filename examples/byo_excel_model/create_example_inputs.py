@@ -9,23 +9,30 @@ import pandas as pd
 GROUP_COLS = ["ProductGroup", "ProductLine", "Product"]
 DATES = pd.to_datetime(["2026-01-31", "2026-02-28", "2026-03-31"])
 PRODUCTS = [
-    ("Cloud", "Workspace", "Seats", 100.0),
-    ("Cloud", "Workspace", "Usage", 45.0),
-    ("Platform", "Automation", "Jobs", 70.0),
+    ("Cloud", "Workspace", "Seats", "Northwind", "Copilot Business", "renewal", 100.0),
+    ("Cloud", "Workspace", "Usage", "Contoso", "Copilot Business", "add_on", 45.0),
+    ("Platform", "Automation", "Jobs", "Tailspin", "Actions", "recurring", 70.0),
 ]
 SCENARIOS = {"Base": 1.00, "Bull": 1.10, "Bear": 0.92}
 
 
 def _scenario_sheet(multiplier: float, *, cutoff: str | None = None) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
-    for product_group, product_line, product, base in PRODUCTS:
+    for product_group, product_line, product, customer_id, sku, purchase_type, base in PRODUCTS:
         for step, ds in enumerate(DATES, start=1):
+            yhat = round(base * multiplier * (1 + 0.035 * step), 2)
             row = {
                 "ProductGroup": product_group,
                 "ProductLine": product_line,
                 "Product": product,
+                "customer_id": customer_id,
+                "sku": sku,
+                "purchase_type": purchase_type,
                 "ds": ds,
-                "yhat": round(base * multiplier * (1 + 0.035 * step), 2),
+                "yhat": yhat,
+                "quantity": round(yhat / 10.0, 2),
+                "unit_price": 10.0,
+                "known_as_of": "2025-12-31",
                 "owner": "fpna",
                 "currency": "USD",
                 "unit_label": "$",

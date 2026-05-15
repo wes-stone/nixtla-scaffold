@@ -454,6 +454,7 @@ def build_html_report(payload: dict[str, Any]) -> str:
           {_output_item("byo_model/forecast_comparison.csv", "Directional scaffold-vs-BYO alignment; deltas only, not accuracy metrics or champion evidence.")}
           {_output_item("byo_model/byo_model_comparison_summary.csv", "BYO comparison rollup by scenario, source/sheet, hierarchy level, and product grouping columns.")}
           {_output_item("byo_model/byo_model_score_summary.csv", "Optional cutoff-labeled BYO actual-vs-forecast score rollup when historical snapshots are supplied.")}
+          {_output_item("byo_model/byo_model_automation.md", "Recommended automation loop for finance-owned BYO models, including cutoff snapshots, known-as-of lineage, and customer/SKU/PxQ detail ownership.")}
           {_output_item("appendix/known_future_regressors.csv", "Declared known-future regressor contracts for leakage and future-availability audit.")}
           {_output_item("appendix/driver_availability_audit.csv", "Known-future regressor audit status, leakage risk, required future rows, and modeling decision.")}
           {_output_item("appendix/driver_model_features.csv", "Opt-in MLForecast driver feature gate showing which audited regressors were included or excluded.")}
@@ -6298,6 +6299,7 @@ def build_streamlit_app() -> str:
                     f"Display-only main model preference: **{byo_preference}**. "
                     "This does not overwrite `forecast.csv` or the scaffold champion."
                 )
+            byo_automation = byo_model_manifest.get("automation_recommendations", {}) if isinstance(byo_model_manifest, dict) else {}
             byo_available = any(
                 not frame.empty
                 for frame in [
@@ -6325,6 +6327,20 @@ def build_streamlit_app() -> str:
                     c4.metric("Scored rows", int(byo_external_backtest["scoring_status"].astype(str).eq("scored").sum()))
                 else:
                     c4.metric("Scored rows", "N/A")
+
+                if isinstance(byo_automation, dict) and byo_automation:
+                    with st.expander("Automation recommendations", expanded=True):
+                        st.caption(
+                            "Customer/SKU bridges, purchase-type logic, renewal assumptions, and PxQ should be authored in the finance-owned BYO model or its exported detail tables."
+                        )
+                        detected_columns = byo_automation.get("detected_detail_columns") or []
+                        if detected_columns:
+                            st.write("Detected detail columns: " + ", ".join(str(column) for column in detected_columns))
+                        for item in byo_automation.get("recommendations", []):
+                            if not isinstance(item, dict):
+                                continue
+                            st.markdown(f"**{item.get('id', 'recommendation')}** - {item.get('status', 'recommended')}")
+                            st.write(item.get("recommendation", ""))
 
                 if not byo_forecast_comparison.empty:
                     compare_view = byo_forecast_comparison.copy()
