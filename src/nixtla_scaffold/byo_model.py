@@ -20,6 +20,7 @@ BYO_MODEL_SCHEMA_VERSION = "nixtla_scaffold.byo_model.v1"
 BYO_MODEL_FORECAST_OUTPUT = "byo_model_forecasts.csv"
 BYO_MODEL_CONTRACT_OUTPUT = "byo_model_contract.csv"
 BYO_MODEL_MANIFEST_OUTPUT = "byo_model_manifest.json"
+BYO_MODEL_AUTOMATION_OUTPUT = "byo_model_automation.md"
 BYO_MODEL_COMPARISON_SUMMARY_OUTPUT = "byo_model_comparison_summary.csv"
 BYO_MODEL_SCORE_SUMMARY_OUTPUT = "byo_model_score_summary.csv"
 
@@ -38,6 +39,7 @@ class BYOModelIngestResult:
         self.forecasts.to_csv(out / BYO_MODEL_FORECAST_OUTPUT, index=False)
         self.contract.to_csv(out / BYO_MODEL_CONTRACT_OUTPUT, index=False)
         (out / BYO_MODEL_MANIFEST_OUTPUT).write_text(json.dumps(self.manifest, indent=2, default=str) + "\n", encoding="utf-8")
+        _write_byo_model_automation(out, self.manifest)
         return out
 
 
@@ -191,6 +193,11 @@ def write_byo_model_comparison(
         "main_model_preference": main_model_preference or "",
         "main_model_preference_scope": "display_only" if main_model_preference else "",
         "comparison": comparison.manifest,
+        "automation_recommendations": build_byo_model_automation_recommendations(
+            ingest.forecasts,
+            operation="compare",
+            options=_manifest_options(kwargs),
+        ),
         "outputs": {
             **ingest.manifest.get("outputs", {}),
             "forecast_comparison": "forecast_comparison.csv",
@@ -199,6 +206,7 @@ def write_byo_model_comparison(
         },
     }
     (out / BYO_MODEL_MANIFEST_OUTPUT).write_text(json.dumps(manifest, indent=2, default=str) + "\n", encoding="utf-8")
+    _write_byo_model_automation(out, manifest)
     return BYOModelComparisonResult(ingest=ingest, comparison=comparison, byo_summary=byo_summary, manifest=manifest)
 
 
@@ -248,6 +256,11 @@ def write_byo_model_scores(
         "operation": "score",
         "actuals_source": str(Path(actuals)) if isinstance(actuals, (str, Path)) else "dataframe",
         "scoring": scores.manifest,
+        "automation_recommendations": build_byo_model_automation_recommendations(
+            ingest.forecasts,
+            operation="score",
+            options=_manifest_options(kwargs),
+        ),
         "outputs": {
             **ingest.manifest.get("outputs", {}),
             "external_backtest_long": "external_backtest_long.csv",
@@ -256,7 +269,60 @@ def write_byo_model_scores(
         },
     }
     (out / BYO_MODEL_MANIFEST_OUTPUT).write_text(json.dumps(manifest, indent=2, default=str) + "\n", encoding="utf-8")
+    _write_byo_model_automation(out, manifest)
     return BYOModelScoreResult(ingest=ingest, scores=scores, byo_summary=byo_summary, manifest=manifest)
+
+
+def build_byo_model_automation_markdown(manifest: dict[str, Any]) -> str:
+    """Render the BYO automation recommendation artifact."""
+
+    automation = manifest.get("automation_recommendations", {}) if isinstance(manifest, dict) else {}
+    recommendations = automation.get("recommendations", []) if isinstance(automation, dict) else []
+    detected = automation.get("detected_detail_columns", []) if isinstance(automation, dict) else []
+    refresh_loop = automation.get("recommended_refresh_loop", []) if isinstance(automation, dict) else []
+    lines = [
+        "# BYO model automation guide",
+        "",
+        "Finance-owned driver models should remain the place where customer/SKU bridges, purchase type, renewal assumptions, PxQ, and scenario logic are authored.",
+        "The scaffold imports their outputs for comparison, scoring, lineage, and refresh automation without overwriting `forecast.csv` or the scaffold champion.",
+        "",
+        "## Detected model contract",
+        "",
+        f"- Source: `{manifest.get('source', '')}`",
+        f"- Operation: `{manifest.get('operation', '')}`",
+        f"- Rows: `{manifest.get('rows', 0)}`",
+        f"- Models/scenarios: `{', '.join(manifest.get('models', []) or [])}` / `{', '.join(manifest.get('scenarios', []) or [])}`",
+        f"- Detail columns detected: `{', '.join(detected) if detected else 'none'}`",
+        "",
+        "## Recommended automation loop",
+        "",
+    ]
+    lines.extend(f"{index}. {step}" for index, step in enumerate(refresh_loop, start=1))
+    lines.extend(["", "## Automation recommendations", ""])
+    for recommendation in recommendations:
+        if not isinstance(recommendation, dict):
+            continue
+        lines.append(f"### {recommendation.get('id', 'recommendation')} ({recommendation.get('status', 'recommended')})")
+        lines.append("")
+        lines.append(str(recommendation.get("recommendation", "")))
+        lines.append("")
+        lines.append(f"Why: {recommendation.get('why', '')}")
+        lines.append("")
+    lines.extend(
+        [
+            "## Guardrails",
+            "",
+            "- Treat BYO outputs as external forecasts until cutoff-labeled snapshots are scored against actuals.",
+            "- Keep ARR, billed revenue, net revenue, seats, and usage definitions explicit in the source model contract.",
+            "- Use BYO model preference as display/storytelling context only; do not silently replace selected statistical `yhat`.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _write_byo_model_automation(output_dir: Path, manifest: dict[str, Any]) -> None:
+    (output_dir / BYO_MODEL_AUTOMATION_OUTPUT).write_text(build_byo_model_automation_markdown(manifest), encoding="utf-8")
 
 
 def add_byo_model_rollups(
@@ -346,6 +412,7 @@ def build_byo_model_manifest(
 ) -> dict[str, Any]:
     """Build JSON-serializable BYO import metadata."""
 
+    automation = build_byo_model_automation_recommendations(forecasts, operation=operation, options=options)
     return {
         "schema_version": BYO_MODEL_SCHEMA_VERSION,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -367,12 +434,98 @@ def build_byo_model_manifest(
             "Derived rollups are explicit rows tagged external_rollup_source='derived_sum'.",
             "Future-only BYO rows are directional comparison evidence only until cutoff-labeled snapshots join to actuals.",
             "Choosing a BYO model as a display preference never overwrites forecast.csv or scaffold champion selection.",
+            "Customer/SKU, purchase-type, renewal, and PxQ bridges should live inside the finance-owned BYO model or its exported detail tables, not as a separate yhat-replacement layer.",
         ],
+        "automation_recommendations": automation,
         "outputs": {
             "forecasts": BYO_MODEL_FORECAST_OUTPUT,
             "contract": BYO_MODEL_CONTRACT_OUTPUT,
             "manifest": BYO_MODEL_MANIFEST_OUTPUT,
+            "automation": BYO_MODEL_AUTOMATION_OUTPUT,
         },
+    }
+
+
+def build_byo_model_automation_recommendations(
+    forecasts: pd.DataFrame,
+    *,
+    operation: str = "ingest",
+    options: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Suggest how to automate and govern finance-owned BYO model outputs."""
+
+    options = dict(options or {})
+    columns = {str(column) for column in forecasts.columns}
+    bridge_detail_columns = sorted(
+        columns
+        & {
+            "account",
+            "amount",
+            "contract_id",
+            "customer",
+            "customer_id",
+            "known_as_of",
+            "next_sku",
+            "prior_sku",
+            "purchase_type",
+            "quantity",
+            "rate",
+            "renewal_date",
+            "seats",
+            "sku",
+            "subscription_id",
+            "unit_price",
+        }
+    )
+    group_cols = [str(column) for column in options.get("group_cols", ()) if str(column).strip()]
+    has_cutoff = "cutoff" in forecasts.columns and forecasts["cutoff"].notna().any()
+    has_known_as_of = "known_as_of" in forecasts.columns and forecasts["known_as_of"].notna().any()
+    recommendations = [
+        {
+            "id": "make-source-executable",
+            "status": "recommended",
+            "recommendation": "Wrap the finance-owned workbook/model in a repeatable export step that writes the BYO forecast contract.",
+            "why": "This keeps Excel/Python driver logic owned by finance while making refreshes reproducible.",
+        },
+        {
+            "id": "snapshot-cutoffs",
+            "status": "present" if has_cutoff else "missing",
+            "recommendation": "Persist cutoff-labeled forecast snapshots before each official submission.",
+            "why": "Cutoff snapshots are required before BYO forecasts can be scored against future actuals.",
+        },
+        {
+            "id": "known-as-of-lineage",
+            "status": "present" if has_known_as_of else "missing",
+            "recommendation": "Add known_as_of lineage for manual assumptions, renewals, pricing, and customer-level overrides.",
+            "why": "Known-as-of timestamps make renewal/add-on/churn assumptions auditable and reduce leakage risk.",
+        },
+        {
+            "id": "component-detail-in-byo",
+            "status": "present" if bridge_detail_columns else "optional",
+            "recommendation": "Keep customer/SKU, purchase-type, renewal, and PxQ bridge detail in the BYO model export or a sibling detail table.",
+            "why": "The bridge is part of the finance-owned bottoms-up model story; the scaffold should import, compare, score, and operationalize it rather than replace selected yhat.",
+        },
+        {
+            "id": "metric-definition",
+            "status": "recommended",
+            "recommendation": "Define the metric upstream in the BYO model contract: ARR, billed revenue, net revenue, seats, usage, currency, FX, and normalization rules.",
+            "why": "The scaffold should not infer conversions between ARR, billed revenue, net revenue, or quantity units.",
+        },
+    ]
+    return {
+        "operation": operation,
+        "group_cols": group_cols,
+        "detected_detail_columns": bridge_detail_columns,
+        "has_cutoff_snapshots": bool(has_cutoff),
+        "has_known_as_of_lineage": bool(has_known_as_of),
+        "recommended_refresh_loop": [
+            "Refresh finance workbook/model inputs.",
+            "Export BYO forecasts with scenario_name, model_version, owner, cutoff, and known_as_of where applicable.",
+            "Run `nixtla-scaffold byo-model compare` against the latest scaffold baseline.",
+            "After actuals land, run `nixtla-scaffold byo-model score` on cutoff-labeled snapshots.",
+            "Review deltas, score summaries, and assumption lineage before promoting any BYO scenario as the business narrative.",
+        ],
+        "recommendations": recommendations,
     }
 
 

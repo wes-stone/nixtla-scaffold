@@ -3,10 +3,13 @@
 from nixtla_scaffold.data import load_forecast_dataset
 from nixtla_scaffold.best_practices import best_practice_receipts
 from nixtla_scaffold.byo_model import (
+    BYO_MODEL_AUTOMATION_OUTPUT,
     BYO_MODEL_SCHEMA_VERSION,
     BYOModelComparisonResult,
     BYOModelIngestResult,
     BYOModelScoreResult,
+    build_byo_model_automation_markdown,
+    build_byo_model_automation_recommendations,
     ingest_byo_model_forecasts,
     load_byo_model_forecasts,
     write_byo_model_comparison,
@@ -111,6 +114,7 @@ __all__ = [
     "DRIFT_SCHEMA_VERSION",
     "OPERATE_SCHEMA_VERSION",
     "PIPELINE_SCHEMA_VERSION",
+    "BYO_MODEL_AUTOMATION_OUTPUT",
     "BYO_MODEL_SCHEMA_VERSION",
     "CustomModelSpec",
     "BYOModelComparisonResult",
@@ -140,6 +144,8 @@ __all__ = [
     "build_html_report",
     "build_executive_headline",
     "build_streamlit_app",
+    "build_byo_model_automation_markdown",
+    "build_byo_model_automation_recommendations",
     "append_custom_model_result",
     "compare_forecasts",
     "compare_models",
