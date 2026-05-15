@@ -167,12 +167,12 @@ def test_ledger_cli_registers_forecast_and_official_lock(tmp_path) -> None:
     locks = pd.read_csv(ledger / "exports" / "official_forecast_locks.csv")
     assert locks["lock_label"].tolist() == ["March lock"]
     report_html = (output_dir / "report.html").read_text(encoding="utf-8")
-    assert "Forecast ledger" in report_html
+    assert "Ledger view" in report_html
     assert "Static ledger preview embedded from" in report_html
     assert "March lock" in report_html
     app_source = (output_dir / "streamlit_app.py").read_text(encoding="utf-8")
     assert "Forecasts as they moved over time" in app_source
-    assert "Latest actuals" in app_source
+    assert "Actuals (history + landed)" in app_source
     assert "lighter lines" in app_source
     assert "Latest historicals used in ledger visuals" in app_source
     assert "ledger_forecast_evolution" in app_source
@@ -180,6 +180,6 @@ def test_ledger_cli_registers_forecast_and_official_lock(tmp_path) -> None:
     assert "Audit tables" in app_source
 
     app = AppTest.from_file(str(output_dir / "streamlit_app.py"), default_timeout=120)
-    app.session_state["active_workbench_section"] = "Forecast ledger"
+    app.session_state["active_workbench_section"] = "Ledger view"
     app.run()
     assert not app.exception
