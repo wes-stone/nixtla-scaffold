@@ -12,7 +12,7 @@ def run_example(output_dir: str | Path | None = None) -> Path:
     output = Path(output_dir) if output_dir is not None else ROOT / "runs" / "custom_finance"
     script = ROOT / "finance_seasonality_model.py"
     spec = forecast_spec_preset(
-        "finance",
+        "standard",
         horizon=6,
         freq="ME",
         model_policy="baseline",

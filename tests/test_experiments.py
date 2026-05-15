@@ -5,6 +5,7 @@ import json
 import pandas as pd
 
 from nixtla_scaffold import ForecastSpec, compare_models, run_experiment
+from nixtla_scaffold.experiments import _detect_candidate_drivers, _lagged_correlation_evidence
 
 
 def _demo_frame() -> pd.DataFrame:
@@ -91,6 +92,9 @@ def test_run_experiment_detects_candidate_drivers_for_autoresearch_context(tmp_p
     assert candidates[0]["value_col"] == "rolling_minutes"
     assert candidates[0]["regressor_json"]["availability"] == "historical_only"
     assert candidates[0]["regressor_json"]["mode"] == "model_candidate"
+    assert "same_period_correlation_abs" in candidates[0]
+    assert "best_lag" in candidates[0]
+    assert "relationship_timing" in candidates[0]
     assert "active_flag" not in {candidate["value_col"] for candidate in candidates}
     assert result.llm_context["manifest"]["base_spec"]["regressors"] == []
     assert result.llm_context["autoresearch_hypotheses"][0]["command_seed"].count("--train-known-future-regressors") == 1
@@ -103,6 +107,42 @@ def test_run_experiment_detects_candidate_drivers_for_autoresearch_context(tmp_p
     assert "rolling_minutes" in recommendation
     assert '"availability":"historical_only"' in recommendation
     assert "Detected candidates are not trained automatically" in recommendation
+
+
+def test_candidate_driver_lag_metadata_uses_positive_lag_for_driver_leading_target() -> None:
+    signal = [0, 10, 2, 8, 4, 6, 1, 9, 3, 7, 5, 11]
+    y = [None, None, *signal[:-2]]
+    frame = pd.DataFrame(
+        {
+            "unique_id": ["Revenue"] * len(signal),
+            "ds": pd.date_range("2025-01-31", periods=len(signal), freq="ME"),
+            "y": y,
+            "usage_signal": signal,
+        }
+    )
+
+    candidates = _detect_candidate_drivers(frame, ForecastSpec(horizon=2), limit=3)
+    candidate = next(item for item in candidates if item["value_col"] == "usage_signal")
+
+    assert candidate["best_lag"] == 2
+    assert candidate["relationship_timing"] == "driver_leads_target"
+    assert "leads `y` by 2 period" in candidate["lag_interpretation"]
+
+
+def test_lagged_driver_screen_does_not_shift_across_panel_boundaries() -> None:
+    frame = pd.DataFrame(
+        {
+            "unique_id": ["A"] * 6 + ["B"] * 6,
+            "ds": list(pd.date_range("2025-01-31", periods=6, freq="ME")) * 2,
+            "y": [1, 1, 1, 1, 1, 1, 100, 100, 100, 100, 100, 100],
+            "usage_signal": [10, 10, 10, 10, 10, 10, -10, -10, -10, -10, -10, -10],
+        }
+    )
+
+    evidence = _lagged_correlation_evidence(frame, "usage_signal", max_lag=3)
+
+    assert evidence["relationship_timing"] == "insufficient_lag_evidence"
+    assert evidence["best_lag_paired_observations"] == 0
 
 
 def test_run_experiment_caps_requested_variants(tmp_path) -> None:

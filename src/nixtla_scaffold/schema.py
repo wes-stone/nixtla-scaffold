@@ -16,7 +16,7 @@ import pandas as pd
 from nixtla_scaffold.model_families import MODEL_ALLOWLIST_CANDIDATES, canonicalize_model_allowlist
 
 FillMethod = Literal["ffill", "zero", "interpolate", "drop"]
-ModelPolicy = Literal["auto", "baseline", "statsforecast", "mlforecast", "all"]
+ModelPolicy = Literal["standard", "light", "auto", "baseline", "statsforecast", "mlforecast", "all"]
 EventEffect = Literal["additive", "multiplicative"]
 TargetTransform = Literal["none", "log", "log1p"]
 HierarchyReconciliationMethod = Literal["none", "bottom_up", "top_down", "both", "mint_ols", "mint_wls_struct"]
@@ -194,7 +194,7 @@ class ForecastSpec:
     freq: str | None = None
     season_length: int | None = None
     levels: tuple[int, ...] = (80, 95)
-    model_policy: ModelPolicy = "auto"
+    model_policy: ModelPolicy = "light"
     fill_method: FillMethod = "ffill"
     id_col: str = "unique_id"
     time_col: str = "ds"
@@ -224,6 +224,10 @@ class ForecastSpec:
             raise ValueError(f"interval levels must be between 0 and 100, got {invalid_levels}")
         if self.unit_label is not None and not str(self.unit_label).strip():
             raise ValueError("unit_label cannot be blank")
+        model_policy = "light" if self.model_policy == "auto" else self.model_policy
+        if model_policy not in {"standard", "light", "baseline", "statsforecast", "mlforecast", "all"}:
+            raise ValueError("model_policy must be one of: standard, light, baseline, statsforecast, mlforecast, all")
+        object.__setattr__(self, "model_policy", model_policy)
         canonical_models, unknown_models = canonicalize_model_allowlist(tuple(self.model_allowlist))
         if unknown_models:
             unknown = ", ".join(repr(model) for model in unknown_models)
@@ -267,7 +271,7 @@ def forecast_spec_from_dict(data: dict[str, Any]) -> ForecastSpec:
         freq=data.get("freq"),
         season_length=_optional_int(data.get("season_length")),
         levels=tuple(int(level) for level in data.get("levels", (80, 95))),
-        model_policy=data.get("model_policy", "auto"),
+        model_policy=data.get("model_policy", "light"),
         fill_method=data.get("fill_method", "ffill"),
         id_col=data.get("id_col", "unique_id"),
         time_col=data.get("time_col", "ds"),
@@ -426,6 +430,7 @@ class ForecastRun:
             "backtest_long": "appendix/backtest_long.csv",
             "series_summary": "appendix/series_summary.csv",
             "series_features": "appendix/series_features.csv",
+            "borrowed_strength_advisor": "appendix/borrowed_strength_advisor.csv",
             "model_audit": "appendix/model_audit.csv",
             "model_win_rates": "appendix/model_win_rates.csv",
             "model_tradeoff_scores": "appendix/model_tradeoff_scores.csv",
@@ -464,6 +469,8 @@ class ForecastRun:
             "streamlit_requirements": "streamlit_requirements.txt",
             "streamlit_launcher_ps1": "run_streamlit.ps1",
             "streamlit_launcher_cmd": "run_streamlit.cmd",
+            "control_pane_state": "control_pane_state.json",
+            "training_progress": "audit/training_progress.jsonl",
             "best_practice_receipts": "appendix/best_practice_receipts.csv",
             "run_receipt": "appendix/run_receipt.json",
             "run_receipt_markdown": "appendix/run_receipt.md",

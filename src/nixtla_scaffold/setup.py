@@ -7,13 +7,13 @@ from typing import Any
 
 import yaml
 
-from nixtla_scaffold.presets import PRESET_NAMES, forecast_spec_preset, preset_catalog
+from nixtla_scaffold.presets import PRESET_NAMES, canonical_preset_name, forecast_spec_preset, preset_catalog
 
 
 DATA_SOURCES = ("csv", "excel", "kusto", "dax", "sql", "dataframe", "unknown")
 SERIES_COUNTS = ("single", "few", "many", "hierarchy", "unknown")
 INTERVAL_MODES = ("auto", "point", "intervals")
-MODEL_FAMILIES = ("auto", "baseline", "statsforecast", "mlforecast", "hierarchicalforecast", "neuralforecast_research")
+MODEL_FAMILIES = ("standard", "light", "auto", "baseline", "statsforecast", "mlforecast", "hierarchicalforecast", "neuralforecast_research")
 
 
 @dataclass(frozen=True)
@@ -25,11 +25,11 @@ class SetupAnswers:
     time_col: str = "ds"
     id_col: str = "unique_id"
     id_value: str | None = None
-    preset: str = "finance"
+    preset: str = "standard"
     horizon: int = 12
     freq: str | None = None
     intervals: str = "auto"
-    model_families: tuple[str, ...] = ("auto",)
+    model_families: tuple[str, ...] = ("standard",)
     exploration_mode: bool = True
     mcp_regressor_search: bool = False
     outputs: tuple[str, ...] = ("all",)
@@ -51,6 +51,9 @@ class SetupAnswers:
             raise ValueError(f"model_families values must be in {MODEL_FAMILIES}, got {invalid_models}")
         if self.horizon < 1:
             raise ValueError("horizon must be >= 1")
+        object.__setattr__(self, "preset", canonical_preset_name(self.preset))
+        canonical_families = tuple(dict.fromkeys("light" if model == "auto" else model for model in self.model_families))
+        object.__setattr__(self, "model_families", canonical_families)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -145,7 +148,7 @@ def setup_questions(answers: SetupAnswers | None = None) -> list[dict[str, Any]]
             "question": "Which model families should be considered?",
             "answer": list(selected.model_families),
             "options": list(MODEL_FAMILIES),
-            "caveat": "Current production engine supports baseline and StatsForecast directly; MLForecast and HierarchicalForecast are setup/roadmap choices unless optional dependencies and future-driver/reconciliation contracts are ready. NeuralForecast is research-only.",
+                "caveat": "Standard is the default serious model policy: StatsForecast, feasible MLForecast, and optional smooth ADAM when installed. Light is the slim path without smooth by default. NeuralForecast is research-only.",
         },
         {
             "id": "exploration_mode",
@@ -340,6 +343,16 @@ def _model_policy_part(answers: SetupAnswers) -> str:
         return " --model-policy baseline"
     if "statsforecast" in families and families.isdisjoint({"mlforecast", "hierarchicalforecast", "neuralforecast_research"}):
         return " --model-policy statsforecast"
+    if "standard" in families and len(families) == 1:
+        return " --model-policy standard"
+    if "light" in families and len(families) == 1:
+        return " --model-policy light"
+    if "mlforecast" in families and len(families) == 1:
+        return " --model-policy mlforecast"
+    if "auto" in families and len(families) == 1:
+        return " --model-policy light"
+    if "standard" in families:
+        return ""
     return ""
 
 

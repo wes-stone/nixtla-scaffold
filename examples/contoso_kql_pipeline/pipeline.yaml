@@ -44,7 +44,7 @@ canonical:
 
 forecast:
   output: forecast
-  preset: finance
+  preset: standard
   horizon: 6
   freq: ME
   model_policy: baseline

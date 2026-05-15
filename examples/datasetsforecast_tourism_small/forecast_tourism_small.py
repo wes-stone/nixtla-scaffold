@@ -217,9 +217,9 @@ def _main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--allow-download", action="store_true", help="Permit DatasetsForecast to download public data")
     parser.add_argument(
         "--model-policy",
-        choices=["baseline", "statsforecast", "auto", "all"],
+        choices=["baseline", "statsforecast", "light", "auto", "all"],
         default="baseline",
-        help="Use baseline for fast validation; try statsforecast/auto for deeper local experiments.",
+        help="Use baseline for fast validation; try statsforecast/light for deeper local experiments; auto is a legacy alias for light.",
     )
     args = parser.parse_args(argv)
     try:

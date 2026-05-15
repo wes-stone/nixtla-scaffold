@@ -14,6 +14,7 @@ def build_run_diagnostics(run: Any) -> dict[str, Any]:
 
     from nixtla_scaffold.headline import build_executive_headline
     from nixtla_scaffold.outputs import (
+        build_borrowed_strength_advisor,
         build_hierarchy_backtest_comparison,
         build_feature_selection_receipts,
         build_model_pareto_frontier,
@@ -31,6 +32,12 @@ def build_run_diagnostics(run: Any) -> dict[str, Any]:
     pareto_frontier = build_model_pareto_frontier(run)
     feature_receipts = build_feature_selection_receipts(run)
     series_features = build_series_features(run)
+    borrowed_strength = build_borrowed_strength_advisor(run)
+    borrowed_guidance_distribution = (
+        borrowed_strength["anchor_guidance"].value_counts().sort_index().to_dict()
+        if not borrowed_strength.empty and "anchor_guidance" in borrowed_strength.columns
+        else {}
+    )
     executive_headline = build_executive_headline(run).to_dict()
     driver_audit_distribution = (
         run.driver_availability_audit["audit_status"].value_counts().sort_index().to_dict()
@@ -90,6 +97,8 @@ def build_run_diagnostics(run: Any) -> dict[str, Any]:
             "model_tradeoff_score_rows": int(len(model_tradeoffs)),
             "model_pareto_frontier_rows": int(len(pareto_frontier)),
             "series_feature_rows": int(len(series_features)),
+            "borrowed_strength_advisor_rows": int(len(borrowed_strength)),
+            "borrowed_strength_guidance_distribution": borrowed_guidance_distribution,
             "residual_test_rows": int(len(residual_tests)),
             "residual_test_distribution": residual_test_distribution,
             "hierarchy_backtest_comparison_rows": int(len(hierarchy_backtest)),
@@ -119,6 +128,7 @@ def build_run_diagnostics(run: Any) -> dict[str, Any]:
         "driver_model_cv_delta": _records(getattr(run, "driver_model_cv_delta", pd.DataFrame())),
         "trust_summary": _records(trust_summary),
         "series_features": _records(series_features),
+        "borrowed_strength_advisor": _records(borrowed_strength),
         "reproducibility": manifest["reproducibility"],
         "best_practice_receipts": run.best_practice_receipts(),
         "outputs": manifest["outputs"],
@@ -136,6 +146,7 @@ def build_run_diagnostics(run: Any) -> dict[str, Any]:
             "Open appendix/driver_model_features.csv and appendix/driver_model_cv_delta.csv when train_known_future_regressors=True to see which audited drivers actually entered MLForecast and how they scored.",
             "Open appendix/feature_selection_receipts.csv for descriptive MLForecast feature evidence; it does not auto-prune features or override backtest selection.",
             "Open appendix/series_features.csv for cheap forecastability signals and the next recommended experiment step per series; this artifact is advisory only.",
+            "Open appendix/borrowed_strength_advisor.csv for advisory sparse-series guidance: parent anchoring, reference-class review, panel-pool review, or independent treatment. It never changes champion selection or forecast.csv.",
             "Check profile.json for inferred frequency, season length, short histories, and repaired gaps.",
             "Check appendix/series_summary.csv and appendix/model_audit.csv before trusting a selected model.",
             "Check appendix/model_win_rates.csv to see which models beat SeasonalNaive/Naive across series.",
@@ -171,6 +182,7 @@ def build_llm_context(run: Any) -> dict[str, Any]:
     from nixtla_scaffold.headline import build_executive_headline
     from nixtla_scaffold.interpretation import seasonality_diagnostics_frame, seasonality_summary_frame
     from nixtla_scaffold.outputs import (
+        build_borrowed_strength_advisor,
         build_forecast_long,
         build_feature_selection_receipts,
         build_hierarchy_backtest_comparison,
@@ -197,6 +209,7 @@ def build_llm_context(run: Any) -> dict[str, Any]:
     model_selection = run.model_selection.copy()
     series_summary = build_series_summary(run)
     series_features = build_series_features(run)
+    borrowed_strength = build_borrowed_strength_advisor(run)
     residual_tests = build_residual_test_summary(run)
     interval_diagnostics = build_interval_diagnostics(run)
     seasonality_diagnostics = seasonality_diagnostics_frame(run)
@@ -228,6 +241,7 @@ def build_llm_context(run: Any) -> dict[str, Any]:
             "Known-future regressors are audited for leakage/future coverage by default; MLForecast trains them only when opt-in training is enabled and the feature gate passes.",
             "Feature-selection receipts are descriptive evidence only; they do not prune features or create a separate validation claim.",
             "Pareto frontier rows are a non-dominated tradeoff review lens; they do not change the official selected model or forecast.csv.",
+            "Borrowed-strength advisor rows are review guidance for sparse or low-trust series; they do not anchor, pool, or override the official forecast unless a human explicitly chooses a governed method.",
         ],
         "executive_headline": build_executive_headline(run).to_dict(),
         "run_summary": build_run_diagnostics(run)["llm_triage_summary"],
@@ -243,6 +257,7 @@ def build_llm_context(run: Any) -> dict[str, Any]:
                 model_selection=model_selection,
                 series_summary=series_summary,
                 series_features=series_features,
+                borrowed_strength=borrowed_strength,
                 residual_tests=residual_tests,
                 interval_diagnostics=interval_diagnostics,
                 seasonality_diagnostics=seasonality_diagnostics,
@@ -256,6 +271,7 @@ def build_llm_context(run: Any) -> dict[str, Any]:
             "model_selection": _records(model_selection),
             "series_summary": _records(series_summary),
             "series_features": _records(series_features),
+            "borrowed_strength_advisor": _records(borrowed_strength),
             "model_audit_top_rows": _records(build_model_audit(run).head(200)),
             "model_win_rates": _records(build_model_win_rates(run)),
             "model_tradeoff_scores_top_rows": _records(model_tradeoffs.head(200)),
@@ -543,6 +559,7 @@ def _series_llm_review(
     model_selection: pd.DataFrame,
     series_summary: pd.DataFrame,
     series_features: pd.DataFrame,
+    borrowed_strength: pd.DataFrame,
     residual_tests: pd.DataFrame,
     interval_diagnostics: pd.DataFrame,
     seasonality_diagnostics: pd.DataFrame,
@@ -555,6 +572,7 @@ def _series_llm_review(
         "model_selection": _first_record(model_selection, unique_id),
         "series_summary": _first_record(series_summary, unique_id),
         "series_features": _first_record(series_features, unique_id),
+        "borrowed_strength_advice": _first_record(borrowed_strength, unique_id),
         "forecast_rows": _records(_filter_series(selected_forecast, unique_id)),
         "selected_model_forecast_long_rows": _records(_filter_series(forecast_long, unique_id, selected_only=True)),
         "residual_tests": _records(_filter_series(residual_tests, unique_id)),

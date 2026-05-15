@@ -193,6 +193,10 @@ def test_optional_extras_include_datasetsforecast_group() -> None:
     assert "datasets" in result.details["extras"]
     assert result.details["extras"]["datasets"]["modules"] == ["datasetsforecast"]
     assert result.details["extras"]["datasets"]["required"] is False
+    assert release_gates.OPTIONAL_EXTRAS["smooth"] == ("smooth",)
+    assert "smooth" in result.details["extras"]
+    assert result.details["extras"]["smooth"]["modules"] == ["smooth"]
+    assert result.details["extras"]["smooth"]["required"] is False
 
 
 def test_optional_extras_gate_can_require_datasets_group(monkeypatch) -> None:
@@ -256,7 +260,7 @@ def test_extended_release_mode_sets_stricter_options(tmp_path, monkeypatch) -> N
 
     assert payload["summary"]["options"]["extended"] is True
     assert payload["summary"]["options"]["scenario_count"] == 20
-    assert payload["summary"]["options"]["scenario_model_policy"] == "auto"
+    assert payload["summary"]["options"]["scenario_model_policy"] == "light"
     assert payload["summary"]["required_optional_groups"] == ["ml", "hierarchy"]
 
 

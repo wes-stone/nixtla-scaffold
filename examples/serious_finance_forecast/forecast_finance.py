@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parent
 def run_example(output_dir: str | Path | None = None) -> Path:
     output = Path(output_dir) if output_dir is not None else ROOT / "runs" / "finance"
     spec = forecast_spec_preset(
-        "finance",
+        "standard",
         horizon=6,
         freq="ME",
         model_policy="baseline",

@@ -29,6 +29,7 @@ OPTIONAL_EXTRAS: dict[str, tuple[str, ...]] = {
     "hierarchy": ("hierarchicalforecast",),
     "neural": ("neuralforecast",),
     "datasets": ("datasetsforecast",),
+    "smooth": ("smooth",),
 }
 REQUIRED_PACKAGE_MEMBERS = (
     "nixtla_scaffold/cli.py",
@@ -55,6 +56,7 @@ REQUIRED_RUN_OUTPUTS = (
     "appendix/backtest_long.csv",
     "appendix/series_summary.csv",
     "appendix/series_features.csv",
+    "appendix/borrowed_strength_advisor.csv",
     "appendix/model_audit.csv",
     "appendix/model_tradeoff_scores.csv",
     "appendix/model_pareto_frontier.csv",
@@ -70,6 +72,8 @@ REQUIRED_RUN_OUTPUTS = (
     "streamlit_requirements.txt",
     "run_streamlit.ps1",
     "run_streamlit.cmd",
+    "control_pane_state.json",
+    "audit/training_progress.jsonl",
     "forecast.xlsx",
     "appendix/best_practice_receipts.csv",
     "OPEN_ME_FIRST.html",
@@ -121,7 +125,7 @@ def run_release_gates(
     out.mkdir(parents=True, exist_ok=True)
     if extended:
         scenario_count = max(scenario_count, 20)
-        scenario_model_policy = "auto"
+        scenario_model_policy = "light"
         if workbench_model_policy == "baseline":
             workbench_model_policy = "all"
         require_optional = _dedupe((*require_optional, "ml", "hierarchy"))

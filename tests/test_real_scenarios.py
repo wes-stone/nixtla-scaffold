@@ -66,7 +66,7 @@ def test_scenario_flat_noisy_cost_center():
     y = 500 + rng.normal(0, 20, 24)
     df = _monthly_series("OpEx", y.tolist())
 
-    run = run_forecast(df, ForecastSpec(horizon=3, model_policy="auto"))
+    run = run_forecast(df, ForecastSpec(horizon=3, model_policy="light"))
 
     _assert_forecast_ok(run, horizon=3, series={"OpEx"})
     # Forecast should be roughly around the mean
@@ -81,7 +81,7 @@ def test_scenario_flat_noisy_cost_center():
 def test_scenario_short_history_5_months():
     df = _monthly_series("NewProduct", [10, 15, 22, 28, 35])
 
-    run = run_forecast(df, ForecastSpec(horizon=3, model_policy="auto"))
+    run = run_forecast(df, ForecastSpec(horizon=3, model_policy="light"))
 
     _assert_forecast_ok(run, horizon=3, series={"NewProduct"})
     assert any("limited" in str(w).lower() or "short" in str(w).lower() or "baseline" in run.engine for w in run.warnings) or run.engine == "baseline"
@@ -374,7 +374,7 @@ def test_scenario_large_panel_50():
     from utilsforecast.data import generate_series
     df = generate_series(n_series=50, freq="ME", min_length=24, max_length=36, seed=7)
 
-    run = run_forecast(df, ForecastSpec(horizon=3, model_policy="auto"))
+    run = run_forecast(df, ForecastSpec(horizon=3, model_policy="light"))
 
     _assert_forecast_ok(run, horizon=3)
     assert run.forecast["unique_id"].nunique() == 50

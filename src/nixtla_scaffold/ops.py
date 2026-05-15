@@ -394,6 +394,27 @@ def build_doctor_payload(run_dir: str | Path) -> dict[str, Any]:
         fail_severity="warn",
     )
 
+    policy_resolution = manifest.get("model_policy_resolution", {}) if isinstance(manifest, dict) else {}
+    smooth_rows = [
+        row
+        for row in policy_resolution.get("families", [])
+        if isinstance(row, dict) and str(row.get("family", "")).lower() == "smooth"
+    ]
+    if smooth_rows:
+        smooth = smooth_rows[0]
+        smooth_requested = bool(smooth.get("requested"))
+        smooth_ran = bool(smooth.get("ran"))
+        smooth_reason = str(smooth.get("reason_if_not_ran") or "")
+        _append_check(
+            rows,
+            "smooth_optional_family_status",
+            "optional_models",
+            (not smooth_requested) or smooth_ran,
+            "Smooth ADAM ran." if smooth_ran else f"Smooth ADAM did not run: {smooth_reason or 'not requested'}.",
+            "Install with `uv sync --extra dev --extra smooth` if this run should include smooth candidates.",
+            fail_severity="warn",
+        )
+
     trust = _read_csv(run / "appendix" / "trust_summary.csv")
     if not trust.empty:
         low_count = _trust_counts(trust).get("low", 0)

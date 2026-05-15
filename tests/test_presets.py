@@ -6,6 +6,7 @@ import pandas as pd
 
 from nixtla_scaffold import ForecastSpec, forecast_spec_preset, preset_catalog
 from nixtla_scaffold.cli import main
+from nixtla_scaffold.schema import forecast_spec_from_dict
 
 
 def _small_monthly_frame() -> pd.DataFrame:
@@ -32,8 +33,15 @@ def test_forecast_spec_presets_are_named_and_overridable() -> None:
     assert hierarchy.hierarchy_reconciliation == "bottom_up"
     assert hierarchy.model_policy == "baseline"
     catalog = {row["name"]: row for row in preset_catalog()}
-    assert catalog["finance"]["model_policy"] == "auto"
+    assert catalog["standard"]["model_policy"] == "standard"
+    assert catalog["standard"]["aliases"] == ["finance"]
     assert catalog["quick"]["verbose"] is False
+
+
+def test_legacy_finance_and_auto_aliases_canonicalize_to_standard_light() -> None:
+    assert forecast_spec_preset("finance").model_policy == "standard"
+    assert ForecastSpec(model_policy="auto").model_policy == "light"
+    assert forecast_spec_from_dict({"model_policy": "auto"}).model_policy == "light"
 
 
 def test_forecast_cli_preset_applies_defaults_and_allows_overrides(tmp_path) -> None:
@@ -99,4 +107,6 @@ def test_guide_presets_prints_catalog(capsys) -> None:
 
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
-    assert {row["name"] for row in payload} == {"quick", "finance", "strict", "hierarchy"}
+    assert {row["name"] for row in payload} == {"quick", "standard", "strict", "hierarchy"}
+    standard = next(row for row in payload if row["name"] == "standard")
+    assert standard["aliases"] == ["finance"]

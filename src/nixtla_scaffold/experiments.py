@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from hashlib import sha256
 import json
+import math
 from pathlib import Path
 import re
 from typing import Any, Callable, Sequence
@@ -543,6 +544,8 @@ def _candidate_driver_markdown(candidates: Sequence[dict[str, Any]]) -> str:
             "suggested_availability": candidate.get("suggested_availability"),
             "score": _fmt(candidate.get("score")),
             "coverage": _fmt(candidate.get("non_null_fraction")),
+            "best_lag": candidate.get("best_lag"),
+            "timing": candidate.get("relationship_timing"),
             "why": candidate.get("why"),
         }
         for candidate in candidates[:5]
@@ -577,9 +580,12 @@ def _detect_candidate_drivers(frame: pd.DataFrame, spec: ForecastSpec, *, limit:
         name_score, matched_terms = _driver_name_score(column_name, target_tokens)
         if unique_count <= 3 and name_score < 3:
             continue
-        corr_abs = _abs_correlation(numeric, target)
+        corr_abs = _panel_abs_correlation(frame, column_name)
+        lag_evidence = _lagged_correlation_evidence(frame, column_name, same_period_correlation_abs=corr_abs)
         coverage = non_null / max(len(frame), 1)
         score = name_score + min(2.0, 2.0 * (corr_abs or 0.0)) + min(1.0, coverage)
+        if lag_evidence.get("relationship_timing") in {"driver_leads_target", "target_leads_driver"}:
+            score += 0.5
         if name_tokens & _CALENDAR_OR_METADATA_TERMS and not (name_tokens & target_tokens):
             score -= 1.0
         if score < 2.5:
@@ -591,7 +597,7 @@ def _detect_candidate_drivers(frame: pd.DataFrame, spec: ForecastSpec, *, limit:
             "mode": "model_candidate",
             "known_as_of_col": "known_as_of",
         }
-        why = _candidate_driver_why(column_name, matched_terms, target_tokens, corr_abs)
+        why = _candidate_driver_why(column_name, matched_terms, target_tokens, corr_abs, lag_evidence=lag_evidence)
         candidates.append(
             {
                 "name": column_name,
@@ -603,6 +609,13 @@ def _detect_candidate_drivers(frame: pd.DataFrame, spec: ForecastSpec, *, limit:
                 "non_null_fraction": round(float(coverage), 4),
                 "unique_values": unique_count,
                 "target_correlation_abs": round(float(corr_abs), 4) if corr_abs is not None else None,
+                "same_period_correlation_abs": round(float(corr_abs), 4) if corr_abs is not None else None,
+                "best_lag": lag_evidence.get("best_lag"),
+                "best_lag_abs_correlation": lag_evidence.get("best_lag_abs_correlation"),
+                "best_lag_paired_observations": lag_evidence.get("best_lag_paired_observations"),
+                "lag_search_window": lag_evidence.get("lag_search_window"),
+                "relationship_timing": lag_evidence.get("relationship_timing"),
+                "lag_interpretation": lag_evidence.get("lag_interpretation"),
                 "matched_name_terms": matched_terms,
                 "why": why,
                 "regressor_json": regressor_payload,
@@ -716,7 +729,143 @@ def _abs_correlation(values: pd.Series, target: pd.Series) -> float | None:
     return None if pd.isna(corr) else abs(float(corr))
 
 
-def _candidate_driver_why(column: str, matched_terms: Sequence[str], target_tokens: set[str], corr_abs: float | None) -> str:
+def _panel_abs_correlation(frame: pd.DataFrame, value_col: str, *, target_col: str = "y", min_pairs: int = 4) -> float | None:
+    if target_col not in frame.columns or value_col not in frame.columns:
+        return None
+    if "unique_id" not in frame.columns:
+        return _abs_correlation(pd.to_numeric(frame[value_col], errors="coerce"), pd.to_numeric(frame[target_col], errors="coerce"))
+    total_pairs = 0
+    weighted_abs_corr = 0.0
+    for _, group in frame.groupby("unique_id", sort=False):
+        paired = pd.DataFrame(
+            {
+                "x": pd.to_numeric(group[value_col], errors="coerce"),
+                "y": pd.to_numeric(group[target_col], errors="coerce"),
+            }
+        ).dropna()
+        if len(paired) < min_pairs or paired["x"].nunique() <= 1 or paired["y"].nunique() <= 1:
+            continue
+        corr = paired["x"].corr(paired["y"])
+        if pd.isna(corr):
+            continue
+        total_pairs += int(len(paired))
+        weighted_abs_corr += abs(float(corr)) * float(len(paired))
+    if total_pairs <= 0:
+        return None
+    return weighted_abs_corr / float(total_pairs)
+
+
+def _lagged_correlation_evidence(
+    frame: pd.DataFrame,
+    value_col: str,
+    *,
+    target_col: str = "y",
+    id_col: str = "unique_id",
+    time_col: str = "ds",
+    max_lag: int = 3,
+    min_pairs: int = 4,
+    same_period_correlation_abs: float | None = None,
+) -> dict[str, Any]:
+    search_window = f"-{max_lag}..{max_lag}"
+    empty = {
+        "best_lag": None,
+        "best_lag_abs_correlation": None,
+        "best_lag_paired_observations": 0,
+        "lag_search_window": search_window,
+        "relationship_timing": "insufficient_lag_evidence",
+        "lag_interpretation": (
+            "Lag scan needs enough within-series paired observations; positive best_lag means the driver leads the target."
+        ),
+    }
+    if frame.empty or value_col not in frame.columns or target_col not in frame.columns:
+        return empty
+
+    best_lag: int | None = None
+    best_corr: float | None = None
+    best_pairs = 0
+    for lag in range(-max_lag, max_lag + 1):
+        if lag == 0:
+            continue
+        corr, pairs = _panel_lag_abs_correlation(
+            frame,
+            value_col,
+            target_col=target_col,
+            id_col=id_col,
+            time_col=time_col,
+            lag=lag,
+            min_pairs=min_pairs,
+        )
+        if corr is None:
+            continue
+        if best_corr is None or corr > best_corr or (math.isclose(corr, best_corr) and abs(lag) < abs(best_lag or lag)):
+            best_lag = lag
+            best_corr = corr
+            best_pairs = pairs
+    if best_lag is None or best_corr is None:
+        return empty
+
+    improvement = best_corr - same_period_correlation_abs if same_period_correlation_abs is not None else None
+    if improvement is None or improvement >= 0.05:
+        timing = "driver_leads_target" if best_lag > 0 else "target_leads_driver"
+    else:
+        timing = "same_period_or_unclear"
+    if best_lag > 0:
+        interpretation = f"`{value_col}` leads `{target_col}` by {best_lag} period(s) in the strongest within-series lag screen."
+    else:
+        interpretation = f"`{target_col}` leads `{value_col}` by {abs(best_lag)} period(s) in the strongest within-series lag screen."
+    if timing == "same_period_or_unclear":
+        interpretation += " The lagged relationship does not clear the improvement margin over same-period correlation."
+    return {
+        "best_lag": int(best_lag),
+        "best_lag_abs_correlation": round(float(best_corr), 4),
+        "best_lag_paired_observations": int(best_pairs),
+        "lag_search_window": search_window,
+        "relationship_timing": timing,
+        "lag_interpretation": interpretation,
+    }
+
+
+def _panel_lag_abs_correlation(
+    frame: pd.DataFrame,
+    value_col: str,
+    *,
+    target_col: str,
+    id_col: str,
+    time_col: str,
+    lag: int,
+    min_pairs: int,
+) -> tuple[float | None, int]:
+    group_keys = frame[id_col] if id_col in frame.columns else pd.Series(["__all__"] * len(frame), index=frame.index)
+    total_pairs = 0
+    weighted_abs_corr = 0.0
+    work = frame.copy()
+    work["_driver_group_key"] = group_keys.astype(str)
+    for _, group in work.groupby("_driver_group_key", sort=False):
+        if time_col in group.columns:
+            group = group.sort_values(time_col)
+        x = pd.to_numeric(group[value_col], errors="coerce")
+        y = pd.to_numeric(group[target_col], errors="coerce").shift(-lag)
+        paired = pd.DataFrame({"x": x, "y": y}).dropna()
+        if len(paired) < min_pairs or paired["x"].nunique() <= 1 or paired["y"].nunique() <= 1:
+            continue
+        corr = paired["x"].corr(paired["y"])
+        if pd.isna(corr):
+            continue
+        total_pairs += int(len(paired))
+        weighted_abs_corr += abs(float(corr)) * float(len(paired))
+    if total_pairs <= 0:
+        return None, 0
+    return weighted_abs_corr / float(total_pairs), total_pairs
+
+
+def _candidate_driver_why(
+    column: str,
+    matched_terms: Sequence[str],
+    target_tokens: set[str],
+    corr_abs: float | None,
+    *,
+    lag_evidence: dict[str, Any] | None = None,
+) -> str:
     reasons: list[str] = []
     visible_terms = [term for term in matched_terms if not term.startswith("target:")]
     target_matches = [term.split(":", 1)[1] for term in matched_terms if term.startswith("target:")]
@@ -726,6 +875,8 @@ def _candidate_driver_why(column: str, matched_terms: Sequence[str], target_toke
         reasons.append(f"name overlaps target tokens ({', '.join(target_matches)})")
     if corr_abs is not None:
         reasons.append(f"absolute in-sample correlation to target is {corr_abs:.2f}")
+    if lag_evidence and lag_evidence.get("relationship_timing") in {"driver_leads_target", "target_leads_driver"}:
+        reasons.append(str(lag_evidence.get("lag_interpretation")))
     if not reasons:
         reasons.append(f"`{column}` is numeric and sufficiently populated")
     return "; ".join(reasons)
@@ -734,7 +885,7 @@ def _candidate_driver_why(column: str, matched_terms: Sequence[str], target_toke
 def _experiment_command_seed(regressor_payload: dict[str, Any]) -> str:
     regressor_json = json.dumps(regressor_payload, separators=(",", ":"))
     return (
-        "uv run nixtla-scaffold experiment --input <data.csv> --preset finance --horizon <horizon> "
+        "uv run nixtla-scaffold experiment --input <data.csv> --preset standard --horizon <horizon> "
         "--model-policy mlforecast --train-known-future-regressors "
         f"--regressor '{regressor_json}' --variants baseline known_future_regressors --max-variants 2 --output runs\\experiment_driver_test"
     )
