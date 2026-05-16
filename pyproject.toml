@@ -68,6 +68,7 @@ packages = ["src/nixtla_scaffold"]
 include = [
     "/LICENSE",
     "/README.md",
+    "/agent_overview_and_instructions.md",
     "/pyproject.toml",
     "/src",
     "/tests",
