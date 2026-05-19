@@ -1,6 +1,8 @@
 ---
+
 name: nixtla-forecast
 description: "End-to-end FPPy-aligned time series forecasting using the nixtla-scaffold package. Covers data ingestion from any MCP/query source, intake, profiling, model selection, rolling-origin backtesting, prediction intervals, event/driver overlays, MCP feature/regressor discovery, hierarchy, interpretation, and report generation. WHEN: forecast, time series, predict, project, trend, seasonal, ARIMA, ETS, backtest, prediction interval, scenario, nixtla, statsforecast, hierarchy forecast, intermittent demand, revenue forecast, ARR forecast, finance forecast, forecast this data, forecast from Kusto, forecast from Excel, forecast from DAX, find forecast drivers, forecast regressors."
+
 ---
 
 # nixtla-forecast — AI-Driven Time Series Forecasting Skill
@@ -54,25 +56,54 @@ sequence; use the full FPPy citation in the Sources section whenever citing it.
 10. **Operationalize**: store query/config/manifest, refresh cadence, post-actual
     accuracy tracking, and next actions.
 
-## Package Location
+## Package Execution — Always Prefer `uv`
 
-```
-<your-local-clone>\nixtla-scaffold
-```
+For normal forecasting work, treat `nixtla-scaffold` like a Python package, not a
+directory you must manually keep updated. Run the package with `uvx` / `uv tool`
+from the GitHub source of truth unless the user is explicitly developing the
+package in the current repo.
 
-From a local clone of this repository, `Set-Location` to the repo root before running commands.
-
-## Environment Setup — Always Prefer `uv`
-
-The scaffold is a normal Python project with `pyproject.toml` and `uv.lock` at the repo root.
-Before running package commands from a fresh clone or after pulling dependency changes, make sure
-the local virtual environment is synced:
+Default package command:
 
 ```powershell
-Set-Location <your-local-clone>\nixtla-scaffold
+uvx --from "nixtla-scaffold @ git+https://github.com/wes-stone/nixtla-scaffold" nixtla-scaffold --help
+```
+
+Use the same prefix for normal commands:
+
+```powershell
+uvx --from "nixtla-scaffold @ git+https://github.com/wes-stone/nixtla-scaffold" nixtla-scaffold profile --input data.csv
+uvx --from "nixtla-scaffold @ git+https://github.com/wes-stone/nixtla-scaffold" nixtla-scaffold forecast --input data.csv --preset finance --horizon 6 --output runs\forecast
+uvx --from "nixtla-scaffold @ git+https://github.com/wes-stone/nixtla-scaffold" nixtla-scaffold report --run runs\forecast
+```
+
+Optional extras can be requested from the same GitHub package spec:
+
+```powershell
+# MLForecast / LightGBM candidates
+uvx --from "nixtla-scaffold[ml] @ git+https://github.com/wes-stone/nixtla-scaffold" nixtla-scaffold forecast --input data.csv --preset finance --model-policy auto --output runs\ml_forecast
+
+# HierarchicalForecast reconciliation
+uvx --from "nixtla-scaffold[hierarchy] @ git+https://github.com/wes-stone/nixtla-scaffold" nixtla-scaffold forecast --input data.csv --preset hierarchy --hierarchy-reconciliation mint_ols --output runs\hierarchy
+```
+
+Use a local repo checkout only for package development, tests, release gates, or
+when the user specifically wants the current worktree code. In that case, stay in
+the current `nixtla-scaffold` repo/worktree and run `uv run ...`; do not jump to
+another local clone.
+
+```powershell
 uv sync --extra dev
 uv run nixtla-scaffold --help
 ```
+
+Never switch branches, reset, or discard local changes automatically.
+
+## Environment Setup — Package vs Local Dev
+
+Package-mode commands with `uvx --from ...` create isolated tool environments and
+do not require `uv sync` in a local clone. Local development commands from a repo
+checkout should sync the local virtual environment before `uv run`.
 
 Use extras only when the task needs them:
 
@@ -104,11 +135,11 @@ uv run --with-requirements streamlit_requirements.txt streamlit run .\streamlit_
 ## Quick Reference — The 17 Commands You Need
 
 | Command | What it does | When to use |
-|---------|-------------|-------------|
+| --- | --- | --- |
 | `setup` | Creates a workspace with intake questions, config, and agent brief | First touch — user says "forecast this" |
 | `profile` | Analyzes data quality: frequency, gaps, zeros, negatives, readiness | Before forecasting — check the data |
 | `forecast` | Runs the full pipeline: profile → repair → model → backtest → select → output | The main event |
-| `compare-models` | Writes a clean advisory leaderboard over the existing model tournament without changing champion selection | When an agent or analyst wants a compact compare_models-style table |
+| `compare-models` | Writes a clean advisory leaderboard over the existing model tournament without changing champion selection | When an agent or analyst wants a compact compare\\_models-style table |
 | `experiment` | Runs bounded named variants and writes an advisory recommendation with an autoresearch next-iteration block | When improving a forecast one hypothesis at a time |
 | `refresh` | Reuses a previous run manifest with new actuals, reruns model selection under the same policy, and writes compact refresh deltas | Monthly/weekly operational forecast updates |
 | `explain` | Generates model card from an existing run | After forecast — understand the results |
@@ -126,7 +157,7 @@ uv run --with-requirements streamlit_requirements.txt streamlit run .\streamlit_
 Preset shortcut:
 
 | Preset | Use when |
-|--------|----------|
+| --- | --- |
 | `quick` | Fast first read / smoke run with baseline ladder |
 | `standard` | Standard serious finance forecast with full audit/trust artifacts |
 | `strict` | High-stakes run requiring backtests and full-horizon CV champion selection |
@@ -159,11 +190,11 @@ Tell the user upfront:
 > **What a statistical forecast IS**: A projection of historical patterns (trend,
 > seasonality, noise) into the future. It assumes the future resembles the past
 > unless you explicitly tell it otherwise.
->
+> 
 > **What it is NOT**: It cannot predict unknown events, market shifts, competitive
 > moves, or anything that hasn't happened before in the data. It's a starting
 > point for judgment, not a replacement for it.
->
+> 
 > **Key limitations to be aware of**:
 > - Forecasts degrade with horizon — month 1 is much more reliable than month 12
 > - Short history (<2 years for monthly) limits what models can learn
@@ -177,6 +208,7 @@ Tell the user upfront:
 Use `ask_user` to collect structured answers. Group into one form when possible.
 
 **1. Data source & shape**
+
 - Where is the data? (CSV, Excel, Kusto, DAX, SQL, API, DataFrame)
 - What are the column names for date, value, and series ID?
 - What's the grain? (daily, weekly, monthly, quarterly)
@@ -186,6 +218,7 @@ Use `ask_user` to collect structured answers. Group into one form when possible.
 - Are there plan, budget, prior-year, or actuals-vs-plan tables available for benchmark storytelling?
 
 **2. What we're forecasting**
+
 - What metric is this? (revenue, costs, volume, headcount, usage...)
 - Is this a rate, cumulative, or point-in-time metric?
 - Are there known structural breaks? (acquisitions, product launches, pricing changes, COVID)
@@ -194,6 +227,7 @@ Use `ask_user` to collect structured answers. Group into one form when possible.
 - Is the metric bounded or constrained? (non-negative, capacity cap, saturation, contractual floor)
 
 **3. Forecast requirements**
+
 - How far ahead? State the **business need**, not just a number
 - ⚠️ **Caveat**: Longer horizons = wider uncertainty. A 12-month forecast of a volatile
   series is a guess with structure, not a prediction. Be honest about this.
@@ -203,6 +237,7 @@ Use `ask_user` to collect structured answers. Group into one form when possible.
 - Point forecast or range forecast for planning?
 
 **4. Known future events & drivers**
+
 - Are there ANY known future events that will affect this metric?
   (Product launches, pricing changes, market expansions, headcount changes, contracts)
 - ⚠️ **Caveat**: Without events, the forecast is purely statistical — it assumes
@@ -219,6 +254,7 @@ Use `ask_user` to collect structured answers. Group into one form when possible.
   leakage risk, data latency, and whether the relationship is causal/business-plausible.
 
 **5. Quality & edge cases**
+
 - Is the data complete? Any known gaps, system migrations, outages?
 - Are there periods that should be excluded? (COVID quarters, data errors, one-time settlements)
 - Are there zeros? (Intermittent demand patterns need special handling)
@@ -227,6 +263,7 @@ Use `ask_user` to collect structured answers. Group into one form when possible.
   the model may overweight the old pattern)
 
 **6. How will this be used?**
+
 - Who is the audience? (CFO, board, planning team, operational)
 - What decisions depend on this? (Budget setting, hiring, capacity planning)
 - How often will this be refreshed? (One-time, monthly, weekly)
@@ -238,7 +275,7 @@ Use `ask_user` to collect structured answers. Group into one form when possible.
 
 After collecting answers, present a brief summary:
 
-```
+```javascript
 📋 Forecast Setup Summary
 ━━━━━━━━━━━━━━━━━━━━━━━━
 Metric:     Usage Overage ARR (daily, annualized)
@@ -275,17 +312,20 @@ Only proceed after the user confirms or adjusts.
 The scaffold expects: `unique_id`, `ds`, `y` columns.
 
 **From CSV/Excel (direct):**
+
 ```powershell
 uv run nixtla-scaffold profile --input data.csv
 uv run nixtla-scaffold forecast --input data.csv --preset standard --horizon 6 --output runs\my_forecast
 ```
 
 **From CSV/Excel with custom column names:**
+
 ```powershell
 uv run nixtla-scaffold forecast --input plan.xlsx --sheet Data --id-col Product --time-col Month --target-col Revenue --preset standard --horizon 6 --output runs\plan
 ```
 
 **Runnable onboarding examples:**
+
 ```powershell
 uv run --with jupyter jupyter lab examples\feature_tour\forecast_feature_tour.ipynb
 uv run python examples\air_tourism_demo\forecast_air_tourism_demo.py --output runs\air_tourism_demo
@@ -299,6 +339,7 @@ uv run --extra datasets python examples\datasetsforecast_tourism_small\forecast_
 Use `examples\feature_tour\forecast_feature_tour.ipynb` when a user wants a guided demo or a map of all major features; it stays no-bloat by using synthetic data, baseline models, and generated run artifacts. Use `examples\air_tourism_demo` when demoing the serious Control Pane from a fast AirPassengers baseline to a fuller driver-audit run and optional TourismSmall hierarchy. Use `examples\quickstart_csv` for the five-minute first forecast, `examples\serious_finance_forecast` for target normalization plus event overlays, `examples\custom_finance_model` when a finance-owned MoM/FY-seasonality model should enter the tournament as an audited custom challenger, `examples\hierarchy_reconciliation` when parent/child totals need to tie, and `examples\datasetsforecast_tourism_small` only for opt-in public real-data validation with DatasetsForecast.
 
 **With finance target transforms / normalization:**
+
 ```powershell
 # Model on log1p(y), then inverse-transform forecast/backtest outputs for reporting.
 uv run nixtla-scaffold forecast --input data.csv --horizon 6 --target-transform log1p --output runs\log1p_demo
@@ -309,6 +350,7 @@ uv run nixtla-scaffold forecast --input data.csv --horizon 6 --normalization-fac
 ```
 
 **From Kusto/DAX/SQL query results:**
+
 ```powershell
 # First, run your query via the appropriate MCP and save results to a file
 # Then ingest it:
@@ -343,6 +385,7 @@ deterministic ContosoSales-shaped data. Set `KUSTO_MODE=live` after installing
 `KUSTO_CLUSTER_URL` / `KUSTO_DATABASE` for another ADX source.
 
 **From a pandas DataFrame (in Python):**
+
 ```python
 from nixtla_scaffold import forecast_spec_preset, run_forecast
 
@@ -366,48 +409,55 @@ forecast regressors.
 Before or immediately after the baseline forecast, ask:
 
 1. **What else could explain this metric?**
-   - Revenue/ARR: seats, active users, usage, pipeline, renewals, pricing, discounts,
+
+- Revenue/ARR: seats, active users, usage, pipeline, renewals, pricing, discounts,
      overage, product launches, sales capacity, macro/industry seasonality.
-   - Costs: usage volume, headcount, infrastructure units, committed spend, vendor
+- Costs: usage volume, headcount, infrastructure units, committed spend, vendor
      contracts, seasonality, one-time migrations.
-   - Demand/volume: customers, traffic, marketing, holidays, outages, launches,
+- Demand/volume: customers, traffic, marketing, holidays, outages, launches,
      sales motions, capacity constraints.
+
 2. **Where can we get it through MCPs?**
-   - Excel MCP: plans, manually maintained event calendars, pricing tables.
-   - DAX/Power BI MCP: finance measures, bookings, ARR, budget, active customers.
-   - Kusto/data-query MCP: telemetry, usage, pipeline events, operational signals.
-   - SQL/API MCPs: CRM, contracts, product catalog, headcount, marketing spend.
+
+- Excel MCP: plans, manually maintained event calendars, pricing tables.
+- DAX/Power BI MCP: finance measures, bookings, ARR, budget, active customers.
+- Kusto/data-query MCP: telemetry, usage, pipeline events, operational signals.
+- SQL/API MCPs: CRM, contracts, product catalog, headcount, marketing spend.
+
 3. **Can it be used for forecasting?**
-   - It must have known future values, a planned scenario, or a defensible forecast
+
+- It must have known future values, a planned scenario, or a defensible forecast
      of its own.
-   - It must not leak the target from the future.
-   - It should make business sense, not only correlate historically.
-   - It should be tested in rolling-origin CV against the univariate baseline.
+- It must not leak the target from the future.
+- It should make business sense, not only correlate historically.
+- It should be tested in rolling-origin CV against the univariate baseline.
+
 4. **How to use it today?**
-   - Add known future events with `--event` or reusable JSON/YAML/CSV files via `--event-file`.
-   - Create scenario overlays for launch/pricing/contract assumptions.
-   - Declare candidate known-future or historical-only regressors with `--regressor` or `--regressor-file` so the package writes leakage, future-availability, lag-safety, and feature-selection receipt artifacts.
-   - Store candidate feature extracts next to the run for analyst review.
-   - Use MCPs to make experiments less manual: pull focused driver slices from
+
+- Add known future events with `--event` or reusable JSON/YAML/CSV files via `--event-file`.
+- Create scenario overlays for launch/pricing/contract assumptions.
+- Declare candidate known-future or historical-only regressors with `--regressor` or `--regressor-file` so the package writes leakage, future-availability, lag-safety, and feature-selection receipt artifacts.
+- Store candidate feature extracts next to the run for analyst review.
+- Use MCPs to make experiments less manual: pull focused driver slices from
      Kusto, DAX/Power BI, Excel, SQL, or APIs, then run bounded one-hypothesis
      experiments instead of broad sweeps.
-   - After `uv run nixtla-scaffold experiment ...`, inspect `candidate_drivers`,
+- After `uv run nixtla-scaffold experiment ...`, inspect `candidate_drivers`,
      `human_context_questions`, and `autoresearch_hypotheses` in
      `experiment_llm_context.json`. The package scans preserved extra numeric
      columns such as `rolling_minutes`, `usage`, `seats`, `pipeline`, and `plan`
      signals, but these are advisory only until explicitly declared and audited.
-   - Use `model_explainability.csv` when MLForecast runs to inspect lag/date,
+- Use `model_explainability.csv` when MLForecast runs to inspect lag/date,
      rolling-transform, and opt-in regressor importance; do not over-interpret
      feature importance as causality.
-   - For deeper Nixtla-style MLForecast explainability, reproduce the fitted
+- For deeper Nixtla-style MLForecast explainability, reproduce the fitted
      flow offline and inspect `models_`, use `preprocess` to rebuild training
      features, optionally add SHAP only when that dependency is justified, and
      use `SaveFeatures` for per-prediction feature rows. Do not persist trained
      model objects or SHAP outputs in default scaffold runs.
-   - In generated Streamlit, open **Assumptions & Drivers** to review regressor
+- In generated Streamlit, open **Assumptions & Drivers** to review regressor
      visual evidence. PNG/JPG charts named with `regressor`, `driver`, `feature`,
      `covariate`, `exogenous`, `xreg`, `stl`, or `rolling` are discovered from the
-     run root, `appendix\`, `audit\`, or `experiments\`.
+     run root, `appendix\`,` audit\`, or `experiments\`.
 
 If the user has no driver data, say that clearly: "This run is a statistical
 baseline. The next frontier step is to search MCP-accessible sources for validated
@@ -421,7 +471,7 @@ the baseline forecast needs improvement.
 #### A. Separate feature types
 
 | Feature class | Examples | Current status |
-|---------------|----------|----------------|
+| --- | --- | --- |
 | Safe target-history features | `lag1`-`lag13`, seasonal lag such as `lag12`, second seasonal lag such as `lag24` | Built into MLForecast |
 | Calendar features | month, day of week for daily data | Built into MLForecast |
 | Lag transforms | rolling mean/std, expanding mean, exponentially weighted mean | Roadmap / experiment design |
@@ -485,7 +535,7 @@ Say this plainly:
 Every forecast run produces these artifacts:
 
 | File | Purpose |
-|------|---------|
+| --- | --- |
 | `OPEN_ME_FIRST.html` | Curated landing page with the executive headline, clean file map, and links to the compact workbook/report; open this first when the run folder feels noisy |
 | `output/forecast_review.xlsx` | Compact review workbook with Start Here, Forecast, Decision Summary, Model Leaderboard, Watchouts, and File Guide sheets; smaller than the full audit workbook |
 | `output/forecast_for_review.csv` | Selected forecast rows only, stripped down for finance review while retaining horizon and interval guardrails |
@@ -522,32 +572,32 @@ Every forecast run produces these artifacts:
 | `driver_model_cv_delta.csv` | CV evidence for MLForecast runs that actually used approved driver features |
 | `driver_experiment_summary.csv` | One summary table for event overlays and known-future regressor audit outcomes |
 | `custom_model_contracts.csv` | Optional custom-challenger contract audit with source, invocation type, leakage guard, output contract, status, and error if excluded |
-| `audit\all_models.csv` | Every model's future predictions for transparency |
-| `audit\model_selection.csv` | Which model was chosen per series, why, selected CV horizon, requested horizon, window count, and whether the CV horizon matched the forecast horizon |
-| `audit\backtest_metrics.csv` | Cross-validation accuracy metrics; RMSE is the primary selection metric, MASE/RMSSE are scale-free comparisons, and CV horizon metadata is included |
-| `audit\backtest_predictions.csv` | Wide CV predictions for visual inspection |
-| `audit\model_weights.csv` | Weighted ensemble breakdown |
-| `audit\custom_model_invocations.csv` | Optional per-cutoff invocation audit for custom callable/script challengers, including history rows, future-grid rows, status, and script command metadata |
-| `audit\target_transform_audit.csv` | Raw y, normalization factor, adjusted y, transformed/modeling values, output scale, and notes when log/log1p or factor normalization is enabled |
-| `audit\seasonality_diagnostics.csv` | Cycle counts, complete cycles, seasonal/trend/remainder strength, credibility label, and warnings about insufficient seasonal evidence |
-| `audit\seasonality_decomposition.csv` | Additive observed/trend/seasonal/remainder evidence when at least two complete seasonal cycles exist |
-| `appendix\hierarchy_rollup.csv` | Parent-level hierarchy add-on output with historical actuals and selected forecasts beside immediate-child sums, child coverage, and selected-forecast gaps |
-| `appendix\hierarchy_reconciliation.csv` | Reconciliation method summary and pre/post gap metrics when hierarchy reconciliation is enabled; coherence is prioritized and node-level accuracy may decrease |
-| `appendix\hierarchy_contribution.csv` | Parent/child contribution and gap attribution for hierarchy storytelling; gap contributions are allocation heuristics, not reconciliation algorithm outputs |
-| `audit\hierarchy_backtest_comparison.csv` | Selected-model rolling-origin errors before and after reconciliation for node-level accuracy/coherence tradeoff review |
-| `audit\hierarchy_unreconciled_forecast.csv` | Independent model-tournament forecast preserved before reconciliation |
-| `audit\hierarchy_coherence_pre.csv` | Parent/child coherence gaps before reconciliation |
-| `audit\hierarchy_coherence_post.csv` | Parent/child coherence gaps after reconciliation |
+| `audit\\all_models.csv` | Every model's future predictions for transparency |
+| `audit\\model_selection.csv` | Which model was chosen per series, why, selected CV horizon, requested horizon, window count, and whether the CV horizon matched the forecast horizon |
+| `audit\\backtest_metrics.csv` | Cross-validation accuracy metrics; RMSE is the primary selection metric, MASE/RMSSE are scale-free comparisons, and CV horizon metadata is included |
+| `audit\\backtest_predictions.csv` | Wide CV predictions for visual inspection |
+| `audit\\model_weights.csv` | Weighted ensemble breakdown |
+| `audit\\custom_model_invocations.csv` | Optional per-cutoff invocation audit for custom callable/script challengers, including history rows, future-grid rows, status, and script command metadata |
+| `audit\\target_transform_audit.csv` | Raw y, normalization factor, adjusted y, transformed/modeling values, output scale, and notes when log/log1p or factor normalization is enabled |
+| `audit\\seasonality_diagnostics.csv` | Cycle counts, complete cycles, seasonal/trend/remainder strength, credibility label, and warnings about insufficient seasonal evidence |
+| `audit\\seasonality_decomposition.csv` | Additive observed/trend/seasonal/remainder evidence when at least two complete seasonal cycles exist |
+| `appendix\\hierarchy_rollup.csv` | Parent-level hierarchy add-on output with historical actuals and selected forecasts beside immediate-child sums, child coverage, and selected-forecast gaps |
+| `appendix\\hierarchy_reconciliation.csv` | Reconciliation method summary and pre/post gap metrics when hierarchy reconciliation is enabled; coherence is prioritized and node-level accuracy may decrease |
+| `appendix\\hierarchy_contribution.csv` | Parent/child contribution and gap attribution for hierarchy storytelling; gap contributions are allocation heuristics, not reconciliation algorithm outputs |
+| `audit\\hierarchy_backtest_comparison.csv` | Selected-model rolling-origin errors before and after reconciliation for node-level accuracy/coherence tradeoff review |
+| `audit\\hierarchy_unreconciled_forecast.csv` | Independent model-tournament forecast preserved before reconciliation |
+| `audit\\hierarchy_coherence_pre.csv` | Parent/child coherence gaps before reconciliation |
+| `audit\\hierarchy_coherence_post.csv` | Parent/child coherence gaps after reconciliation |
 | `interpretation.json` / `.md` | Backtest windows, seasonality, naive comparison |
 | `diagnostics.md` | Readable diagnostics markdown with the same executive headline and next steps |
-| `appendix\run_receipt.json` / `.md` | Local reproducibility receipt with run provenance, input hash, package/git/Python context, declared artifacts, and next actions |
-| `appendix\validation_receipt.csv` / `.json` | Local pass/warn/fail contract receipt over canonical history, forecast output, artifact presence, hierarchy evidence, and driver audit evidence |
+| `appendix\\run_receipt.json` / `.md` | Local reproducibility receipt with run provenance, input hash, package/git/Python context, declared artifacts, and next actions |
+| `appendix\\validation_receipt.csv` / `.json` | Local pass/warn/fail contract receipt over canonical history, forecast output, artifact presence, hierarchy evidence, and driver audit evidence |
 | `report.html` | Visual report with decision summary, charts, fixed-axis rolling-origin backtest filmstrip, and a static forecast-ledger preview when `ledger_context.json` exists |
 | `report_base64.txt` | Same report, base64 for embedding |
-| `streamlit_app.py` / `run_streamlit.ps1` | Interactive dashboard with cached local artifact loading, polished sidebar **Workbench section** button tabs that keep every section visible while rendering only the active heavy section on rerun. Forecast review owns the styled executive headline card, copy-safe code block, copy/paste wide summary controls for Actuals/Forecast/Actuals + forecast with Raw/Thousands/Millions/Currency displays, active-champion default forecast model selection, optional interval lo/hi columns for the selected model, decision/action cards for watchouts and current model next actions, and a forecast operating loop for connecting refreshes end to end, adding drivers/regressors, and tracking forecast performance over time. When `ledger_context.json` exists, a lazy Forecast ledger section opens with one clean line chart: latest actuals/history, official locks emphasized, and recent non-lock forecast versions as lighter lines before collapsing the raw ledger audit tables for deeper review. It also includes champion lens controls for best overall vs best StatsForecast/classical vs best MLForecast, active champion horizon/interval banners, winner-metric guidance, first-glance forecast charts, dedicated Model investigation with Pareto tradeoffs, fixed-axis CV window player, Prediction intervals, Model audit, Seasonality, Hierarchy, Assumptions & Drivers with regressor visual evidence plus ML feature importance, Feeder outputs, and pre/post reconciliation review when enabled. Set `NIXTLA_SCAFFOLD_STREAMLIT_PERF=1` before launching to show artifact-load diagnostics in the sidebar. Use `.\run_streamlit.ps1` from the run folder, or `uv run --with-requirements streamlit_requirements.txt streamlit run .\streamlit_app.py` if script execution is restricted. |
+| `streamlit_app.py` / `run_streamlit.ps1` | Interactive dashboard with cached local artifact loading, polished sidebar **Workbench section** button tabs that keep every section visible while rendering only the active heavy section on rerun. Forecast review owns the styled executive headline card, copy-safe code block, copy/paste wide summary controls for Actuals/Forecast/Actuals + forecast with Raw/Thousands/Millions/Currency displays, active-champion default forecast model selection, optional interval lo/hi columns for the selected model, decision/action cards for watchouts and current model next actions, and a forecast operating loop for connecting refreshes end to end, adding drivers/regressors, and tracking forecast performance over time. When `ledger_context.json` exists, a lazy Forecast ledger section opens with one clean line chart: latest actuals/history, official locks emphasized, and recent non-lock forecast versions as lighter lines before collapsing the raw ledger audit tables for deeper review. It also includes champion lens controls for best overall vs best StatsForecast/classical vs best MLForecast, active champion horizon/interval banners, winner-metric guidance, first-glance forecast charts, dedicated Model investigation with Pareto tradeoffs, fixed-axis CV window player, Prediction intervals, Model audit, Seasonality, Hierarchy, Assumptions & Drivers with regressor visual evidence plus ML feature importance, Feeder outputs, and pre/post reconciliation review when enabled. Set `NIXTLA_SCAFFOLD_STREAMLIT_PERF=1` before launching to show artifact-load diagnostics in the sidebar. Use `.\\run_streamlit.ps1` from the run folder, or `uv run --with-requirements streamlit_requirements.txt streamlit run .\\streamlit_app.py` if script execution is restricted. |
 | `ledger_context.json` | Optional pointer written when a run is registered in a forecast ledger; lets `report.html` and the Streamlit workbench discover ledger exports. |
-| `runs\forecast_ledger\exports\*.csv` | Power BI-ready forecast ledger mirrors: versions, snapshots, official locks, actual revisions, forecast-vs-actuals, performance, selected-lock deltas, adjustments, corrected actuals, and regime changes. |
-| `byo_model\byo_model_automation.md` | Optional BYO model automation guide with refresh loop, cutoff snapshots, known-as-of lineage, metric-definition guardrails, and customer/SKU/PxQ ownership guidance. |
+| `runs\\forecast_ledger\\exports*.csv` | Power BI-ready forecast ledger mirrors: versions, snapshots, official locks, actual revisions, forecast-vs-actuals, performance, selected-lock deltas, adjustments, corrected actuals, and regime changes. |
+| `byo_model\\byo_model_automation.md` | Optional BYO model automation guide with refresh loop, cutoff snapshots, known-as-of lineage, metric-definition guardrails, and customer/SKU/PxQ ownership guidance. |
 | `forecast.xlsx` | Excel workbook with all sheets |
 | `best_practice_receipts.csv` | FPPy compliance audit trail |
 
@@ -635,7 +685,8 @@ Explain this clearly: these are local receipts, health checks, drift rollups, an
 #### B. Limitations Disclosure (present to user)
 
 Always tell the user:
-```
+
+```javascript
 ⚠️  What this forecast assumes:
 • The future resembles the past (no structural changes)
 • No events or drivers were added — this is a purely statistical baseline
@@ -652,7 +703,7 @@ Always tell the user:
 
 #### C. Action Plan (present as next steps)
 
-```
+```javascript
 📋 Recommended Next Steps
 ━━━━━━━━━━━━━━━━━━━━━━━━
 1. VALIDATE: Compare forecast against plan/budget/prior year
@@ -687,13 +738,13 @@ Always tell the user:
 ## EDGE CASES — What the Scaffold Handles
 
 | Edge Case | How It's Handled |
-|-----------|-----------------|
+| --- | --- |
 | **Short history (<6 obs)** | Falls back to baseline models (Naive, Drift, Average) |
 | **Only 2 data points** | Baseline-only forecast with warnings |
 | **Missing timestamps** | Detected in profile, repaired with configurable fill (ffill/interpolate/zero/drop) |
 | **Intermittent demand (sparse zeros)** | ZeroForecast candidate added; scale-normalized error scoring |
 | **Negative values (costs)** | Handled natively by all models |
-| **Pricing/FX/inflation normalization** | `TransformSpec` / `--normalization-factor-col` divides y by a positive factor and writes `audit\target_transform_audit.csv` |
+| **Pricing/FX/inflation normalization** | `TransformSpec` / `--normalization-factor-col` divides y by a positive factor and writes `audit\\target_transform_audit.csv` |
 | **Log/log1p target transforms** | `--target-transform log/log1p` models transformed y and inverse-transforms outputs/backtests for reporting |
 | **Outliers** | Models are robust; flagged in diagnostics |
 | **Level shifts** | James-Stein shrinkage toward last actual reduces distribution shift |
@@ -709,6 +760,7 @@ Always tell the user:
 These are the mistakes that make forecasts dangerous. Check for each one.
 
 ### 1. "Garbage In, Garbage Out" — Data Quality
+
 - **Mixed grains**: Daily revenue mixed with monthly aggregates → wrong frequency detection
 - **Duplicates**: Same date appears twice → inflated values
 - **Adjusted vs raw**: Is the data inflation-adjusted? FX-adjusted? If not, the trend includes price changes, not volume growth
@@ -716,32 +768,38 @@ These are the mistakes that make forecasts dangerous. Check for each one.
 - **Survivorship bias**: Only including currently-active products hides churn patterns
 
 ### 2. "All Else Equal" Trap
+
 - Statistical forecasts assume nothing changes. If you KNOW something will change (launch, pricing, churn event), you MUST add it as a DriverEvent or the forecast will be wrong.
 - Ask explicitly: "Is there anything happening in the next [horizon] that the history doesn't know about?"
 
 ### 3. Horizon Overreach
+
 - Rule of thumb: reliable horizon ≈ 1/3 of history length for monthly data
 - 12 months of history → 4-month forecast is solid, 12-month forecast is a story
 - Daily data degrades faster — 90 days of history → 14-day forecast is strong, 60 days is speculative
 - **Always tell the user** how much to trust near vs far horizons
 
 ### 4. Seasonality Mismatch
+
 - Need ≥2 full seasonal cycles to detect seasonality reliably
 - Monthly data needs ≥24 months for annual seasonality
 - If you have 10 months, the model CANNOT confirm annual patterns — say so
 - Quarterly fiscal patterns need ≥8 quarters (2 years)
 
 ### 5. Trend Extrapolation Danger
+
 - Exponential growth models will happily project infinite growth
 - A series growing 10% monthly will forecast 3x in 12 months — is that realistic?
 - **Always ask**: "Does this growth rate / decline rate look sustainable for [horizon]?"
 
 ### 6. Intermittent Demand Illusion
+
 - Sparse series (lots of zeros) produce misleading WAPE/MAE numbers
 - A "good" model might just predict zero every period
 - For intermittent demand, focus on whether the model captures the right *rate* of non-zero events
 
 ### 7. Multiple Series Without Hierarchy
+
 - Forecasting Region A, Region B, and Total independently → they probably won't sum
 - If coherence matters, use hierarchy forecasting with reconciliation
 - Tell users: "Parent and child forecasts may not sum until reconciliation is added"
@@ -768,22 +826,23 @@ AutoETS, AutoARIMA, Holt, HoltWinters (when ≥2 full seasons)
 AutoTheta, Theta, OptimizedTheta, DynamicOptimizedTheta
 
 **Tier 6 — Decomposition** (≥2 full seasons):
-MSTL, MSTL_AutoARIMA (StatsForecast MSTL with non-seasonal AutoARIMA trend forecaster), AutoARIMA_MSTLFeatures (Nixtla `mstl_decomposition` trend/seasonal features passed into AutoARIMA as exogenous regressors). AutoARIMA_MSTLFeatures mirrors the high-ROI finance pattern from trend-feature examples and the StatsForecast feature-generation guide.
+MSTL, MSTL\_AutoARIMA (StatsForecast MSTL with non-seasonal AutoARIMA trend forecaster), AutoARIMA\_MSTLFeatures (Nixtla `mstl_decomposition` trend/seasonal features passed into AutoARIMA as exogenous regressors). AutoARIMA\_MSTLFeatures mirrors the high-ROI finance pattern from trend-feature examples and the StatsForecast feature-generation guide.
 
 **Tier 7 — Boosted decomposition** (enough history for internal validation):
 MFLES, AutoMFLES. AutoMFLES must be parameterized with a valid `test_size`; do not call it bare.
 
 **Tier 8 — StatsForecast sklearn feature regressions** (seasonal series with enough rows and sklearn installed):
-StatsSklearn_LinearRegression, StatsSklearn_Ridge, StatsSklearn_Lasso. These use StatsForecast `SklearnModel` to train one sklearn estimator per series with trend plus Fourier features from `utilsforecast.feature_engineering`. They are distinct from MLForecast sklearn models: use aliases like `stats sklearn ridge` for these per-series StatsForecast regressions, while plain `ridge` remains the MLForecast lag/date Ridge candidate.
+StatsSklearn\_LinearRegression, StatsSklearn\_Ridge, StatsSklearn\_Lasso. These use StatsForecast `SklearnModel` to train one sklearn estimator per series with trend plus Fourier features from `utilsforecast.feature_engineering`. They are distinct from MLForecast sklearn models: use aliases like `stats sklearn ridge` for these per-series StatsForecast regressions, while plain `ridge` remains the MLForecast lag/date Ridge candidate.
 
 **Tier 9 — Machine learning** (`standard`/`light`/`all` when ML rolling-origin validation is feasible; deeper 30-row gate for ML-only allowlists and opt-in regressors):
-MLForecast with lag/date features across sklearn and LightGBM families when installed: LinearRegression, Ridge, Ridge_Regularized, BayesianRidge, ElasticNet, Huber, RandomForest, ExtraTrees, GradientBoosting, HistGradientBoosting, KNeighbors, LightGBM, LightGBM_Conservative, LightGBM_Shallow, LightGBM_Robust.
+MLForecast with lag/date features across sklearn and LightGBM families when installed: LinearRegression, Ridge, Ridge\_Regularized, BayesianRidge, ElasticNet, Huber, RandomForest, ExtraTrees, GradientBoosting, HistGradientBoosting, KNeighbors, LightGBM, LightGBM\_Conservative, LightGBM\_Shallow, LightGBM\_Robust.
 MLForecast uses Nixtla `PredictionIntervals` for conformal future bands when the history, horizon, and lag plan can support at least two calibration windows. If long seasonal lags would make calibration impossible, the scaffold can drop only the interval-incompatible lags and discloses that in warnings.
 
 **Tier 10 — Optional smooth ADAM** (`standard`/`all` when `uv sync --extra smooth` has installed the LGPL-2.1 `smooth` package, or explicit smooth allowlists):
-SmoothADAM_ZXZ, SmoothADAM_CCC, SmoothADAM_CustomPool. These are point-forecast ADAM candidates that enter the serious standard tournament when installed; `light` stays slim unless smooth is explicitly allowlisted. If the extra is absent, standard/all runs continue and `model_policy_resolution` reports `not_installed_or_not_enabled`. When explicitly allowlisted, smooth import/runtime failures raise instead of silently downgrading.
+SmoothADAM\_ZXZ, SmoothADAM\_CCC, SmoothADAM\_CustomPool. These are point-forecast ADAM candidates that enter the serious standard tournament when installed; `light` stays slim unless smooth is explicitly allowlisted. If the extra is absent, standard/all runs continue and `model_policy_resolution` reports `not_installed_or_not_enabled`. When explicitly allowlisted, smooth import/runtime failures raise instead of silently downgrading.
 
 ### Selection Pipeline
+
 1. **Adaptive backtest**: Per-series rolling-origin CV with window count, horizon, and step size adapted to history depth and seasonality — NOT one-size-fits-all
 2. **Fair StatsForecast/MLForecast tournament**: when both engines run, they share the same rolling-origin `h`, `n_windows`, `step_size`, and cutoff dates where feasible. MLForecast lags are capped/disclosed rather than giving MLForecast fewer/easier windows.
 3. **Selection**: Lowest backtested RMSE, tie-broken by MAE and absolute bias; WAPE is reported as diagnostic context, not a selector
@@ -799,7 +858,7 @@ SmoothADAM_ZXZ, SmoothADAM_CCC, SmoothADAM_CustomPool. These are point-forecast 
 The backtest adapts per series instead of using fixed windows:
 
 | History | Horizon | Windows | Step | Rationale |
-|---------|---------|---------|------|-----------|
+| --- | --- | --- | --- | --- |
 | 3 obs | 1 | 1 | 1 | Minimal: just enough to validate |
 | 8 obs monthly | 3 | 2 | 2 | Short series: small h, 2 windows |
 | 24 obs monthly | 6 | 2 | 6 | Standard: full horizon test |
@@ -810,7 +869,7 @@ The backtest adapts per series instead of using fixed windows:
 ### Model Policy Options
 
 | Policy | CLI flag | What runs |
-|--------|----------|-----------|
+| --- | --- | --- |
 | `standard` | `--model-policy standard` | StatsForecast + MLForecast when feasible + optional smooth ADAM when the `smooth` extra is installed |
 | `light` | `--model-policy light` | StatsForecast + MLForecast when feasible; no smooth by default |
 | `all` | `--model-policy all` | Every eligible open-source family; eligible MLForecast failures raise, infeasible history/horizon skips are disclosed, smooth remains optional unless allowlisted |
@@ -853,6 +912,7 @@ uv run nixtla-scaffold forecast --input data.csv --horizon 6 --event-file scenar
 ```
 
 Event fields:
+
 - `name`: descriptive label
 - `start`/`end`: date window
 - `effect`: "multiplicative" or "additive"
@@ -910,7 +970,7 @@ uv run nixtla-scaffold forecast --input runs\nodes.csv --horizon 3 --freq ME --h
 Default hierarchy forecasts are independent per node so the model tournament can judge each series on its own merits. When planning requires coherent rollups, use:
 
 | Method | CLI value | When to use |
-|--------|-----------|-------------|
+| --- | --- | --- |
 | Diagnostics only | `none` | You only need to see parent/child gaps or want independent statistical forecasts |
 | Bottom-up | `bottom_up` | Parent forecasts should equal the sum of bottom-level forecasts; simple and transparent |
 | MinTrace OLS | `mint_ols` | You want HierarchicalForecast reconciliation without insample covariance requirements |
@@ -929,6 +989,7 @@ uv run nixtla-scaffold setup --workspace runs\my_workspace --data-source kusto -
 ```
 
 This creates:
+
 - `forecast_setup.yaml`: reusable config
 - `agent_brief.md`: checklist with exact next commands
 - `questions.json`: structured intake for programmatic use
@@ -952,7 +1013,7 @@ Sources: Nixtla docs, Nixtla GitHub source code for StatsForecast/UtilsForecast/
 Use these as the doctrine map when explaining or improving the scaffold:
 
 | Chapter | URL | Agent takeaway |
-|---------|-----|----------------|
+| --- | --- | --- |
 | 1 | https://otexts.com/fpppy/01-intro.html | Forecasts are not goals/plans; assess predictability and future similarity |
 | 2 | https://otexts.com/fpppy/02-graphics.html | Plot first; visuals reveal patterns and breaks models can miss |
 | 3 | https://otexts.com/fpppy/03-decomposition.html | Adjust/transform/decompose before blindly modeling |
@@ -1064,6 +1125,7 @@ Read `release_gate_summary.md` first. It contains the one-glance headline, faile
 ## RESEARCH FINDINGS (from 10 autoresearch iterations)
 
 Key facts verified by experiment:
+
 1. Croston/ADIDA/IMAPA models don't help on Bernoulli-zero intermittent patterns (confirmed 2×)
 2. WAPE is hostile to intermittent demand; MASE is too harsh with first-diff scale
 3. Distribution shift causes 15-21 holdout underperformances (not model selection error)
@@ -1077,7 +1139,7 @@ Key facts verified by experiment:
 ## TROUBLESHOOTING
 
 | Problem | Solution |
-|---------|----------|
+| --- | --- |
 | `failure_diagnostics.json` appears | Read it — it has the error, likely causes, and next steps |
 | No intervals in output | History/horizon/lag plan cannot support two conformal windows; add history, shorten horizon, or reduce lag complexity |
 | Model selected = Naive | The data may be too noisy for complex models to earn their keep |
@@ -1086,17 +1148,16 @@ Key facts verified by experiment:
 | `require_backtest=True` fails | Some series lack enough history; remove the flag or add data |
 | `selection_horizon < requested_horizon` | Model was selected on a shorter CV horizon; disclose this, treat rows after `validated_through_horizon` as directional because `planning_eligible=False`, or rerun with `--strict-cv-horizon` |
 | Need better forecast than univariate baseline | Search MCPs for known-future drivers/events, then test driver-enhanced experiments against baseline |
-| `uv run streamlit ...` says `Failed to spawn: streamlit` | If you are in the repo root, run `uv sync --extra dev` first. If you are in a generated run folder, use `.\run_streamlit.ps1` or `uv run --with-requirements streamlit_requirements.txt streamlit run .\streamlit_app.py`. |
+| `uv run streamlit ...` says `Failed to spawn: streamlit` | If you are in the repo root, run `uv sync --extra dev` first. If you are in a generated run folder, use `.\\run_streamlit.ps1` or `uv run --with-requirements streamlit_requirements.txt streamlit run .\\streamlit_app.py`. |
 
 ---
 
 ## DEPENDENCIES
 
-```
+```javascript
 numpy>=1.26, pandas>=2.0, plotly>=6.0, statsforecast>=1.7, streamlit>=1.56.0, utilsforecast>=0.2.16, openpyxl>=3.1, pyyaml>=6.0
 ```
 
 Reporting/dashboard dependencies: `plotly>=6.0`, `streamlit>=1.56.0`.
 
-Optional: `hierarchicalforecast>=1.0` (hierarchy), `lightgbm>=4.0 + mlforecast>=1.0` (ML drivers), `datasetsforecast>=1.0` (opt-in public real-data validation), `neuralforecast>=2.0` (research only).
-
+Optional: `hierarchicalforecast>=1.0` (hierarchy), `lightgbm>=4.0 + mlforecast>=1.0` (ML drivers), `datasetsforecast>=1.0` (opt-in public real-data validation), `neuralforecast>=2.0` (research only).
