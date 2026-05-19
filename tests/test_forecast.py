@@ -2325,6 +2325,17 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert "Rolling-origin CV window player" in streamlit_app
     assert "st.slider" in streamlit_app
     assert "st.session_state" in streamlit_app
+    assert "def coerce_state_value" in streamlit_app
+    assert "def persistent_selectbox" in streamlit_app
+    assert 'persistent_selectbox("Series", uids, "active_series_uid")' in streamlit_app
+    assert "persistent_radio" in streamlit_app
+    assert '"active_champion_scope"' in streamlit_app
+    assert '"active_winner_metric"' in streamlit_app
+    assert "def scoped_chart_key" in streamlit_app
+    assert "def active_chart_state_parts" in streamlit_app
+    assert 'kwargs["key"] = scoped_chart_key(str(key), *active_chart_state_parts())' in streamlit_app
+    assert "wide_summary_source_{uid}" in streamlit_app
+    assert "interval_models_{uid}" in streamlit_app
     assert "slider_key = f\"{state_key}_slider\"" in streamlit_app
     assert "key=slider_key" in streamlit_app
     assert "on_change=sync_tournament_cutoff_slider" in streamlit_app
@@ -2383,7 +2394,7 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert "best_model_for_scope" in streamlit_app
     assert "model_family" in streamlit_app
     assert 'focus_key = f"models_to_investigate_{uid}"' in streamlit_app
-    assert "key=focus_key" in streamlit_app
+    assert "sidebar_focus_default" in streamlit_app
     assert 'key="forecast_context_chart"' in streamlit_app
     assert 'key="model_tournament_all_point_forecasts"' in streamlit_app
     assert 'key="model_tournament_backtest_chart"' in streamlit_app
