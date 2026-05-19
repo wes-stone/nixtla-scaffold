@@ -683,7 +683,31 @@ def build_streamlit_app() -> str:
             return fig
 
 
+        def state_key_slug(value) -> str:
+            raw = str(value or "")
+            slug = "".join(ch.lower() if ch.isalnum() else "_" for ch in raw).strip("_")
+            return slug or "none"
+
+
+        def scoped_chart_key(base: str, *parts) -> str:
+            cleaned = [state_key_slug(part) for part in parts if str(part or "").strip()]
+            return "__".join([base, *cleaned]) if cleaned else base
+
+
+        def active_chart_state_parts() -> list[str]:
+            return [
+                st.session_state.get("active_workbench_section", ""),
+                st.session_state.get("active_series_uid", ""),
+                st.session_state.get("active_champion", ""),
+                st.session_state.get("active_winner_metric", ""),
+                st.session_state.get("active_champion_scope", ""),
+            ]
+
+
         def render_plotly_chart(fig: go.Figure, **kwargs) -> None:
+            key = kwargs.get("key")
+            if key:
+                kwargs["key"] = scoped_chart_key(str(key), *active_chart_state_parts())
             st.plotly_chart(apply_terminal_chart_theme(fig), **kwargs)
 
 
@@ -1039,6 +1063,81 @@ def build_streamlit_app() -> str:
 
         def section_key(section: str) -> str:
             return "".join(ch.lower() if ch.isalnum() else "_" for ch in section).strip("_")
+
+
+        def coerce_state_value(state_key: str, options: list, default=None):
+            choices = list(options)
+            if not choices:
+                st.session_state.pop(state_key, None)
+                return None
+            fallback = default if default in choices else choices[0]
+            value = st.session_state.get(state_key, fallback)
+            if value not in choices:
+                value = fallback
+            st.session_state[state_key] = value
+            return value
+
+
+        def coerce_state_values(state_key: str, options: list, default=None) -> list:
+            choices = list(options)
+            defaults = list(default or [])
+            stored = st.session_state.get(state_key, defaults)
+            if not isinstance(stored, (list, tuple, set)):
+                stored = defaults
+            selected = [value for value in stored if value in choices]
+            if not selected:
+                selected = [value for value in defaults if value in choices]
+            st.session_state[state_key] = selected
+            return selected
+
+
+        def persistent_selectbox(label: str, options, state_key: str, *, default=None, container=None, **kwargs):
+            target = container or st
+            choices = list(options)
+            value = coerce_state_value(state_key, choices, default)
+            if value is None:
+                return None
+            return target.selectbox(label, choices, key=state_key, **kwargs)
+
+
+        def persistent_radio(label: str, options, state_key: str, *, default=None, container=None, **kwargs):
+            target = container or st
+            choices = list(options)
+            value = coerce_state_value(state_key, choices, default)
+            if value is None:
+                return None
+            return target.radio(label, choices, key=state_key, **kwargs)
+
+
+        def persistent_multiselect(label: str, options, state_key: str, *, default=None, container=None, **kwargs) -> list:
+            target = container or st
+            choices = list(options)
+            coerce_state_values(state_key, choices, default)
+            return target.multiselect(label, choices, key=state_key, **kwargs)
+
+
+        def persistent_toggle(label: str, state_key: str, *, default: bool = False, container=None, **kwargs) -> bool:
+            target = container or st
+            if state_key not in st.session_state:
+                st.session_state[state_key] = bool(default)
+            return bool(target.toggle(label, key=state_key, **kwargs))
+
+
+        def persistent_number_input(label: str, state_key: str, *, default: int, container=None, **kwargs):
+            target = container or st
+            min_value = kwargs.get("min_value")
+            max_value = kwargs.get("max_value")
+            value = st.session_state.get(state_key, default)
+            try:
+                value = int(value)
+            except (TypeError, ValueError):
+                value = int(default)
+            if min_value is not None:
+                value = max(int(min_value), value)
+            if max_value is not None:
+                value = min(int(max_value), value)
+            st.session_state[state_key] = value
+            return int(target.number_input(label, key=state_key, **kwargs))
 
 
         def visible_section_label(section: str) -> str:
@@ -4908,27 +5007,30 @@ def build_streamlit_app() -> str:
             st.divider()
             with st.expander("Settings / accessibility", expanded=False):
                 st.caption("Display settings only; forecasts and artifact files stay unchanged.")
-                selected_font_theme_name = st.selectbox(
+                selected_font_theme_name = persistent_selectbox(
                     "Font theme",
                     list(FONT_THEME_OPTIONS),
-                    index=list(FONT_THEME_OPTIONS).index(active_font_theme_name),
-                    key="font_theme",
+                    "font_theme",
+                    default=active_font_theme_name,
                     help="Switch dashboard typography only; forecasts and artifact files stay unchanged.",
                 )
                 st.caption(FONT_THEME_OPTIONS.get(selected_font_theme_name, active_font_theme)["note"])
                 st.caption("Reserved for density, contrast, and motion controls as the workbench grows.")
             st.divider()
-            uid = st.selectbox("Series", uids)
+            uid = persistent_selectbox("Series", uids, "active_series_uid")
             st.markdown("##### Champion controls")
-            champion_scope = st.radio(
+            champion_scope = persistent_radio(
                 "Champion lens",
                 CHAMPION_SCOPE_OPTIONS,
+                "active_champion_scope",
+                default=CHAMPION_SCOPE_OPTIONS[0],
                 help="Switch active champion without rewriting forecast.csv.",
             )
-            winner_metric = st.selectbox(
+            winner_metric = persistent_selectbox(
                 "Winner metric",
                 available_winner_metrics(uid),
-                index=0,
+                "active_winner_metric",
+                default=available_winner_metrics(uid)[0],
                 format_func=metric_label,
                 help="Review lens only; official selection artifacts stay unchanged.",
             )
@@ -4945,6 +5047,7 @@ def build_streamlit_app() -> str:
                     message += f": {reason}"
                 st.warning(message + " Falling back to the overall selected model.")
                 active_champion = selected_model(uid)
+            st.session_state["active_champion"] = active_champion or ""
             overall_selected = selected_model(uid)
             st.caption(f"Overall selected model: {model_menu_label(uid, overall_selected, winner_metric) if overall_selected else 'not available'}")
             st.caption(f"Active champion: {model_menu_label(uid, active_champion, winner_metric) if active_champion else 'not available'} (by {metric_label(winner_metric)})")
@@ -4958,17 +5061,18 @@ def build_streamlit_app() -> str:
             sidebar_focus_default = [model for model in dedupe_models(stored_focus_models) if model in model_options] or default_models
             with st.expander("Tournament focus controls", expanded=active_section == "Model tournament"):
                 st.caption("Used by diagnostic pages to highlight a few models. The Model tournament section always shows the full candidate field.")
-                focus_models = st.multiselect(
+                focus_models = persistent_multiselect(
                     "Models to highlight",
                     model_options,
+                    focus_key,
                     default=sidebar_focus_default,
                     format_func=lambda model: model_menu_label(uid, model, winner_metric),
                     help="These models are highlighted in CV, residual, interval, and audit sections. Clear the list to only use the active champion.",
-                    key=focus_key,
                 )
-                show_context_models = st.toggle(
+                show_context_models = persistent_toggle(
                     "Show all other models in diagnostic charts",
-                    value=False,
+                    f"show_context_models_{uid}",
+                    default=False,
                     help="Turn this on for full all-candidate context in CV diagnostic charts. Forecast Review and Model tournament always have their own all-model views.",
                 )
             if active_champion and active_champion not in focus_models:
@@ -5248,16 +5352,20 @@ def build_streamlit_app() -> str:
                 history_period_count = int(history["ds"].dropna().nunique()) if not history.empty and "ds" in history.columns else 0
                 forecast_period_count = int(forecast["ds"].dropna().nunique()) if not forecast.empty and "ds" in forecast.columns else 0
                 wide_top_cols = st.columns([1.05, 1.05, 1.9])
-                wide_source = wide_top_cols[0].selectbox(
+                wide_source = persistent_selectbox(
                     "Wide summary values",
                     WIDE_SUMMARY_SOURCE_OPTIONS,
-                    index=0,
+                    f"wide_summary_source_{uid}",
+                    default=WIDE_SUMMARY_SOURCE_OPTIONS[0],
+                    container=wide_top_cols[0],
                     help="Actuals use history.csv y; Forecast uses the selected model feed; Actuals + forecast stitches recent actuals to future model forecasts.",
                 )
-                wide_rows = wide_top_cols[1].radio(
+                wide_rows = persistent_radio(
                     "Rows",
                     WIDE_SUMMARY_ROW_OPTIONS,
-                    index=0,
+                    f"wide_summary_rows_{uid}",
+                    default=WIDE_SUMMARY_ROW_OPTIONS[0],
+                    container=wide_top_cols[1],
                     horizontal=True,
                     help="Use all series for portfolio copy/paste, or only the selected sidebar series for focused review.",
                 )
@@ -5267,10 +5375,12 @@ def build_streamlit_app() -> str:
                     WIDE_SUMMARY_MODEL_SELECTED,
                     *explicit_wide_models,
                 ]
-                wide_model = wide_top_cols[2].selectbox(
+                wide_model = persistent_selectbox(
                     "Forecast model",
                     wide_model_options,
-                    index=0,
+                    f"wide_summary_model_{uid}",
+                    default=WIDE_SUMMARY_MODEL_CHAMPION,
+                    container=wide_top_cols[2],
                     format_func=lambda choice: wide_summary_model_label(choice, uid, active_champion, winner_metric),
                     disabled=wide_source == "Actuals",
                     help="Default uses the active champion from the sidebar champion lens. Pick an explicit model to copy challenger forecasts and intervals.",
@@ -5278,36 +5388,44 @@ def build_streamlit_app() -> str:
                 preview_interval_model = wide_summary_model_for_uid(uid, uid, wide_model, champion_scope, winner_metric, active_champion)
                 interval_options = selected_interval_levels(uid, preview_interval_model) if wide_source != "Actuals" else []
                 wide_bottom_cols = st.columns([1.05, 1.35, 1, 1])
-                wide_units = wide_bottom_cols[0].selectbox(
+                wide_units = persistent_selectbox(
                     "Display units",
                     WIDE_SUMMARY_VALUE_OPTIONS,
-                    index=0,
+                    f"wide_summary_units_{uid}",
+                    default=WIDE_SUMMARY_VALUE_OPTIONS[0],
+                    container=wide_bottom_cols[0],
                     help="Display-only formatting. Download forecast.csv/history.csv for unformatted source values.",
                 )
-                wide_interval_levels = wide_bottom_cols[1].multiselect(
+                wide_interval_levels = persistent_multiselect(
                     "Prediction intervals",
                     [80, 95],
+                    f"wide_summary_intervals_{uid}",
                     default=interval_options,
+                    container=wide_bottom_cols[1],
                     disabled=wide_source == "Actuals",
                     help="Adds indented lo/hi rows for the selected forecast model when interval bounds exist. Empty selection shows point forecasts only.",
                 )
                 wide_actual_periods = int(
-                    wide_bottom_cols[2].number_input(
+                    persistent_number_input(
                         "Actual periods",
+                        f"wide_summary_actual_periods_{uid}",
+                        default=min(12, history_period_count),
+                        container=wide_bottom_cols[2],
                         min_value=0,
                         max_value=history_period_count,
-                        value=min(12, history_period_count),
                         step=1,
                         disabled=wide_source == "Forecast",
                         help="Most recent history periods to include as columns.",
                     )
                 )
                 wide_forecast_periods = int(
-                    wide_bottom_cols[3].number_input(
+                    persistent_number_input(
                         "Forecast periods",
+                        f"wide_summary_forecast_periods_{uid}",
+                        default=forecast_period_count,
+                        container=wide_bottom_cols[3],
                         min_value=0,
                         max_value=forecast_period_count,
-                        value=forecast_period_count,
                         step=1,
                         disabled=wide_source == "Actuals",
                         help="Future forecast periods to include as columns.",
@@ -5486,10 +5604,10 @@ def build_streamlit_app() -> str:
                             st.session_state[state_key] += 1
                             st.rerun()
                     with control_d:
-                        fixed_x = st.toggle("Fixed date axis", value=True, key=f"model_tournament_fixed_x_{uid}")
-                        fixed_y = st.toggle("Fixed value axis", value=True, key=f"model_tournament_fixed_y_{uid}")
+                        fixed_x = persistent_toggle("Fixed date axis", f"model_tournament_fixed_x_{uid}", default=True)
+                        fixed_y = persistent_toggle("Fixed value axis", f"model_tournament_fixed_y_{uid}", default=True)
                     with control_e:
-                        show_intervals = st.toggle("Show intervals", value=False, key=f"model_tournament_show_intervals_{uid}")
+                        show_intervals = persistent_toggle("Show intervals", f"model_tournament_show_intervals_{uid}", default=False)
                     cutoff = tournament_cutoffs[st.session_state[state_key]]
                     st.markdown(f"**Window {st.session_state[state_key] + 1} of {len(tournament_cutoffs)}** | cutoff `{pd.Timestamp(cutoff).date()}`")
                     st.subheader("All-model rolling-origin window")
@@ -5591,13 +5709,13 @@ def build_streamlit_app() -> str:
                 ]
             )
             interval_default_models = [model for model in preferred_interval_models if model in interval_options][:DEFAULT_INTERVAL_MODEL_LIMIT]
-            interval_models = st.multiselect(
+            interval_models = persistent_multiselect(
                 "Models with interval bands",
                 interval_options,
+                f"interval_models_{uid}",
                 default=interval_default_models,
                 format_func=lambda model: model_menu_label(uid, model, winner_metric),
                 help=f"These are candidate models that wrote future lower/upper interval bounds. The default is capped at {DEFAULT_INTERVAL_MODEL_LIMIT} models for responsiveness; add more models when a full uncertainty review is needed.",
-                key=f"interval_models_{uid}",
             )
             interval_models = coerce_interval_models(uid, interval_models)
             interval_levels = sorted({level for model in interval_models for level in selected_interval_levels(uid, model)})
@@ -5759,31 +5877,31 @@ def build_streamlit_app() -> str:
             seasonal_default_index = seasonal_model_options.index(seasonal_default_model) if seasonal_default_model in seasonal_model_options else 0
             overlay_controls = st.columns([1, 2, 1])
             with overlay_controls[0]:
-                year_start_label = st.selectbox(
+                year_start_label = persistent_selectbox(
                     "Beginning of year month",
                     MONTH_LABELS,
-                    index=0,
-                    key=f"seasonality_year_start_month_{uid}",
+                    f"seasonality_year_start_month_{uid}",
+                    default=MONTH_LABELS[0],
                     help="Use January for calendar year, or choose a fiscal/planning-year start month.",
                 )
             seasonal_overlay_model = None
             with overlay_controls[1]:
                 if seasonal_model_options:
-                    seasonal_overlay_model = st.selectbox(
+                    seasonal_overlay_model = persistent_selectbox(
                         "Forecast model overlay",
                         seasonal_model_options,
-                        index=seasonal_default_index,
+                        f"seasonality_overlay_model_{uid}",
+                        default=seasonal_default_model,
                         format_func=lambda model: model_menu_label(uid, model, winner_metric),
-                        key=f"seasonality_overlay_model_{uid}",
                         help="Defaults to the active champion/best model. Pick any candidate model to overlay its future yhat seasonal shape.",
                     )
                 else:
                     st.info("No candidate model forecast is available for the seasonal overlay.")
             with overlay_controls[2]:
-                include_seasonal_history = st.toggle(
+                include_seasonal_history = persistent_toggle(
                     "Include actual years",
-                    value=True,
-                    key=f"seasonality_include_actual_years_{uid}",
+                    f"seasonality_include_actual_years_{uid}",
+                    default=True,
                     help="Keep historical actual seasonal years as context behind the selected model forecast overlay.",
                 )
             year_start_month = MONTH_LABELS.index(year_start_label) + 1
@@ -5846,7 +5964,7 @@ def build_streamlit_app() -> str:
                 render_dataframe(level_summary, width="stretch", hide_index=True)
                 parent_options = hierarchy_parent_options()
                 if parent_options:
-                    parent_id = st.selectbox("Parent node", parent_options)
+                    parent_id = persistent_selectbox("Parent node", parent_options, "hierarchy_parent_node", default=parent_options[0])
                     st.subheader("Parent history + forecast")
                     render_plotly_chart(hierarchy_rollup_chart(parent_id), width="stretch", key="hierarchy_rollup_plot")
                     if not hierarchy_rollup.empty and "parent_unique_id" in hierarchy_rollup.columns:
@@ -5925,9 +6043,10 @@ def build_streamlit_app() -> str:
                 visual_lookup = {artifact_relative_label(path): path for path in regressor_visuals}
                 visual_labels = list(visual_lookup)
                 default_visuals = visual_labels[: min(3, len(visual_labels))]
-                selected_visuals = st.multiselect(
+                selected_visuals = persistent_multiselect(
                     "Visual artifacts",
                     visual_labels,
+                    "selected_regressor_visuals",
                     default=default_visuals,
                     help="Images with names containing regressor, driver, feature, covariate, exogenous, xreg, STL, or rolling are discovered from the run root, appendix/, audit/, and experiments/ folders.",
                 )
@@ -6128,26 +6247,34 @@ def build_streamlit_app() -> str:
                 st.subheader("Ledger table browser")
                 st.caption("Pick a ledger CSV mirror like a DB table, filter rows, and inspect the records that power the version, lock, actuals, performance, and adjustment views.")
                 table_names = list(ledger_tables)
-                selected_ledger_table = st.selectbox(
+                selected_ledger_table = persistent_selectbox(
                     "Ledger table",
                     table_names,
+                    f"ledger_table_browser_{ledger_key}",
+                    default=table_names[0] if table_names else None,
                     format_func=lambda name: f"{name} ({len(ledger_tables[name]):,} rows x {len(ledger_tables[name].columns) if not ledger_tables[name].empty else 0} cols)",
-                    key=f"ledger_table_browser_{ledger_key}",
                 )
                 browser_frame = ledger_tables[selected_ledger_table].copy()
                 browser_cols = st.columns(3)
                 if not browser_frame.empty and "unique_id" in browser_frame.columns:
                     series_values = ["All", *sorted(browser_frame["unique_id"].dropna().astype(str).unique())]
-                    table_series = browser_cols[0].selectbox("Table series", series_values, key=f"ledger_table_series_{ledger_key}_{selected_ledger_table}")
+                    table_series = persistent_selectbox(
+                        "Table series",
+                        series_values,
+                        f"ledger_table_series_{ledger_key}_{selected_ledger_table}",
+                        default=uid if uid in series_values else "All",
+                        container=browser_cols[0],
+                    )
                     if table_series != "All":
                         browser_frame = browser_frame[browser_frame["unique_id"].astype(str) == table_series]
                 if not browser_frame.empty and "version_label" in browser_frame.columns:
                     version_values = sorted(browser_frame["version_label"].dropna().astype(str).unique())
-                    table_versions = browser_cols[1].multiselect(
+                    table_versions = persistent_multiselect(
                         "Table versions",
                         version_values,
+                        f"ledger_table_versions_{ledger_key}_{selected_ledger_table}",
                         default=version_values[: min(len(version_values), 8)],
-                        key=f"ledger_table_versions_{ledger_key}_{selected_ledger_table}",
+                        container=browser_cols[1],
                     )
                     if table_versions:
                         browser_frame = browser_frame[browser_frame["version_label"].astype(str).isin(table_versions)]
@@ -6160,12 +6287,11 @@ def build_streamlit_app() -> str:
 
                 series_options = ledger_available_series(ledger_snapshot, ledger_history, ledger_actuals, ledger_deltas, ledger_corrected)
                 if series_options:
-                    default_series_index = series_options.index(uid) if uid in series_options else 0
-                    ledger_uid = st.selectbox(
+                    ledger_uid = persistent_selectbox(
                         "Series",
                         series_options,
-                        index=default_series_index,
-                        key=f"ledger_series_{ledger_key}",
+                        f"ledger_series_{ledger_key}",
+                        default=uid if uid in series_options else series_options[0],
                         help="Choose the series to review across forecast versions, locks, actuals, and adjustments.",
                     )
                 else:
@@ -6175,11 +6301,11 @@ def build_streamlit_app() -> str:
                 version_labels, default_version_labels = ledger_version_options(ledger_snapshot, ledger_locks)
                 selected_version_labels = default_version_labels
                 if version_labels:
-                    selected_version_labels = st.multiselect(
+                    selected_version_labels = persistent_multiselect(
                         "Forecast versions to show",
                         version_labels,
+                        f"ledger_versions_to_show_{ledger_key}_{ledger_uid}",
                         default=default_version_labels,
-                        key=f"ledger_versions_to_show_{ledger_key}_{ledger_uid}",
                         help="Default shows official locks plus the most recent forecast versions. Non-lock forecasts render as lighter lines.",
                     )
 
@@ -6349,16 +6475,23 @@ def build_streamlit_app() -> str:
                     filters = st.columns(2)
                     if "hierarchy_level" in compare_view.columns and compare_view["hierarchy_level"].notna().any():
                         hierarchy_options = ["All", *sorted(compare_view["hierarchy_level"].dropna().astype(str).unique())]
-                        hierarchy_choice = filters[0].selectbox("Hierarchy level", hierarchy_options, key="byo_hierarchy_level")
+                        hierarchy_choice = persistent_selectbox(
+                            "Hierarchy level",
+                            hierarchy_options,
+                            f"byo_hierarchy_level_{uid}",
+                            default="All",
+                            container=filters[0],
+                        )
                         if hierarchy_choice != "All":
                             compare_view = compare_view[compare_view["hierarchy_level"].astype(str).eq(hierarchy_choice)]
                     if "scenario_name" in compare_view.columns and compare_view["scenario_name"].notna().any():
                         scenario_options = sorted(compare_view["scenario_name"].dropna().astype(str).unique())
-                        scenario_choices = filters[1].multiselect(
+                        scenario_choices = persistent_multiselect(
                             "BYO scenarios",
                             scenario_options,
+                            f"byo_scenarios_{uid}",
                             default=scenario_options,
-                            key="byo_scenarios",
+                            container=filters[1],
                         )
                         compare_view = compare_view[compare_view["scenario_name"].astype(str).isin(scenario_choices)]
 
