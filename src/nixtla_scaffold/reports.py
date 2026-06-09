@@ -455,6 +455,10 @@ def build_html_report(payload: dict[str, Any]) -> str:
           {_output_item("byo_model/byo_model_comparison_summary.csv", "BYO comparison rollup by scenario, source/sheet, hierarchy level, and product grouping columns.")}
           {_output_item("byo_model/byo_model_score_summary.csv", "Optional cutoff-labeled BYO actual-vs-forecast score rollup when historical snapshots are supplied.")}
           {_output_item("byo_model/byo_model_automation.md", "Recommended automation loop for finance-owned BYO models, including cutoff snapshots, known-as-of lineage, and customer/SKU/PxQ detail ownership.")}
+          {_output_item("finn/finn_forecasts.csv", "Canonical FINN/finnts advisory forecasts imported through the optional R bridge; never changes forecast.csv by itself.")}
+          {_output_item("finn/forecast_comparison.csv", "Directional scaffold-vs-FINN alignment; deltas only unless paired with cutoff scoring.")}
+          {_output_item("finn/external_model_metrics.csv", "Cutoff-labeled FINN score rollup using the scaffold metric contract: same actuals, cutoffs, horizons, and metrics.")}
+          {_output_item("finn/finn_manifest.json", "FINN bridge reproducibility receipt with source, R runner/check context, advisory status, and output map.")}
           {_output_item("appendix/known_future_regressors.csv", "Declared known-future regressor contracts for leakage and future-availability audit.")}
           {_output_item("appendix/driver_availability_audit.csv", "Known-future regressor audit status, leakage risk, required future rows, and modeling decision.")}
           {_output_item("appendix/driver_model_features.csv", "Opt-in MLForecast driver feature gate showing which audited regressors were included or excluded.")}
@@ -584,6 +588,7 @@ def build_streamlit_app() -> str:
         MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
         BASE_DASHBOARD_SECTIONS = [
             "Control Pane",
+            "Pipeline map",
             "Forecast review",
             "Model tournament",
             "Prediction intervals",
@@ -597,6 +602,7 @@ def build_streamlit_app() -> str:
         DASHBOARD_SECTIONS = list(BASE_DASHBOARD_SECTIONS)
         SECTION_DESCRIPTIONS = {
             "Control Pane": "One-glance run controls, feature map, policy status, and copyable next command.",
+            "Pipeline map": "End-to-end visual of connectors, feature lanes, model evidence, outputs, ledger, and agent handoff.",
             "Forecast review": "Fast default view: champion, trust, and selected forecast context.",
             "Model tournament": "All-model scoreboard, point forecasts, intervals, and ensemble weights.",
             "Prediction intervals": "Review uncertainty bands and calibration evidence.",
@@ -606,6 +612,7 @@ def build_streamlit_app() -> str:
             "Assumptions & Drivers": "Review events, scenarios, and known-future driver audits.",
             "Ledger view": "Browse ledger tables, registered versions, locks, actuals, and drift rows.",
             "BYO / Finance model": "Compare Excel-owned finance model versions against scaffold forecasts.",
+            "FINN advisory": "Review optional FINN/finnts bridge forecasts, comparisons, and cutoff scores.",
             "Feeder outputs": "Preview exported CSVs; use files for full-row review.",
         }
         DEFAULT_INTERVAL_MODEL_LIMIT = 8
@@ -805,6 +812,11 @@ def build_streamlit_app() -> str:
             return None
 
 
+        def scoped_artifact_path(folder: str, name: str) -> Path | None:
+            path = RUN_DIR / folder / name
+            return path if path.exists() else None
+
+
         def resolve_artifact_reference(value) -> Path:
             raw = str(value or "").strip()
             if not raw:
@@ -866,6 +878,14 @@ def build_streamlit_app() -> str:
             return pd.DataFrame()
 
 
+        def read_scoped_csv(folder: str, name: str) -> pd.DataFrame:
+            path = scoped_artifact_path(folder, name)
+            if path is not None:
+                stat = path.stat()
+                return cached_read_csv(str(path), stat.st_mtime_ns, stat.st_size)
+            return pd.DataFrame()
+
+
         def read_csv_path(path: Path | str) -> pd.DataFrame:
             target = Path(path)
             if target.exists():
@@ -881,6 +901,14 @@ def build_streamlit_app() -> str:
 
         def read_json(name: str) -> dict:
             path = artifact_path(name)
+            if path is None:
+                return {}
+            stat = path.stat()
+            return cached_read_json(str(path), stat.st_mtime_ns, stat.st_size)
+
+
+        def read_scoped_json(folder: str, name: str) -> dict:
+            path = scoped_artifact_path(folder, name)
             if path is None:
                 return {}
             stat = path.stat()
@@ -965,7 +993,7 @@ def build_streamlit_app() -> str:
             text = display_value(value, default="unknown").lower()
             if any(token in text for token in ["failed", "error", "missing", "low", "unavailable"]):
                 return "risk"
-            if any(token in text for token in ["warn", "medium", "baseline", "skipped"]):
+            if any(token in text for token in ["warn", "watch", "advisory", "partial", "directional", "medium", "baseline", "skipped"]):
                 return "watch"
             if any(token in text for token in ["ran", "available", "finished", "selected", "high", "ok", "pass"]):
                 return "ok"
@@ -1014,6 +1042,345 @@ def build_streamlit_app() -> str:
                 '</div>'
                 for kicker, title, copy in items
             ) + "</div>"
+
+
+        def count_unique(frame: pd.DataFrame, column: str) -> int:
+            if frame.empty or column not in frame.columns:
+                return 0
+            return int(frame[column].dropna().astype(str).nunique())
+
+
+        def safe_min_metric(frame: pd.DataFrame, columns: list[str]) -> str:
+            if frame.empty:
+                return "N/A"
+            for column in columns:
+                if column in frame.columns:
+                    values = pd.to_numeric(frame[column], errors="coerce").dropna()
+                    if not values.empty:
+                        value = float(values.min())
+                        if column.lower() == "wape":
+                            return f"{value:.1%}" if value <= 1 else f"{value:,.2f}"
+                        return f"{value:,.2f}"
+            return "N/A"
+
+
+        def pipeline_node(title: str, status: str, detail: str, artifact: str = "") -> str:
+            status_class = control_status_class(status)
+            artifact_html = f'<div class="pipeline-node-artifact">{html.escape(artifact)}</div>' if artifact else ""
+            return (
+                f'<div class="pipeline-node status-{status_class}">'
+                '<div class="pipeline-node-top">'
+                f'<div class="pipeline-node-title">{html.escape(title)}</div>'
+                f'<span class="control-status-pill status-{status_class}">{html.escape(display_value(status, default="unknown"))}</span>'
+                '</div>'
+                f'<div class="pipeline-node-detail">{html.escape(detail)}</div>'
+                f"{artifact_html}"
+                "</div>"
+            )
+
+
+        def source_pipeline_status() -> tuple[str, str, str]:
+            if isinstance(source_pipeline_manifest, dict) and source_pipeline_manifest:
+                steps = source_pipeline_manifest.get("steps", [])
+                steps = steps if isinstance(steps, list) else []
+                statuses = [str(step.get("status", "unknown")).lower() for step in steps if isinstance(step, dict)]
+                failed = any("fail" in status or "error" in status for status in statuses)
+                succeeded = bool(statuses) and all("succeeded" in status or "success" in status for status in statuses)
+                canonical = source_pipeline_manifest.get("canonical_input", {})
+                rows = canonical.get("rows") if isinstance(canonical, dict) else None
+                series = canonical.get("series_count") if isinstance(canonical, dict) else None
+                detail = f"{len(steps)} connector/extract step(s)"
+                if rows is not None:
+                    detail += f"; canonical rows {rows}"
+                if series is not None:
+                    detail += f"; series {series}"
+                status = "available" if succeeded else "failed" if failed else "watch"
+                return status, detail, "appendix/source_pipeline_manifest.json"
+            source = manifest.get("input") or manifest.get("source") or "direct CSV/workbook/DataFrame input"
+            return "available" if not history.empty else "not present", f"Direct source path/context: {compact_text(str(source), 70)}", "manifest.json / appendix/history.csv"
+
+
+        def pipeline_run_count_status() -> tuple[str, str]:
+            if isinstance(ledger_context, dict) and ledger_context:
+                exports = resolve_artifact_reference(ledger_context.get("exports_path", ""))
+                versions = read_csv_path(exports / "forecast_versions.csv") if str(exports) else pd.DataFrame()
+                if not versions.empty:
+                    return f"{len(versions):,} registered ledger version(s)", "available"
+                return "current run registered in ledger", "available"
+            if refresh_manifest or not refresh_delta.empty:
+                return "1 refresh comparison attached", "available"
+            if isinstance(source_pipeline_manifest, dict) and source_pipeline_manifest:
+                return "1 source pipeline manifest attached", "available"
+            return "run count not tracked for this folder", "not present"
+
+
+        def external_challenger_status(feature_rows_for_custom: list[dict] | None = None) -> tuple[str, str, str]:
+            rows_for_custom = feature_rows_for_custom or []
+            finn_scored = not finn_model_metrics.empty
+            finn_present = any(not frame.empty for frame in [finn_forecasts, finn_forecast_comparison, finn_comparison_summary, finn_external_backtest])
+            byo_scored = not byo_model_scores.empty
+            byo_present = any(not frame.empty for frame in [byo_model_forecasts, byo_forecast_comparison, byo_comparison_summary, byo_external_backtest])
+            challenger_state = str(finn_challenger_status.get("status", "")) if isinstance(finn_challenger_status, dict) else ""
+            if challenger_state in {"skipped", "failed"} and not finn_scored:
+                reason = compact_text(str(finn_challenger_status.get("reason", "challenger did not run")), 90)
+                return "watch", f"FINN challenger {challenger_state}: {reason}", "finn/challenger_status.json"
+            if challenger_state == "disabled" and not (finn_present or byo_present):
+                return "not present", "FINN challenger disabled in spec.", "finn/challenger_status.json"
+            custom_rows = [
+                row
+                for row in rows_for_custom
+                if isinstance(row, dict)
+                and "custom" in str(row.get("mechanism", "")).lower()
+                and "available" in str(row.get("status", "")).lower()
+            ]
+            if finn_scored or byo_scored:
+                pieces = []
+                if finn_scored:
+                    pieces.append(f"FINN {count_unique(finn_model_metrics, 'model')} scored model(s)")
+                if byo_scored:
+                    pieces.append(f"BYO {len(byo_model_scores):,} score row(s)")
+                return "available", "; ".join(pieces), "finn/external_model_metrics.csv / byo_model_score_summary.csv"
+            if finn_present or byo_present or custom_rows:
+                pieces = []
+                if finn_present:
+                    pieces.append("FINN directional artifacts attached")
+                if byo_present:
+                    pieces.append("BYO comparison artifacts attached")
+                if custom_rows:
+                    pieces.append("custom challenger contract available")
+                return "watch", "; ".join(pieces), "external comparison artifacts"
+            return "not present", "No external challenger lane attached yet.", "finn/* / byo_model/* / custom_model_contracts.csv"
+
+
+        def build_integrated_model_evidence(feature_rows_for_custom: list[dict] | None = None) -> pd.DataFrame:
+            rows = [
+                {
+                    "lane": "Native Nixtla tournament",
+                    "integration_role": "official champion candidates",
+                    "status": "selected" if overall_selected else "available",
+                    "model_count": candidate_model_count,
+                    "rows": len(model_audit),
+                    "best_metric": safe_min_metric(model_audit, ["rmse", "avg_rmse"]),
+                    "primary_artifact": "appendix/model_audit.csv",
+                }
+            ]
+            ensemble_present = "WeightedEnsemble" in set(map(str, model_columns(all_models))) or (
+                not model_audit.empty and "model" in model_audit.columns and model_audit["model"].astype(str).str.contains("Ensemble", case=False, na=False).any()
+            )
+            rows.append(
+                {
+                    "lane": "Native ensemble lab",
+                    "integration_role": "advisory candidate policy inside scaffold evidence",
+                    "status": "available" if ensemble_present else "not present",
+                    "model_count": 1 if ensemble_present else 0,
+                    "rows": len(weights),
+                    "best_metric": safe_min_metric(weights, ["weight"]),
+                    "primary_artifact": "audit/model_weights.csv / appendix/ensemble_policy_receipts.csv",
+                }
+            )
+            finn_status, _, finn_artifact = external_challenger_status(feature_rows_for_custom)
+            rows.append(
+                {
+                    "lane": "FINN / finnts challenger",
+                    "integration_role": "external model lane scored on shared cutoff/actual spine",
+                    "status": finn_status,
+                    "model_count": count_unique(finn_model_metrics if not finn_model_metrics.empty else finn_forecasts, "model"),
+                    "rows": len(finn_model_metrics) if not finn_model_metrics.empty else len(finn_forecasts),
+                    "best_metric": safe_min_metric(finn_model_metrics, ["rmse", "mae", "wape"]) if not finn_model_metrics.empty else "directional only",
+                    "primary_artifact": finn_artifact if "finn" in finn_artifact.lower() else "finn/finn_manifest.json",
+                }
+            )
+            rows.append(
+                {
+                    "lane": "BYO / finance model challenger",
+                    "integration_role": "external plan/model lane scored or compared beside scaffold",
+                    "status": "available" if not byo_model_scores.empty else "watch" if any(not frame.empty for frame in [byo_model_forecasts, byo_forecast_comparison, byo_comparison_summary, byo_external_backtest]) else "not present",
+                    "model_count": count_unique(byo_model_forecasts, "model") if not byo_model_forecasts.empty else 0,
+                    "rows": len(byo_model_scores) if not byo_model_scores.empty else len(byo_model_forecasts),
+                    "best_metric": safe_min_metric(byo_model_scores, ["rmse", "mae", "wape"]) if not byo_model_scores.empty else "directional only",
+                    "primary_artifact": "byo_model_score_summary.csv / forecast_comparison.csv",
+                }
+            )
+            return pd.DataFrame(rows)
+
+
+        def build_pipeline_node_specs(feature_rows_for_custom: list[dict] | None = None) -> list[tuple[str, str, str, str]]:
+            source_status, source_detail, source_artifact = source_pipeline_status()
+            run_count, run_count_status = pipeline_run_count_status()
+            features_enabled = any(
+                not frame.empty
+                for frame in [
+                    scenario_assumptions,
+                    scenario_forecast,
+                    known_future_regressors,
+                    driver_availability_audit,
+                    driver_model_features,
+                    driver_model_cv_delta,
+                    driver_experiment_summary,
+                    feature_selection_receipts,
+                    target_transform_audit,
+                ]
+            )
+            hierarchy_enabled = any(not frame.empty for frame in [hierarchy_reconciliation, hierarchy_rollup, hierarchy_coherence_pre, hierarchy_coherence_post])
+            external_status, external_detail, external_artifact = external_challenger_status(feature_rows_for_custom)
+            finn_needs_score = any(not frame.empty for frame in [finn_forecasts, finn_forecast_comparison]) and finn_model_metrics.empty
+            evidence_status = "watch" if finn_needs_score else "available" if not backtest_long.empty else "not present"
+            governance_status = "available" if ledger_context or hierarchy_enabled or refresh_manifest or not refresh_delta.empty else "not present"
+            return [
+                ("Source connectors", source_status, source_detail, source_artifact),
+                (
+                    "Canonical data + profile",
+                    "available" if not history.empty and not forecast.empty else "not present",
+                    f"{len(history):,} history row(s), {len(forecast):,} forecast row(s), {len(uids)} series.",
+                    "appendix/history.csv / profile.json / validation_receipt.csv",
+                ),
+                (
+                    "Features, drivers, scenarios",
+                    "available" if features_enabled else "not present",
+                    "Events, regressors, transforms, feature receipts, and leakage audits are enabled." if features_enabled else "No explicit driver or scenario artifacts attached.",
+                    "scenario_assumptions.csv / driver_availability_audit.csv / feature_selection_receipts.csv",
+                ),
+                (
+                    "Native Nixtla tournament",
+                    "available" if candidate_model_count else "not present",
+                    f"{candidate_model_count} candidate column(s); selected model: {display_value(overall_selected, default='N/A')}.",
+                    "audit/all_models.csv / audit/backtest_metrics.csv / appendix/model_audit.csv",
+                ),
+                ("External challenger lane", external_status, external_detail, external_artifact),
+                (
+                    "Shared evidence spine",
+                    evidence_status,
+                    f"Native CV rows {len(backtest_long):,}; FINN scored rows {len(finn_external_backtest):,}; BYO scored rows {len(byo_external_backtest):,}.",
+                    "appendix/backtest_long.csv / finn/external_model_metrics.csv / external_backtest_long.csv",
+                ),
+                (
+                    "Governance + operating loop",
+                    governance_status,
+                    f"{run_count}; hierarchy {'enabled' if hierarchy_enabled else 'not enabled'}; refresh {'attached' if refresh_manifest or not refresh_delta.empty else 'not attached'}.",
+                    "ledger_context.json / appendix/hierarchy_rollup.csv / refresh_manifest.json",
+                ),
+                (
+                    "Outputs + agent handoff",
+                    "available" if manifest and diagnostics else "not present",
+                    f"{len(control_state.get('artifacts', {})) if isinstance(control_state, dict) else 0} indexed control artifacts; Streamlit, HTML, Excel, CSV, and LLM context generated.",
+                    "report.html / streamlit_app.py / forecast.xlsx / llm_context.json",
+                ),
+            ]
+
+
+        def build_pipeline_nodes(feature_rows_for_custom: list[dict] | None = None) -> list[str]:
+            return [
+                pipeline_node(title, status, detail, artifact)
+                for title, status, detail, artifact in build_pipeline_node_specs(feature_rows_for_custom)
+            ]
+
+
+        _PIPELINE_FLOW_COLORS = {
+            "ok": ("#1fda83", "rgba(31,218,131,0.10)"),
+            "watch": ("#f2a900", "rgba(242,169,0,0.10)"),
+            "risk": ("#ff4b4b", "rgba(255,75,75,0.10)"),
+            "muted": ("#697782", "rgba(105,119,130,0.08)"),
+        }
+
+
+        def build_pipeline_flow_svg(specs: list[tuple[str, str, str, str]]) -> str:
+            node_w, node_h, gap_x, gap_y, per_row = 200, 64, 46, 56, 4
+            rows = [specs[i : i + per_row] for i in range(0, len(specs), per_row)]
+            width = per_row * node_w + (per_row - 1) * gap_x + 8
+            height = len(rows) * node_h + (len(rows) - 1) * gap_y + 8
+            parts: list[str] = []
+            centers: list[tuple[float, float, float, float]] = []
+            for row_index, row in enumerate(rows):
+                snake = row_index % 2 == 1
+                for col_index, (title, status, _detail, _artifact) in enumerate(row):
+                    col = (per_row - 1 - col_index) if snake else col_index
+                    x = 4 + col * (node_w + gap_x)
+                    y = 4 + row_index * (node_h + gap_y)
+                    stroke, fill = _PIPELINE_FLOW_COLORS.get(control_status_class(status), _PIPELINE_FLOW_COLORS["muted"])
+                    words = title.split()
+                    midpoint = (len(words) + 1) // 2
+                    line_one = html.escape(" ".join(words[:midpoint]))
+                    line_two = html.escape(" ".join(words[midpoint:]))
+                    label = html.escape(display_value(status, default="unknown"))
+                    parts.append(
+                        f'<rect x="{x}" y="{y}" rx="9" width="{node_w}" height="{node_h}" fill="{fill}" stroke="{stroke}" stroke-width="1.6"/>'
+                        f'<circle cx="{x + 15}" cy="{y + 17}" r="4.5" fill="{stroke}"/>'
+                        f'<text x="{x + 27}" y="{y + 21}" class="pf-status" fill="{stroke}">{label}</text>'
+                        f'<text x="{x + 14}" y="{y + 40}" class="pf-title">{line_one}</text>'
+                        f'<text x="{x + 14}" y="{y + 55}" class="pf-title">{line_two}</text>'
+                    )
+                    centers.append((x, y, x + node_w, y + node_h))
+            for index in range(len(centers) - 1):
+                x0, y0, x1, y1 = centers[index]
+                nx0, ny0, nx1, ny1 = centers[index + 1]
+                same_row = abs(y0 - ny0) < 1
+                if same_row:
+                    forward = nx0 > x1
+                    start_x, end_x = (x1, nx0) if forward else (x0, nx1)
+                    mid_y = (y0 + y1) / 2
+                    parts.append(
+                        f'<line x1="{start_x}" y1="{mid_y}" x2="{end_x}" y2="{mid_y}" class="pf-edge" marker-end="url(#pf-arrow)"/>'
+                    )
+                else:
+                    cx = (x0 + x1) / 2
+                    parts.append(
+                        f'<line x1="{cx}" y1="{y1}" x2="{cx}" y2="{ny0}" class="pf-edge" marker-end="url(#pf-arrow)"/>'
+                    )
+            return (
+                f'<svg class="pipeline-flow-svg" viewBox="0 0 {width} {height}" role="img" '
+                'aria-label="End-to-end pipeline flow" preserveAspectRatio="xMidYMid meet">'
+                '<defs><marker id="pf-arrow" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">'
+                '<path d="M1,1 L8,4.5 L1,8" fill="none" stroke="#8aa0ae" stroke-width="1.4"/></marker></defs>'
+                + "".join(parts)
+                + "</svg>"
+            )
+
+
+        def render_pipeline_map(feature_rows_for_custom: list[dict] | None = None, *, compact: bool = False) -> None:
+            specs = build_pipeline_node_specs(feature_rows_for_custom)
+            nodes = [pipeline_node(title, status, detail, artifact) for title, status, detail, artifact in specs]
+            flow_svg = build_pipeline_flow_svg(specs)
+            status_counts = {"ok": 0, "watch": 0, "risk": 0, "muted": 0}
+            for node_html in nodes:
+                for status in status_counts:
+                    if f"status-{status}" in node_html:
+                        status_counts[status] += 1
+                        break
+            run_count, run_count_status = pipeline_run_count_status()
+            st.markdown(
+                '<div class="pipeline-map-shell">'
+                '<div class="pipeline-map-header">'
+                '<div>'
+                '<div class="pipeline-map-title">Integrated forecast pipeline map</div>'
+                '<div class="pipeline-map-subtitle">Green means an artifact-backed lane is active. Amber means advisory or partial evidence. Muted means not enabled for this run. FINN is integrated through the external challenger lane and shared cutoff/actual scoring spine, not by silently mutating forecast.csv.</div>'
+                '</div>'
+                '<div class="pipeline-legend">'
+                '<span class="control-status-pill status-ok">active</span>'
+                '<span class="control-status-pill status-watch">advisory</span>'
+                '<span class="control-status-pill status-risk">issue</span>'
+                '<span class="control-status-pill status-muted">off</span>'
+                '</div>'
+                '</div>'
+                '<div class="control-stat-grid">'
+                + control_stat_card("Active lanes", str(status_counts["ok"]), f"{len(nodes)} pipeline nodes", "ok" if status_counts["ok"] else "muted")
+                + control_stat_card("Advisory lanes", str(status_counts["watch"]), "Partial evidence or compare-only lanes", "watch" if status_counts["watch"] else "muted")
+                + control_stat_card("Run count source", run_count, "Only shown when backed by ledger/refresh/pipeline artifacts", run_count_status)
+                + control_stat_card("Output rows loaded", f"{artifact_row_count:,}", "Cached CSV/JSON rows in this dashboard", "ok" if artifact_row_count else "muted")
+                + '</div>'
+                + f'<div class="pipeline-flow-wrap">{flow_svg}</div>'
+                + '<div class="pipeline-grid">'
+                + "".join(nodes)
+                + '</div>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+            if not compact:
+                st.markdown("#### Integrated model evidence")
+                st.markdown(
+                    '<div class="pipeline-model-note">FINN now sits beside native Nixtla, ensemble, BYO, and custom challenger evidence in one governance layer. Comparable status requires cutoff scoring (`external_model_metrics.csv`); compare-only FINN artifacts stay amber and directional.</div>',
+                    unsafe_allow_html=True,
+                )
+                render_dataframe(build_integrated_model_evidence(feature_rows_for_custom), width="stretch", hide_index=True)
 
 
         def operating_loop_cards() -> str:
@@ -4728,6 +5095,129 @@ def build_streamlit_app() -> str:
             .control-status-pill.status-watch { background: #2b2104; border-color: #f2a900; color: #f2a900; }
             .control-status-pill.status-risk { background: #321012; border-color: #ff4b4b; color: #ff6b6b; }
             .control-status-pill.status-muted { background: #252f36; border-color: #697782; color: #b1bcc5; }
+            .pipeline-map-shell {
+                background: #071014;
+                border: 1px solid #26323b;
+                margin: 0.55rem 0 1rem 0;
+                padding: 0.72rem;
+            }
+            .pipeline-map-header {
+                align-items: flex-start;
+                display: flex;
+                flex-wrap: wrap;
+                gap: 0.7rem;
+                justify-content: space-between;
+                margin-bottom: 0.7rem;
+            }
+            .pipeline-map-title {
+                color: #eef4f7;
+                font-family: var(--font-condensed);
+                font-size: 1rem;
+                font-weight: 850;
+                letter-spacing: 0.01em;
+                text-transform: uppercase;
+            }
+            .pipeline-map-subtitle {
+                color: #aeb9c2;
+                font-size: 0.76rem;
+                line-height: 1.35;
+                margin-top: 0.2rem;
+                max-width: 48rem;
+            }
+            .pipeline-legend {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 0.35rem;
+                justify-content: flex-end;
+            }
+            .pipeline-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+                gap: 1px;
+                background: #26323b;
+                border: 1px solid #26323b;
+            }
+            .pipeline-flow-wrap {
+                background: #0b1318;
+                border: 1px solid #26323b;
+                margin-top: 0.7rem;
+                padding: 0.7rem 0.8rem;
+            }
+            .pipeline-flow-svg { display: block; width: 100%; height: auto; }
+            .pipeline-flow-svg .pf-title {
+                fill: #e6edf3;
+                font-family: var(--font-data);
+                font-size: 13px;
+                font-weight: 700;
+            }
+            .pipeline-flow-svg .pf-status {
+                font-family: var(--font-data);
+                font-size: 10.5px;
+                font-weight: 700;
+                letter-spacing: 0.06em;
+                text-transform: uppercase;
+            }
+            .pipeline-flow-svg .pf-edge { stroke: #8aa0ae; stroke-width: 1.4; }
+            .pipeline-node {
+                background: #0f181e;
+                border-left: 4px solid #697782;
+                min-height: 9.1rem;
+                padding: 0.58rem 0.62rem;
+                position: relative;
+            }
+            .pipeline-node.status-ok { border-left-color: #1fda83; }
+            .pipeline-node.status-watch { border-left-color: #f2a900; }
+            .pipeline-node.status-risk { border-left-color: #ff4b4b; }
+            .pipeline-node.status-muted { border-left-color: #697782; }
+            .pipeline-node::after {
+                color: #697782;
+                content: ">";
+                font-family: var(--font-data);
+                font-size: 1.25rem;
+                font-weight: 900;
+                position: absolute;
+                right: 0.42rem;
+                top: 0.52rem;
+            }
+            .pipeline-node:last-child::after { content: ""; }
+            .pipeline-node-top {
+                align-items: flex-start;
+                display: flex;
+                gap: 0.55rem;
+                justify-content: space-between;
+            }
+            .pipeline-node-title {
+                color: #eef4f7;
+                font-size: 0.86rem;
+                font-weight: 850;
+                line-height: 1.15;
+                max-width: 12rem;
+            }
+            .pipeline-node-detail {
+                color: #aeb9c2;
+                font-size: 0.74rem;
+                line-height: 1.34;
+                margin-top: 0.5rem;
+            }
+            .pipeline-node-artifact {
+                border-top: 1px solid #26323b;
+                color: #80909c;
+                font-family: var(--font-data);
+                font-size: 0.66rem;
+                line-height: 1.25;
+                margin-top: 0.55rem;
+                padding-top: 0.42rem;
+                word-break: break-word;
+            }
+            .pipeline-model-note {
+                background: #0b1419;
+                border: 1px solid #26323b;
+                color: #aeb9c2;
+                font-size: 0.78rem;
+                line-height: 1.38;
+                margin: 0.65rem 0 0.9rem 0;
+                padding: 0.62rem 0.72rem;
+            }
             .control-command {
                 background: #071014;
                 border: 1px solid #26323b;
@@ -4744,6 +5234,8 @@ def build_streamlit_app() -> str:
             @media (max-width: 900px) {
                 .control-hero-inner { grid-template-columns: 1fr; }
                 .control-stat-grid { grid-template-columns: 1fr; }
+                .pipeline-map-header { display: block; }
+                .pipeline-legend { justify-content: flex-start; margin-top: 0.55rem; }
                 .forecast-console-body { grid-template-columns: 1fr; }
                 .forecast-console-metrics { grid-template-columns: repeat(2, minmax(90px, 1fr)); }
             }
@@ -4848,6 +5340,7 @@ def build_streamlit_app() -> str:
         manifest = read_json("manifest.json")
         diagnostics = read_json("diagnostics.json")
         control_pane_state = read_json("control_pane_state.json")
+        source_pipeline_manifest = read_json("source_pipeline_manifest.json")
         training_progress = pd.DataFrame(read_jsonl("training_progress.jsonl"))
         refresh_manifest = read_json("refresh_manifest.json")
         refresh_delta = prep_dates(read_csv("refresh_delta.csv"))
@@ -4902,6 +5395,17 @@ def build_streamlit_app() -> str:
         byo_external_backtest = prep_dates(read_csv("external_backtest_long.csv"))
         byo_model_scores = read_csv("byo_model_score_summary.csv")
         byo_model_manifest = read_json("byo_model_manifest.json")
+        finn_forecasts = prep_dates(read_scoped_csv("finn", "finn_forecasts.csv"))
+        finn_forecast_comparison = prep_dates(read_scoped_csv("finn", "forecast_comparison.csv"))
+        finn_comparison_summary = read_scoped_csv("finn", "forecast_comparison_summary.csv")
+        finn_external_backtest = prep_dates(read_scoped_csv("finn", "external_backtest_long.csv"))
+        finn_model_metrics = read_scoped_csv("finn", "external_model_metrics.csv")
+        finn_manifest = read_scoped_json("finn", "finn_manifest.json")
+        finn_scoring_manifest = read_scoped_json("finn", "external_scoring_manifest.json")
+        finn_challenger_status = read_scoped_json("finn", "challenger_status.json")
+        finn_agent_brief = read_scoped_json("finn", "agent_brief.json")
+        challenger_leaderboard = read_csv("challenger_leaderboard.csv")
+        control_state = control_pane_state if isinstance(control_pane_state, dict) else {}
         if any(
             not frame.empty
             for frame in [
@@ -4913,6 +5417,18 @@ def build_streamlit_app() -> str:
             ]
         ) and "BYO / Finance model" not in DASHBOARD_SECTIONS:
             DASHBOARD_SECTIONS.insert(DASHBOARD_SECTIONS.index("Feeder outputs"), "BYO / Finance model")
+        if any(
+            not frame.empty
+            for frame in [
+                finn_forecasts,
+                finn_forecast_comparison,
+                finn_comparison_summary,
+                finn_external_backtest,
+                finn_model_metrics,
+            ]
+        ) or finn_challenger_status:
+            if "FINN advisory" not in DASHBOARD_SECTIONS:
+                DASHBOARD_SECTIONS.insert(DASHBOARD_SECTIONS.index("Feeder outputs"), "FINN advisory")
         artifact_load_seconds = time.perf_counter() - artifact_load_started
         artifact_row_count = sum(
             len(frame)
@@ -4964,6 +5480,11 @@ def build_streamlit_app() -> str:
                 byo_comparison_summary,
                 byo_external_backtest,
                 byo_model_scores,
+                finn_forecasts,
+                finn_forecast_comparison,
+                finn_comparison_summary,
+                finn_external_backtest,
+                finn_model_metrics,
             ]
         )
 
@@ -5173,6 +5694,11 @@ def build_streamlit_app() -> str:
                         "agent-readable artifact": "byo_model_manifest.json / forecast_comparison.csv",
                     },
                     {
+                        "mechanism": "FINN advisory bridge",
+                        "status": "available" if any(not frame.empty for frame in [finn_forecasts, finn_forecast_comparison, finn_comparison_summary, finn_external_backtest, finn_model_metrics]) else "not present",
+                        "agent-readable artifact": "finn/finn_manifest.json / finn/external_model_metrics.csv",
+                    },
+                    {
                         "mechanism": "Hierarchy coherence",
                         "status": "available" if any(not frame.empty for frame in [hierarchy_reconciliation, hierarchy_rollup, hierarchy_coherence_pre, hierarchy_coherence_post]) else "not present",
                         "agent-readable artifact": "hierarchy_reconciliation.csv / hierarchy_rollup.csv",
@@ -5195,6 +5721,8 @@ def build_streamlit_app() -> str:
                 ]
             if not any(str(row.get("mechanism", "")).lower() == "refresh comparison" for row in feature_rows if isinstance(row, dict)):
                 feature_rows.append(refresh_feature_row)
+            st.markdown("#### End-to-end pipeline map")
+            render_pipeline_map(feature_rows, compact=True)
             actions = [
                 ("1. Review forecast", "Open Forecast review next", "Check the headline, forecast path, and planning eligibility before sharing."),
             ]
@@ -5276,6 +5804,14 @@ def build_streamlit_app() -> str:
                         st.caption(f"{len(run_warnings) - 20} additional warnings omitted from this quick pane; open diagnostics.json for the full list.")
             with st.expander("Current run spec", expanded=False):
                 st.json(spec_payload or {})
+
+        if active_section == "Pipeline map":
+            st.subheader("Pipeline map")
+            st.caption("End-to-end view of source connectors, enabled model lanes, shared evidence, governance, outputs, and agent handoff.")
+            map_feature_rows = control_state.get("feature_map", []) if isinstance(control_state, dict) else []
+            if not isinstance(map_feature_rows, list):
+                map_feature_rows = []
+            render_pipeline_map(map_feature_rows, compact=False)
 
         headline_series = {
             str(row.get("unique_id")): row.get("paragraph")
@@ -6413,6 +6949,219 @@ def build_streamlit_app() -> str:
                 with st.expander("Corrected / normalized actuals preview", expanded=False):
                     render_dataframe(ledger_corrected.head(1000), width="stretch", hide_index=True)
 
+        if active_section == "FINN advisory":
+            st.subheader("FINN advisory bridge")
+            st.caption(
+                "FINN/finnts outputs are optional external challenger forecasts. "
+                "They do not change `forecast.csv` or scaffold champion selection unless a human explicitly promotes or locks a version elsewhere."
+            )
+            if isinstance(finn_challenger_status, dict) and finn_challenger_status:
+                challenger_state = str(finn_challenger_status.get("status", "unknown"))
+                engine_name = str(finn_challenger_status.get("engine", "finn"))
+                if challenger_state == "completed":
+                    st.success(
+                        f"Spec-driven `{engine_name}` challenger ran with this pipeline: "
+                        f"{finn_challenger_status.get('future_rows', 0)} future rows, "
+                        f"{finn_challenger_status.get('backtest_rows', 0)} cutoff-labeled backtest rows "
+                        f"in {finn_challenger_status.get('duration_seconds', '?')}s."
+                    )
+                elif challenger_state in {"skipped", "failed"}:
+                    st.warning(
+                        f"Spec-driven `{engine_name}` challenger {challenger_state}: {finn_challenger_status.get('reason', 'no reason recorded')}. "
+                        f"Remediation: {finn_challenger_status.get('remediation', 'see finn/challenger_status.json')}"
+                    )
+                else:
+                    st.info(f"Spec-driven `{engine_name}` challenger status: {challenger_state}.")
+            if not challenger_leaderboard.empty:
+                st.markdown("#### Unified challenger leaderboard")
+                st.caption(
+                    "Native tournament models and external challenger models scored on the shared rolling-origin spine. "
+                    "`lane` separates governance: champion selection only ever uses native rows; challenger rows are advisory evidence."
+                )
+                leaderboard_view = challenger_leaderboard.copy()
+                if "unique_id" in leaderboard_view.columns and leaderboard_view["unique_id"].astype(str).eq(str(uid)).any():
+                    leaderboard_view = leaderboard_view[leaderboard_view["unique_id"].astype(str).eq(str(uid))]
+                if "lane" in leaderboard_view.columns:
+                    leaderboard_view["lane"] = leaderboard_view["lane"].astype(str).map(
+                        {"native": "🟦 native", "challenger": "🟧 challenger"}
+                    ).fillna(leaderboard_view["lane"])
+                render_dataframe(leaderboard_view, hide_index=True)
+                st.caption("Source: `appendix/challenger_leaderboard.csv` — merged from `audit/backtest_metrics.csv` and challenger `external_model_metrics.csv`.")
+            if isinstance(finn_agent_brief, dict) and finn_agent_brief:
+                with st.expander("Agent brief (finn/agent_brief.json)"):
+                    st.json(finn_agent_brief)
+            finn_available = any(
+                not frame.empty
+                for frame in [
+                    finn_forecasts,
+                    finn_forecast_comparison,
+                    finn_comparison_summary,
+                    finn_external_backtest,
+                    finn_model_metrics,
+                ]
+            )
+            if not finn_available:
+                st.info("No FINN artifacts were found. Run `nixtla-scaffold finn compare --run <run> --input <finn_forecast>` to create `finn` artifacts next to this run.")
+            else:
+                operation = str(finn_manifest.get("operation", "") or "unknown")
+                advisory = bool(finn_manifest.get("advisory_only", True))
+                metadata = finn_manifest.get("metadata", {}) if isinstance(finn_manifest, dict) else {}
+                scoring_manifest = finn_scoring_manifest if isinstance(finn_scoring_manifest, dict) else {}
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("FINN forecast rows", f"{len(finn_forecasts):,}" if not finn_forecasts.empty else "N/A")
+                if not finn_forecasts.empty and "model" in finn_forecasts.columns:
+                    c2.metric("FINN models", int(finn_forecasts["model"].astype(str).nunique()))
+                else:
+                    c2.metric("FINN models", metadata.get("model_count", "N/A") if isinstance(metadata, dict) else "N/A")
+                if not finn_forecast_comparison.empty and "comparison_status" in finn_forecast_comparison.columns:
+                    c3.metric("Aligned compare rows", int(finn_forecast_comparison["comparison_status"].astype(str).eq("aligned").sum()))
+                else:
+                    c3.metric("Aligned compare rows", "N/A")
+                if not finn_external_backtest.empty and "scoring_status" in finn_external_backtest.columns:
+                    c4.metric("Scored rows", int(finn_external_backtest["scoring_status"].astype(str).eq("scored").sum()))
+                else:
+                    c4.metric("Scored rows", "N/A")
+
+                st.info(
+                    f"FINN manifest operation: **{operation}**. Advisory-only: **{advisory}**. "
+                    "Use cutoff scoring before treating FINN as more than directional triangulation."
+                )
+
+                if not finn_forecast_comparison.empty:
+                    compare_view = finn_forecast_comparison.copy()
+                    if "unique_id" in compare_view.columns:
+                        compare_view = compare_view[compare_view["unique_id"].astype(str).eq(str(uid))]
+                    aligned = compare_view[compare_view["comparison_status"].astype(str).eq("aligned")].copy() if "comparison_status" in compare_view.columns else compare_view
+                    if not aligned.empty and {"ds", "scaffold_yhat", "external_yhat"}.issubset(aligned.columns):
+                        fig = go.Figure()
+                        if {"unique_id", "ds", "y"}.issubset(history.columns):
+                            actual_trace = history[history["unique_id"].astype(str).eq(str(uid))].copy()
+                            actual_trace["ds"] = pd.to_datetime(actual_trace["ds"], errors="coerce")
+                            compare_dates = pd.to_datetime(aligned["ds"], errors="coerce").dropna()
+                            if not compare_dates.empty:
+                                actual_trace = actual_trace[actual_trace["ds"].lt(compare_dates.min())]
+                            actual_trace = actual_trace.dropna(subset=["ds", "y"]).sort_values("ds").tail(24)
+                            if not actual_trace.empty:
+                                fig.add_trace(
+                                    go.Scatter(
+                                        x=actual_trace["ds"],
+                                        y=pd.to_numeric(actual_trace["y"], errors="coerce"),
+                                        name="Historical actuals",
+                                        mode="lines+markers",
+                                        line=dict(color=C["hist"], width=2.5),
+                                    )
+                                )
+                        scaffold_trace = aligned[["ds", "scaffold_yhat"]].dropna().drop_duplicates().sort_values("ds")
+                        fig.add_trace(
+                            go.Scatter(
+                                x=scaffold_trace["ds"],
+                                y=pd.to_numeric(scaffold_trace["scaffold_yhat"], errors="coerce"),
+                                name="Scaffold champion",
+                                mode="lines+markers",
+                                line=dict(color=C["champ"], width=3),
+                            )
+                        )
+                        label_cols = [column for column in ["external_model", "external_source_id", "scenario_name"] if column in aligned.columns]
+                        if not label_cols and "model" in aligned.columns:
+                            label_cols = ["model"]
+                        if label_cols:
+                            grouped = aligned.groupby(label_cols, dropna=False, sort=True)
+                        else:
+                            grouped = [("FINN", aligned)]
+                        for label, group in grouped:
+                            label_tuple = label if isinstance(label, tuple) else (label,)
+                            trace_name = " / ".join(str(part) for part in label_tuple if str(part) not in {"", "nan", "None"}) or "FINN"
+                            group = group.sort_values("ds")
+                            fig.add_trace(
+                                go.Scatter(
+                                    x=group["ds"],
+                                    y=pd.to_numeric(group["external_yhat"], errors="coerce"),
+                                    name=trace_name,
+                                    mode="lines+markers",
+                                )
+                            )
+                        fig.update_layout(
+                            title=f"Scaffold vs FINN with recent actuals - {uid}",
+                            xaxis_title="Date",
+                            yaxis_title="Forecast",
+                            hovermode="x unified",
+                            legend_title="Series",
+                        )
+                        render_plotly_chart(fig, width="stretch")
+                    else:
+                        st.info("No aligned FINN comparison rows are available for the selected series.")
+
+                    delta_cols = [
+                        "unique_id",
+                        "ds",
+                        "comparison_status",
+                        "scaffold_model",
+                        "scaffold_yhat",
+                        "external_model",
+                        "external_source_id",
+                        "external_yhat",
+                        "comparison_delta_yhat",
+                        "comparison_delta_pct",
+                        "comparison_evidence_status",
+                    ]
+                    render_dataframe(compare_view[[column for column in delta_cols if column in compare_view.columns]].head(500), width="stretch", hide_index=True)
+
+                if not finn_comparison_summary.empty:
+                    st.markdown("#### FINN comparison summary")
+                    summary = finn_comparison_summary.copy()
+                    if "avg_abs_delta_yhat_vs_scaffold" in summary.columns:
+                        summary["_abs_delta_sort"] = pd.to_numeric(summary["avg_abs_delta_yhat_vs_scaffold"], errors="coerce")
+                        summary = summary.sort_values("_abs_delta_sort", ascending=False).drop(columns=["_abs_delta_sort"])
+                    summary_cols = [
+                        "external_model",
+                        "source_id",
+                        "row_count",
+                        "aligned_rows",
+                        "avg_delta_yhat_vs_scaffold",
+                        "avg_abs_delta_yhat_vs_scaffold",
+                        "avg_pct_delta_vs_scaffold",
+                        "comparison_scope",
+                    ]
+                    render_dataframe(summary[[column for column in summary_cols if column in summary.columns]].head(500), width="stretch", hide_index=True)
+
+                if not finn_model_metrics.empty:
+                    st.markdown("#### FINN cutoff scoring")
+                    score_view = finn_model_metrics.copy()
+                    if "rmse" in score_view.columns:
+                        score_view["_rmse_sort"] = pd.to_numeric(score_view["rmse"], errors="coerce")
+                        score_view = score_view.sort_values("_rmse_sort", ascending=True).drop(columns=["_rmse_sort"])
+                    score_cols = [
+                        "unique_id",
+                        "model",
+                        "source_id",
+                        "observations",
+                        "cutoff_count",
+                        "min_horizon_step",
+                        "max_horizon_step",
+                        "rmse",
+                        "mae",
+                        "wape",
+                        "bias",
+                        "start",
+                        "end",
+                    ]
+                    render_dataframe(score_view[[column for column in score_cols if column in score_view.columns]].head(500), width="stretch", hide_index=True)
+                elif not finn_external_backtest.empty:
+                    st.info("FINN row-level cutoff scoring exists, but no grouped model metrics were found. Open `finn/external_backtest_long.csv` for diagnostics.")
+                else:
+                    st.warning("FINN comparison is directional only until `finn score` writes `finn/external_model_metrics.csv`.")
+
+                with st.expander("FINN manifests and agent handoff", expanded=False):
+                    st.caption(
+                        "Agents should read these receipts first, then quote the scaffold headline separately. "
+                        "FINN score evidence is only apples-to-apples when cutoff-labeled rows join to the same actuals and metric contract."
+                    )
+                    if finn_manifest:
+                        st.json(finn_manifest)
+                    if scoring_manifest:
+                        st.markdown("##### External scoring manifest")
+                        st.json(scoring_manifest)
+
         if active_section == "BYO / Finance model":
             st.subheader("BYO / Finance model")
             st.caption(
@@ -6610,6 +7359,7 @@ def build_streamlit_app() -> str:
                 - `appendix/trust_summary.csv`: High/Medium/Low per-series readiness with caveats and next actions.
                 - `scenario_assumptions.csv`, `scenario_forecast.csv`: event/scenario overlay assumptions and baseline-versus-scenario forecast rows.
                 - `known_future_regressors.csv`, `driver_availability_audit.csv`, `driver_model_features.csv`, `driver_model_cv_delta.csv`, `driver_experiment_summary.csv`: declared known-future driver contracts, leakage/future-availability audit, opt-in MLForecast feature gate, CV evidence, and next-step summary.
+                - `finn/finn_manifest.json`, `finn/finn_forecasts.csv`, `finn/forecast_comparison.csv`, `finn/external_model_metrics.csv`: optional FINN/finnts advisory bridge outputs. FINN is review/scoring evidence only unless a human explicitly promotes or locks a version.
                 - `audit/target_transform_audit.csv`: raw, adjusted, transformed, and modeled target trail for finance normalization/log transforms.
                 - `audit/seasonality_diagnostics.csv`, `audit/seasonality_decomposition.csv`: cycle counts, credibility labels, and additive decomposition evidence.
                 - `appendix/model_explainability.csv`: MLForecast/sklearn/LightGBM lag and date feature importance or coefficient magnitude when ML models run.

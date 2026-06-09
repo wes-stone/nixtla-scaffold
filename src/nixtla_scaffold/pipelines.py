@@ -299,6 +299,11 @@ def _write_forecast_run(
     spec = _refresh_spec(previous_run) if previous_run is not None else _forecast_spec_from_config(forecast_config)
     run = run_forecast(canonical_path, spec)
     run_output = run.to_directory(forecast_dir)
+    challenger_payload = None
+    if any(challenger.enabled for challenger in spec.challengers):
+        from nixtla_scaffold.challengers import run_challengers
+
+        challenger_payload = run_challengers(run_output, challengers=spec.challengers)
     refresh_result = None
     if previous_run is not None:
         refresh_result = write_refresh_artifacts(previous_run, run_output)
@@ -308,6 +313,7 @@ def _write_forecast_run(
         "forecast_output": str(run_output),
         "spec": spec.to_dict(),
         "refresh": refresh_result or {},
+        "challengers": challenger_payload or {},
     }
     manifest["outputs"]["forecast_run"] = str(run_output)
     return manifest["forecast"]

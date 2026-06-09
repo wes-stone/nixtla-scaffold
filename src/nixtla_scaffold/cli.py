@@ -9,12 +9,14 @@ from typing import Any
 
 from nixtla_scaffold.byo_model import write_byo_model_comparison, write_byo_model_ingest, write_byo_model_scores
 from nixtla_scaffold.comparisons import write_forecast_comparison
+from nixtla_scaffold.challengers import run_challengers
 from nixtla_scaffold.connectors import ingest_query_result
 from nixtla_scaffold.data import load_forecast_dataset
 from nixtla_scaffold.diagnostics import write_failure_diagnostics
 from nixtla_scaffold.drivers import parse_driver_events, parse_known_future_regressors
-from nixtla_scaffold.experiments import EXPERIMENT_VARIANTS, compare_models, run_experiment
+from nixtla_scaffold.experiments import EXPERIMENT_VARIANTS, compare_models, run_experiment, run_optimizer
 from nixtla_scaffold.external_scoring import write_external_forecast_scores
+from nixtla_scaffold.finn_bridge import canonicalize_finn_forecasts, check_finn_environment, compare_finn_forecasts, run_finn_bridge, score_finn_forecasts
 from nixtla_scaffold.forecast import run_forecast
 from nixtla_scaffold.hierarchy import aggregate_hierarchy_frame, hierarchy_summary
 from nixtla_scaffold.knowledge import format_knowledge, load_agent_skill, search_knowledge
@@ -43,7 +45,7 @@ from nixtla_scaffold.release_gates import OPTIONAL_EXTRAS, format_release_gate_c
 from nixtla_scaffold.reports import write_report_artifacts_from_directory
 from nixtla_scaffold.refresh import write_refresh_artifacts
 from nixtla_scaffold.scenario_lab import run_scenario_lab
-from nixtla_scaffold.schema import CustomModelSpec, ForecastSpec, TransformSpec, forecast_spec_from_dict
+from nixtla_scaffold.schema import ChallengerSpec, CleaningSpec, CustomModelSpec, EnsembleSpec, FeatureRecipeSpec, ForecastSpec, ParallelSpec, TransformSpec, forecast_spec_from_dict
 from nixtla_scaffold.setup import (
     DATA_SOURCES,
     INTERVAL_MODES,
@@ -145,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
         default=True,
         help="Include inverse-error weighted ensemble forecasts and audit/model_weights.csv diagnostics",
     )
+    _add_finn_inspired_args(forecast_cmd)
     forecast_cmd.add_argument(
         "--verbose",
         action=argparse.BooleanOptionalAction,
@@ -207,6 +210,7 @@ def main(argv: list[str] | None = None) -> int:
     compare_models_cmd.add_argument("--require-backtest", action=argparse.BooleanOptionalAction, default=False)
     compare_models_cmd.add_argument("--strict-cv-horizon", action=argparse.BooleanOptionalAction, default=False)
     compare_models_cmd.add_argument("--weighted-ensemble", action=argparse.BooleanOptionalAction, default=True)
+    _add_finn_inspired_args(compare_models_cmd)
     compare_models_cmd.add_argument("--verbose", action=argparse.BooleanOptionalAction, default=True)
     compare_models_cmd.add_argument("--event", action="append", default=[])
     compare_models_cmd.add_argument("--event-file", action="append", default=[])
@@ -238,6 +242,7 @@ def main(argv: list[str] | None = None) -> int:
     experiment_cmd.add_argument("--require-backtest", action=argparse.BooleanOptionalAction, default=False)
     experiment_cmd.add_argument("--strict-cv-horizon", action=argparse.BooleanOptionalAction, default=False)
     experiment_cmd.add_argument("--weighted-ensemble", action=argparse.BooleanOptionalAction, default=True)
+    _add_finn_inspired_args(experiment_cmd)
     experiment_cmd.add_argument("--verbose", action=argparse.BooleanOptionalAction, default=True)
     experiment_cmd.add_argument("--event", action="append", default=[])
     experiment_cmd.add_argument("--event-file", action="append", default=[])
@@ -252,6 +257,37 @@ def main(argv: list[str] | None = None) -> int:
     )
     experiment_cmd.add_argument("--max-variants", type=int, default=4, help="Safety cap for requested variants")
     experiment_cmd.add_argument("--output", default="runs/experiment")
+
+    optimize_cmd = sub.add_parser("optimize", help="Run one bounded deterministic optimizer pass over forecast variants")
+    _add_input_args(optimize_cmd)
+    optimize_cmd.add_argument("--preset", choices=PRESET_NAMES, default=None)
+    optimize_cmd.add_argument("--horizon", type=int, default=12)
+    optimize_cmd.add_argument("--freq", default=None)
+    optimize_cmd.add_argument("--season-length", type=int, default=None)
+    optimize_cmd.add_argument("--levels", nargs="+", type=int, default=[80, 95])
+    optimize_cmd.add_argument("--unit-label", default=None)
+    optimize_cmd.add_argument("--fill-method", choices=["ffill", "zero", "interpolate", "drop"], default="ffill")
+    optimize_cmd.add_argument("--model-policy", choices=MODEL_POLICY_CHOICES, default="light", help=MODEL_POLICY_HELP)
+    _add_model_allowlist_args(optimize_cmd)
+    optimize_cmd.add_argument("--target-transform", choices=["none", "log", "log1p"], default="none")
+    optimize_cmd.add_argument("--normalization-factor-col", default=None)
+    optimize_cmd.add_argument("--normalization-label", default="")
+    optimize_cmd.add_argument("--hierarchy-reconciliation", choices=["none", "bottom_up", "top_down", "both", "mint_ols", "mint_wls_struct"], default="none")
+    optimize_cmd.add_argument("--train-known-future-regressors", action=argparse.BooleanOptionalAction, default=False)
+    optimize_cmd.add_argument("--mlforecast-feature-policy", choices=["basic", "rolling"], default="basic")
+    optimize_cmd.add_argument("--require-backtest", action=argparse.BooleanOptionalAction, default=False)
+    optimize_cmd.add_argument("--strict-cv-horizon", action=argparse.BooleanOptionalAction, default=False)
+    optimize_cmd.add_argument("--weighted-ensemble", action=argparse.BooleanOptionalAction, default=True)
+    _add_finn_inspired_args(optimize_cmd)
+    optimize_cmd.add_argument("--verbose", action=argparse.BooleanOptionalAction, default=True)
+    optimize_cmd.add_argument("--event", action="append", default=[])
+    optimize_cmd.add_argument("--event-file", action="append", default=[])
+    optimize_cmd.add_argument("--regressor", action="append", default=[])
+    optimize_cmd.add_argument("--regressor-file", action="append", default=[])
+    optimize_cmd.add_argument("--variants", nargs="+", choices=sorted((*EXPERIMENT_VARIANTS, "all")), default=None)
+    optimize_cmd.add_argument("--max-variants", type=int, default=4)
+    optimize_cmd.add_argument("--max-iterations", type=int, default=1)
+    optimize_cmd.add_argument("--output", default="runs/optimizer")
 
     refresh_cmd = sub.add_parser("refresh", help="Refresh a forecast by reusing a previous run's persisted setup")
     refresh_cmd.add_argument("--previous-run", required=True, help="Prior run directory with manifest.json")
@@ -277,6 +313,7 @@ def main(argv: list[str] | None = None) -> int:
     refresh_cmd.add_argument("--require-backtest", action=argparse.BooleanOptionalAction, default=None)
     refresh_cmd.add_argument("--strict-cv-horizon", action=argparse.BooleanOptionalAction, default=None)
     refresh_cmd.add_argument("--weighted-ensemble", action=argparse.BooleanOptionalAction, default=None)
+    _add_finn_inspired_args(refresh_cmd)
     refresh_cmd.add_argument("--verbose", action=argparse.BooleanOptionalAction, default=None)
     refresh_cmd.add_argument("--event", action="append", default=[], help="Replacement driver/event scenario JSON; reused from previous run unless any --event/--event-file is provided")
     refresh_cmd.add_argument("--event-file", action="append", default=[], help="Replacement event file; reused from previous run unless any --event/--event-file is provided")
@@ -315,6 +352,7 @@ def main(argv: list[str] | None = None) -> int:
     ingest_cmd.add_argument("--require-backtest", action=argparse.BooleanOptionalAction, default=False, help="Fail if rolling backtest metrics cannot be produced")
     ingest_cmd.add_argument("--strict-cv-horizon", action=argparse.BooleanOptionalAction, default=False, help="Require CV folds to match --horizon when forecasting after ingest")
     ingest_cmd.add_argument("--weighted-ensemble", action=argparse.BooleanOptionalAction, default=True)
+    _add_finn_inspired_args(ingest_cmd)
     ingest_cmd.add_argument("--verbose", action=argparse.BooleanOptionalAction, default=True)
     ingest_cmd.add_argument("--event", action="append", default=[], help="Driver/event scenario JSON when forecasting after ingest")
     ingest_cmd.add_argument("--event-file", action="append", default=[], help="JSON/YAML/CSV event file when forecasting after ingest")
@@ -407,6 +445,50 @@ def main(argv: list[str] | None = None) -> int:
     byo_score.add_argument("--season-length", type=int, default=1, help="Seasonal period for leakage-safe MASE/RMSSE scales")
     byo_score.add_argument("--horizon", type=int, default=None, help="Optional business horizon to record in scoring metrics")
     byo_score.add_argument("--output", required=True, help="Output folder for BYO scoring artifacts")
+
+    finn_cmd = sub.add_parser("finn", help="Optional FINN/finnts bridge for advisory external forecasts")
+    finn_sub = finn_cmd.add_subparsers(dest="finn_command", required=True)
+    finn_check = finn_sub.add_parser("check", help="Check Rscript and the finnts R package")
+    finn_check.add_argument("--rscript", default="Rscript")
+
+    finn_run = finn_sub.add_parser("run", help="Run a user-supplied FINN R runner or write a runner template")
+    finn_run.add_argument("--input", required=True, help="Canonical scaffold history input for FINN")
+    finn_run.add_argument("--output", required=True, help="Output folder for FINN bridge artifacts")
+    finn_run.add_argument("--runner", default=None, help="Optional R runner script; omit to write finn_runner_template.R only")
+    finn_run.add_argument("--rscript", default="Rscript")
+    finn_run.add_argument("--raw-output", default="finn_raw_forecast.csv")
+    finn_run.add_argument("--seed", type=int, default=123)
+    finn_run.add_argument("--model-name", default="FINN")
+    finn_run.add_argument("--source-id", default="finn")
+    finn_run.add_argument("--extra-arg", action="append", default=[])
+
+    finn_pipeline = finn_sub.add_parser("pipeline", help="Run spec-driven FINN challenger orchestration against an existing scaffold run")
+    finn_pipeline.add_argument("--run", required=True, help="Scaffold forecast run directory containing manifest.json")
+    finn_pipeline.add_argument("--models", nargs="+", default=None, help="Override FINN models_to_run for this retrofit run")
+    finn_pipeline.add_argument("--back-test-scenarios", type=int, default=None)
+    finn_pipeline.add_argument("--back-test-spacing", type=int, default=None)
+    finn_pipeline.add_argument("--rscript", default="Rscript")
+    finn_pipeline.add_argument("--on-error", choices=["skip", "fail"], default="skip")
+    finn_pipeline.add_argument("--timeout", type=int, default=3600)
+
+    finn_ingest = finn_sub.add_parser("ingest", help="Canonicalize FINN forecast output into scaffold external format")
+    _add_finn_external_args(finn_ingest, require_output=True)
+
+    finn_compare = finn_sub.add_parser("compare", help="Compare a scaffold run to FINN advisory forecasts")
+    finn_compare.add_argument("--run", required=True, help="Scaffold forecast run directory")
+    finn_compare.add_argument("--scaffold-model", default=None)
+    _add_finn_external_args(finn_compare, require_output=False)
+
+    finn_score = finn_sub.add_parser("score", help="Score cutoff-labeled FINN forecasts against actuals")
+    finn_score.add_argument("--run", default=None, help="Optional scaffold run directory; when supplied, default output is <run>\\finn and artifacts are registered for reporting")
+    finn_score.add_argument("--actuals", required=True)
+    finn_score.add_argument("--actuals-sheet", default=None)
+    finn_score.add_argument("--actual-id-col", default="unique_id")
+    finn_score.add_argument("--actual-time-col", default="ds")
+    finn_score.add_argument("--actual-target-col", default="y")
+    finn_score.add_argument("--season-length", type=int, default=1)
+    finn_score.add_argument("--horizon", type=int, default=None)
+    _add_finn_external_args(finn_score, require_output=False)
 
     lab_cmd = sub.add_parser("scenario-lab", help="Run synthetic forecast scenarios and score accuracy/ease/validity")
     lab_cmd.add_argument("--count", type=int, default=100)
@@ -591,11 +673,14 @@ def _run(args: argparse.Namespace) -> int:
         spec = _spec_from_args(args)
         run = run_forecast(args.input, spec, sheet=_coerce_sheet(args.sheet))
         output_dir = run.to_directory(args.output)
+        challenger_summary = _maybe_run_challengers(output_dir)
         ledger_result = _maybe_register_ledger(args, output_dir)
         print(f"Forecast written to {output_dir}")
         policy_line = _model_policy_summary_line(run)
         if policy_line:
             print(policy_line)
+        if challenger_summary:
+            print(challenger_summary)
         if ledger_result:
             print(f"Ledger version registered: {ledger_result['forecast_version_id']}")
         print()
@@ -624,14 +709,32 @@ def _run(args: argparse.Namespace) -> int:
         print("Recommendation: review experiment_recommendation.md")
         return 0
 
+    if args.command == "optimize":
+        spec = _spec_from_args(args)
+        result = run_optimizer(
+            args.input,
+            spec,
+            output_dir=args.output,
+            variants=args.variants,
+            max_iterations=args.max_iterations,
+            max_variants=args.max_variants,
+            sheet=_coerce_sheet(args.sheet),
+        )
+        print(f"Optimizer pass written to {result.output_dir}")
+        print("Next questions: review next_iteration_questions.md")
+        return 0
+
     if args.command == "refresh":
         spec = _refresh_spec_from_args(args)
         run = run_forecast(args.input, spec, sheet=_coerce_sheet(args.sheet))
         output_dir = run.to_directory(args.output)
         refresh_result = write_refresh_artifacts(args.previous_run, output_dir)
+        challenger_summary = _maybe_run_challengers(output_dir)
         ledger_result = _maybe_register_ledger(args, output_dir)
         print(f"Refresh forecast written to {output_dir}")
         print(f"Refresh delta rows: {refresh_result['delta_rows']}")
+        if challenger_summary:
+            print(challenger_summary)
         if ledger_result:
             print(f"Ledger version registered: {ledger_result['forecast_version_id']}")
         print()
@@ -734,6 +837,11 @@ def _run(args: argparse.Namespace) -> int:
     if args.command == "byo-model":
         result = _run_byo_model_command(args)
         print(json.dumps(result.manifest, indent=2, default=str))
+        return 0
+
+    if args.command == "finn":
+        payload = _run_finn_command(args)
+        print(json.dumps(payload, indent=2, default=str))
         return 0
 
     if args.command == "scenario-lab":
@@ -860,6 +968,85 @@ def _run_byo_model_command(args: argparse.Namespace) -> Any:
     raise ValueError(f"unknown byo-model command: {args.byo_command}")
 
 
+def _run_finn_command(args: argparse.Namespace) -> dict[str, Any]:
+    if args.finn_command == "check":
+        return check_finn_environment(rscript=args.rscript).manifest
+    if args.finn_command == "pipeline":
+        manifest = json.loads((Path(args.run) / "manifest.json").read_text(encoding="utf-8"))
+        spec_challengers = forecast_spec_from_dict(manifest.get("spec", {})).challengers
+        finn = next((challenger for challenger in spec_challengers if challenger.engine == "finn"), None)
+        if finn is None:
+            finn = ChallengerSpec(engine="finn")
+        finn = replace(
+            finn,
+            enabled=True,
+            models=tuple(args.models) if args.models else finn.models,
+            back_test_scenarios=args.back_test_scenarios if args.back_test_scenarios is not None else finn.back_test_scenarios,
+            back_test_spacing=args.back_test_spacing if args.back_test_spacing is not None else finn.back_test_spacing,
+            rscript=args.rscript if args.rscript != "Rscript" else finn.rscript,
+            on_error=args.on_error,
+            timeout_seconds=args.timeout,
+        )
+        return run_challengers(args.run, challengers=(finn,))
+    if args.finn_command == "run":
+        result = run_finn_bridge(
+            args.input,
+            args.output,
+            runner=args.runner,
+            rscript=args.rscript,
+            raw_output=args.raw_output,
+            seed=args.seed,
+            model_name=args.model_name,
+            source_id=args.source_id,
+            extra_args=tuple(args.extra_arg or ()),
+        )
+        return result.manifest
+    kwargs = _finn_external_kwargs_from_args(args)
+    if args.finn_command == "ingest":
+        result = canonicalize_finn_forecasts(args.input, output_dir=args.output, sheet=_coerce_sheet(args.sheet), **kwargs)
+        return result.manifest
+    if args.finn_command == "compare":
+        result = compare_finn_forecasts(
+            args.run,
+            args.input,
+            args.output,
+            sheet=_coerce_sheet(args.sheet),
+            scaffold_model=args.scaffold_model,
+            **kwargs,
+        )
+        return result.manifest
+    if args.finn_command == "score":
+        result = score_finn_forecasts(
+            args.input,
+            args.actuals,
+            args.output,
+            run_dir=args.run,
+            actuals_sheet=_coerce_sheet(args.actuals_sheet),
+            actual_id_col=args.actual_id_col,
+            actual_time_col=args.actual_time_col,
+            actual_value_col=args.actual_target_col,
+            season_length=args.season_length,
+            requested_horizon=args.horizon,
+            sheet=_coerce_sheet(args.sheet),
+            **kwargs,
+        )
+        return result.manifest
+    raise ValueError(f"unknown finn command: {args.finn_command}")
+
+
+def _finn_external_kwargs_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "format": args.format,
+        "model_name": args.model_name,
+        "source_id": args.source_id,
+        "id_col": args.id_col,
+        "time_col": args.time_col,
+        "value_col": args.target_col,
+        "model_col": args.model_col,
+        "forecast_origin_col": args.cutoff_col,
+    }
+
+
 def _add_input_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--input", required=True, help="CSV, XLSX, or XLSM file")
     parser.add_argument("--sheet", default=None, help="Excel sheet name/index")
@@ -886,6 +1073,20 @@ def _add_byo_model_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--total-label", default="Total", help="Unique ID label for the derived total rollup")
 
 
+def _add_finn_external_args(parser: argparse.ArgumentParser, *, require_output: bool) -> None:
+    parser.add_argument("--input", required=True, help="FINN forecast output file")
+    parser.add_argument("--output", required=require_output, default=None, help="Output folder for FINN bridge artifacts")
+    parser.add_argument("--sheet", default=None, help="Excel sheet name/index for FINN forecast output")
+    parser.add_argument("--format", choices=["auto", "long", "wide"], default="auto", help="FINN forecast shape")
+    parser.add_argument("--model-name", default="FINN", help="FINN model label when the file lacks a model column")
+    parser.add_argument("--source-id", default="finn", help="External source identifier for FINN outputs")
+    parser.add_argument("--id-col", default="unique_id", help="Series identifier column in FINN output")
+    parser.add_argument("--time-col", default="ds", help="Date column in FINN output")
+    parser.add_argument("--target-col", default="yhat", help="Forecast value column in FINN output")
+    parser.add_argument("--model-col", default="model", help="Model column in FINN output")
+    parser.add_argument("--cutoff-col", default="cutoff", help="Forecast-origin column for historical FINN snapshots")
+
+
 def _add_model_allowlist_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--model",
@@ -902,6 +1103,45 @@ def _add_model_allowlist_args(parser: argparse.ArgumentParser) -> None:
         default=[],
         help='Space-separated favorite model allowlist, e.g. --model-allowlist arima "arima mstl"',
     )
+
+
+def _add_finn_inspired_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--ensemble-policy",
+        action="append",
+        choices=["legacy_weighted", "top_k_average", "family_diverse_average"],
+        default=None,
+        help="Advisory ensemble lab policy to audit; repeat for multiple policies",
+    )
+    parser.add_argument("--ensemble-max-models", type=int, default=None, help="Maximum base models used by advisory ensemble policies")
+    parser.add_argument("--fiscal-year-start", type=int, default=None, help="Fiscal year start month for feature recipe receipts")
+    parser.add_argument("--fourier-period", action="append", type=int, default=None, help="Fourier period for feature recipe receipts; repeat as needed")
+    parser.add_argument("--lag-period", action="append", type=int, default=None, help="Lag period for feature recipe receipts; repeat as needed")
+    parser.add_argument(
+        "--rolling-window-period",
+        action="append",
+        type=int,
+        default=None,
+        help="Rolling-window period for feature recipe receipts; repeat as needed",
+    )
+    parser.add_argument("--feature-recipe", action="append", default=None, help="Named feature recipe to record in run manifests")
+    parser.add_argument("--feature-selection", action=argparse.BooleanOptionalAction, default=None, help="Record whether automated feature selection is intended")
+    parser.add_argument("--pca", action=argparse.BooleanOptionalAction, default=None, help="Record whether PCA is intended for feature recipes")
+    parser.add_argument("--weekly-to-daily", action=argparse.BooleanOptionalAction, default=None, help="Record weekly-to-daily allocation intent")
+    parser.add_argument("--clean-missing-values", action=argparse.BooleanOptionalAction, default=None, help="Record missing-value cleaning policy intent")
+    parser.add_argument("--clean-outliers", action=argparse.BooleanOptionalAction, default=None, help="Record outlier cleaning policy intent")
+    parser.add_argument("--negative-forecast", action=argparse.BooleanOptionalAction, default=None, help="Allow negative forecasts when the metric can go below zero")
+    parser.add_argument("--combo-cleanup-date", default=None, help="Optional combo cleanup cutoff date to record in cleaning policy receipts")
+    parser.add_argument("--parallel-processing", choices=["none", "local_machine", "spark"], default=None, help="Execution intent metadata only; no cloud orchestration is started")
+    parser.add_argument("--inner-parallel", action=argparse.BooleanOptionalAction, default=None, help="Record FINN-style inner parallelism intent")
+    parser.add_argument("--num-cores", type=int, default=None, help="Requested local worker count metadata")
+    parser.add_argument("--finn", action=argparse.BooleanOptionalAction, default=False, help="Run FINN/finnts as a spec-driven advisory challenger after the canonical forecast")
+    parser.add_argument("--finn-models", nargs="+", default=None, help="FINN models_to_run, e.g. --finn-models ets snaive arima")
+    parser.add_argument("--finn-back-test-scenarios", type=int, default=None, help="FINN back_test_scenarios override")
+    parser.add_argument("--finn-back-test-spacing", type=int, default=None, help="FINN back_test_spacing override")
+    parser.add_argument("--finn-rscript", default="Rscript", help="Rscript executable for the FINN challenger; auto-discovers Windows installs")
+    parser.add_argument("--finn-on-error", choices=["skip", "fail"], default="skip", help="skip records a soft-fail status; fail stops the pipeline")
+    parser.add_argument("--finn-timeout", type=int, default=3600, help="FINN challenger timeout in seconds")
 
 
 def _add_ledger_registration_args(parser: argparse.ArgumentParser) -> None:
@@ -992,6 +1232,26 @@ def _run_ledger(args: argparse.Namespace) -> dict[str, Any]:
     if args.ledger_command == "export":
         return export_ledger(args.ledger, output=args.output).to_dict()
     raise ValueError(f"unknown ledger command: {args.ledger_command}")
+
+
+def _maybe_run_challengers(run_dir: str | Path) -> str:
+    """Run spec-declared challengers against a finished run; soft-fail lanes never break the pipeline."""
+
+    manifest_path = Path(run_dir) / "manifest.json"
+    if not manifest_path.exists():
+        return ""
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    challengers = forecast_spec_from_dict(manifest.get("spec", {})).challengers
+    if not any(challenger.enabled for challenger in challengers):
+        return ""
+    payload = run_challengers(run_dir, challengers=challengers)
+    parts = []
+    for status in payload["challengers"]:
+        label = f"{status['engine']}={status['status']}"
+        if status["status"] != "completed" and status.get("reason"):
+            label += f" ({status['reason']})"
+        parts.append(label)
+    return f"Challengers: {'; '.join(parts)} (advisory only; see challenger_status.json)"
 
 
 def _maybe_register_ledger(
@@ -1165,6 +1425,58 @@ def _spec_from_args(args: argparse.Namespace) -> ForecastSpec:
         base.mlforecast_feature_policy,
         provided_flags,
     )
+    feature_recipe = FeatureRecipeSpec(
+        fiscal_year_start=_scalar_arg_or_preset(args, "fiscal_year_start", "--fiscal-year-start", base.feature_recipe.fiscal_year_start, provided_flags),
+        fourier_periods=_list_arg_or_preset(args, "fourier_period", "--fourier-period", base.feature_recipe.fourier_periods, provided_flags),
+        lag_periods=_list_arg_or_preset(args, "lag_period", "--lag-period", base.feature_recipe.lag_periods, provided_flags),
+        rolling_window_periods=_list_arg_or_preset(
+            args,
+            "rolling_window_period",
+            "--rolling-window-period",
+            base.feature_recipe.rolling_window_periods,
+            provided_flags,
+        ),
+        recipes_to_run=_list_arg_or_preset(args, "feature_recipe", "--feature-recipe", base.feature_recipe.recipes_to_run, provided_flags),
+        pca=_scalar_arg_or_preset(args, "pca", "--pca", base.feature_recipe.pca, provided_flags),
+        feature_selection=_scalar_arg_or_preset(args, "feature_selection", "--feature-selection", base.feature_recipe.feature_selection, provided_flags),
+        weekly_to_daily=_scalar_arg_or_preset(args, "weekly_to_daily", "--weekly-to-daily", base.feature_recipe.weekly_to_daily, provided_flags),
+    )
+    cleaning = CleaningSpec(
+        clean_missing_values=_scalar_arg_or_preset(
+            args,
+            "clean_missing_values",
+            "--clean-missing-values",
+            base.cleaning.clean_missing_values,
+            provided_flags,
+        ),
+        clean_outliers=_scalar_arg_or_preset(args, "clean_outliers", "--clean-outliers", base.cleaning.clean_outliers, provided_flags),
+        negative_forecast=_scalar_arg_or_preset(args, "negative_forecast", "--negative-forecast", base.cleaning.negative_forecast, provided_flags),
+        combo_cleanup_date=_scalar_arg_or_preset(args, "combo_cleanup_date", "--combo-cleanup-date", base.cleaning.combo_cleanup_date, provided_flags),
+    )
+    ensemble = EnsembleSpec(
+        policies=_list_arg_or_preset(args, "ensemble_policy", "--ensemble-policy", base.ensemble.policies, provided_flags),
+        max_models=_scalar_arg_or_preset(args, "ensemble_max_models", "--ensemble-max-models", base.ensemble.max_models, provided_flags),
+        scoring=base.ensemble.scoring,
+        deployment=base.ensemble.deployment,
+    )
+    parallel = ParallelSpec(
+        processing=_scalar_arg_or_preset(args, "parallel_processing", "--parallel-processing", base.parallel.processing, provided_flags),
+        inner_parallel=_scalar_arg_or_preset(args, "inner_parallel", "--inner-parallel", base.parallel.inner_parallel, provided_flags),
+        num_cores=_scalar_arg_or_preset(args, "num_cores", "--num-cores", base.parallel.num_cores, provided_flags),
+    )
+    challengers = base.challengers
+    if getattr(args, "finn", False):
+        finn_challenger = ChallengerSpec(
+            engine="finn",
+            enabled=True,
+            on_error=getattr(args, "finn_on_error", "skip"),
+            models=tuple(getattr(args, "finn_models", None) or ()),
+            back_test_scenarios=getattr(args, "finn_back_test_scenarios", None),
+            back_test_spacing=getattr(args, "finn_back_test_spacing", None),
+            rscript=getattr(args, "finn_rscript", "Rscript"),
+            timeout_seconds=getattr(args, "finn_timeout", 3600),
+        )
+        challengers = tuple(challenger for challenger in challengers if challenger.engine != "finn") + (finn_challenger,)
     return ForecastSpec(
         horizon=horizon,
         freq=freq,
@@ -1185,6 +1497,11 @@ def _spec_from_args(args: argparse.Namespace) -> ForecastSpec:
             normalization_factor_col=getattr(args, "normalization_factor_col", None),
             normalization_label=getattr(args, "normalization_label", ""),
         ),
+        feature_recipe=feature_recipe,
+        cleaning=cleaning,
+        ensemble=ensemble,
+        parallel=parallel,
+        challengers=challengers,
         hierarchy_reconciliation=hierarchy_reconciliation,
         train_known_future_regressors=train_known_future_regressors,
         mlforecast_feature_policy=mlforecast_feature_policy,
@@ -1216,6 +1533,33 @@ def _refresh_spec_from_args(args: argparse.Namespace) -> ForecastSpec:
         normalization_factor_col=_override(base.transform.normalization_factor_col, args, "normalization_factor_col"),
         normalization_label=_override(base.transform.normalization_label, args, "normalization_label"),
     )
+    feature_recipe = FeatureRecipeSpec(
+        fiscal_year_start=_override(base.feature_recipe.fiscal_year_start, args, "fiscal_year_start"),
+        fourier_periods=_override_tuple(base.feature_recipe.fourier_periods, args, "fourier_period"),
+        lag_periods=_override_tuple(base.feature_recipe.lag_periods, args, "lag_period"),
+        rolling_window_periods=_override_tuple(base.feature_recipe.rolling_window_periods, args, "rolling_window_period"),
+        recipes_to_run=_override_tuple(base.feature_recipe.recipes_to_run, args, "feature_recipe"),
+        pca=_override(base.feature_recipe.pca, args, "pca"),
+        feature_selection=_override(base.feature_recipe.feature_selection, args, "feature_selection"),
+        weekly_to_daily=_override(base.feature_recipe.weekly_to_daily, args, "weekly_to_daily"),
+    )
+    cleaning = CleaningSpec(
+        clean_missing_values=_override(base.cleaning.clean_missing_values, args, "clean_missing_values"),
+        clean_outliers=_override(base.cleaning.clean_outliers, args, "clean_outliers"),
+        negative_forecast=_override(base.cleaning.negative_forecast, args, "negative_forecast"),
+        combo_cleanup_date=_override(base.cleaning.combo_cleanup_date, args, "combo_cleanup_date"),
+    )
+    ensemble = EnsembleSpec(
+        policies=_override_tuple(base.ensemble.policies, args, "ensemble_policy"),
+        max_models=_override(base.ensemble.max_models, args, "ensemble_max_models"),
+        scoring=base.ensemble.scoring,
+        deployment=base.ensemble.deployment,
+    )
+    parallel = ParallelSpec(
+        processing=_override(base.parallel.processing, args, "parallel_processing"),
+        inner_parallel=_override(base.parallel.inner_parallel, args, "inner_parallel"),
+        num_cores=_override(base.parallel.num_cores, args, "num_cores"),
+    )
     return replace(
         base,
         horizon=_override(base.horizon, args, "horizon"),
@@ -1232,6 +1576,10 @@ def _refresh_spec_from_args(args: argparse.Namespace) -> ForecastSpec:
         events=events,
         regressors=regressors,
         transform=transform,
+        feature_recipe=feature_recipe,
+        cleaning=cleaning,
+        ensemble=ensemble,
+        parallel=parallel,
         hierarchy_reconciliation=_override(base.hierarchy_reconciliation, args, "hierarchy_reconciliation"),
         train_known_future_regressors=_override(base.train_known_future_regressors, args, "train_known_future_regressors"),
         mlforecast_feature_policy=_override(base.mlforecast_feature_policy, args, "mlforecast_feature_policy"),
@@ -1245,6 +1593,25 @@ def _refresh_spec_from_args(args: argparse.Namespace) -> ForecastSpec:
 def _override(default: Any, args: argparse.Namespace, attr: str) -> Any:
     value = getattr(args, attr, None)
     return default if value is None else value
+
+
+def _override_tuple(default: tuple[Any, ...], args: argparse.Namespace, attr: str) -> tuple[Any, ...]:
+    value = getattr(args, attr, None)
+    return default if value is None else tuple(value)
+
+
+def _scalar_arg_or_preset(args: argparse.Namespace, attr: str, flag: str, preset_value: Any, provided_flags: set[str]) -> Any:
+    if getattr(args, "preset", None) and not _flag_was_provided(provided_flags, flag):
+        return preset_value
+    value = getattr(args, attr, None)
+    return preset_value if value is None else value
+
+
+def _list_arg_or_preset(args: argparse.Namespace, attr: str, flag: str, preset_value: tuple[Any, ...], provided_flags: set[str]) -> tuple[Any, ...]:
+    if getattr(args, "preset", None) and not _flag_was_provided(provided_flags, flag):
+        return tuple(preset_value)
+    value = getattr(args, attr, None)
+    return tuple(preset_value) if value is None else tuple(value)
 
 
 def _parse_model_allowlist(args: argparse.Namespace) -> tuple[str, ...]:
@@ -1329,4 +1696,3 @@ def _parse_regressors(values: list[str], files: list[str] | None = None):
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

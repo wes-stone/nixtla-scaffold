@@ -2206,6 +2206,13 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert "forecast_model" in streamlit_app
     assert "forecast_wide_summary.csv" in streamlit_app
     assert '"Control Pane"' in streamlit_app
+    assert '"Pipeline map"' in streamlit_app
+    assert "Integrated forecast pipeline map" in streamlit_app
+    assert "External challenger lane" in streamlit_app
+    assert "Shared evidence spine" in streamlit_app
+    assert "Run count source" in streamlit_app
+    assert "Historical actuals" in streamlit_app
+    assert "Scaffold vs FINN with recent actuals" in streamlit_app
     assert "Reads the saved run artifacts" in streamlit_app
     assert "Artifact availability" in streamlit_app
     assert "Smooth ADAM family" in streamlit_app
@@ -2822,4 +2829,3 @@ def test_xls_input_is_rejected_with_clear_error(tmp_path) -> None:
     exit_code = main(["profile", "--input", str(input_path)])
 
     assert exit_code == 2
-
