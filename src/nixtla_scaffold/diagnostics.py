@@ -147,6 +147,8 @@ def build_run_diagnostics(run: Any) -> dict[str, Any]:
             "Open appendix/feature_selection_receipts.csv for descriptive MLForecast feature evidence; it does not auto-prune features or override backtest selection.",
             "Open appendix/series_features.csv for cheap forecastability signals and the next recommended experiment step per series; this artifact is advisory only.",
             "Open appendix/borrowed_strength_advisor.csv for advisory sparse-series guidance: parent anchoring, reference-class review, panel-pool review, or independent treatment. It never changes champion selection or forecast.csv.",
+            "Open finn/challenger_status.json and finn/agent_brief.json first when the FINN challenger lane ran (forecast --finn or finn pipeline); status records completed/skipped/failed with remediation hints. Then open appendix/challenger_leaderboard.csv for the unified native-vs-challenger ranking (comparable=True rows are cutoff-scored).",
+            "Open finn/finn_manifest.json, finn/forecast_comparison.csv, and finn/external_model_metrics.csv when FINN bridge artifacts are attached. FINN is advisory unless cutoff-labeled rows are scored against the same actuals and metric contract.",
             "Check profile.json for inferred frequency, season length, short histories, and repaired gaps.",
             "Check appendix/series_summary.csv and appendix/model_audit.csv before trusting a selected model.",
             "Check appendix/model_win_rates.csv to see which models beat SeasonalNaive/Naive across series.",

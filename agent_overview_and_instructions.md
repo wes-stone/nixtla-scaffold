@@ -19,6 +19,19 @@ The bundled skill at `skills\nixtla-forecast\SKILL.md` is the most complete agen
 nixtla-scaffold guide skill
 ```
 
+This repo also includes a Copilot custom-agent profile at `.github\agents\finn-forecast-analyst.agent.md`. Copilot CLI or a Copilot SDK host can load that profile as a specialized FINN/scaffold analyst agent. Keep it dependency-free: the agent should call the CLI, read manifests, and use MCP/query tools for source discovery rather than importing a Copilot SDK package into `nixtla-scaffold`.
+
+If a Copilot SDK app manages sessions directly, register the same agent as a custom agent with the profile prompt and route forecasting tasks to the CLI:
+
+```typescript
+customAgents: [{
+  name: "finn-forecast-analyst",
+  displayName: "FINN forecast analyst",
+  description: "Reviews scaffold runs, FINN advisory forecasts, ensemble labs, and optimizer receipts.",
+  prompt: "Use the instructions from .github/agents/finn-forecast-analyst.agent.md"
+}]
+```
+
 ## Install and local development
 
 Install from PyPI:
@@ -206,6 +219,20 @@ Score historical forecast snapshots separately after actuals land:
 ```powershell
 nixtla-scaffold score-external --external finance_snapshots.csv --actuals actuals.csv --output runs\finance_scores --season-length 12 --horizon 6
 ```
+
+FINN uses the same external forecast scoring contract:
+
+Direct FINN execution requires R/Rscript plus the `finnts` R package. If `nixtla-scaffold finn check` reports `rscript_available=false`, install R and restart the terminal before attempting `finn run --runner ...`. The no-R bridge path can still generate `finn_runner_template.R` and ingest/compare/score already-produced FINN-shaped CSV files.
+
+```powershell
+nixtla-scaffold finn check
+nixtla-scaffold finn run --input data.csv --output runs\finn_template
+nixtla-scaffold finn ingest --input finn_forecast.csv --output runs\finn_ingest
+nixtla-scaffold finn compare --run runs\latest --input finn_forecast.csv
+nixtla-scaffold finn score --run runs\latest --actuals actuals.csv --input finn_backtest.csv --season-length 12 --horizon 6
+```
+
+When `--output` is omitted, `finn compare` and `finn score --run ...` attach artifacts under `runs\latest\finn` so `streamlit_app.py`, `report.html`, `manifest.json`, and `llm_context.json` can discover them. `finn compare` writes directional triangulation artifacts; `finn score` writes `external_backtest_long.csv`, `external_model_metrics.csv`, and `external_scoring_manifest.json` when cutoff-labeled FINN snapshots can be joined to actuals. Agents should treat `finn\external_model_metrics.csv` as the apples-to-apples evidence table and keep FINN advisory unless a human explicitly promotes or locks a version.
 
 Use `byo-model` when the source is a finance-owned Excel/Python model with Base/Bull/Bear, rollups, customer/SKU detail, purchase logic, renewals, or PxQ calculations:
 

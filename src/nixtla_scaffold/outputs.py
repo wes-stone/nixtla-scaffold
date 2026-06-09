@@ -18,6 +18,7 @@ from nixtla_scaffold.drivers import (
     build_scenario_assumptions_frame,
     build_scenario_forecast_frame,
 )
+from nixtla_scaffold.ensemble import build_ensemble_lab_artifacts
 from nixtla_scaffold.hierarchy import hierarchy_coherence, reconcile_hierarchy_forecast
 from nixtla_scaffold.interpretation import (
     backtest_windows_frame,
@@ -141,6 +142,12 @@ def write_run(run: ForecastRun, output_dir: str | Path) -> Path:
     build_model_tradeoff_scores(run).to_csv(appendix / "model_tradeoff_scores.csv", index=False)
     build_model_pareto_frontier(run).to_csv(appendix / "model_pareto_frontier.csv", index=False)
     build_feature_selection_receipts(run).to_csv(appendix / "feature_selection_receipts.csv", index=False)
+    ensemble_artifacts = build_ensemble_lab_artifacts(run)
+    ensemble_artifacts["ensemble_policy_receipts"].to_csv(appendix / "ensemble_policy_receipts.csv", index=False)
+    if run.spec.ensemble.advisory_policies:
+        ensemble_artifacts["ensemble_backtest"].to_csv(appendix / "ensemble_backtest.csv", index=False)
+        ensemble_artifacts["ensemble_selection"].to_csv(appendix / "ensemble_selection.csv", index=False)
+        ensemble_artifacts["ensemble_forecast"].to_csv(appendix / "ensemble_forecast.csv", index=False)
     build_model_window_metrics(run).to_csv(appendix / "model_window_metrics.csv", index=False)
     build_residual_diagnostics(run).to_csv(appendix / "residual_diagnostics.csv", index=False)
     build_residual_test_summary(run).to_csv(appendix / "residual_tests.csv", index=False)
@@ -251,6 +258,11 @@ def build_control_pane_state(
             "mechanism": "BYO Excel comparison",
             "status": "not present",
             "artifact": "byo_model_manifest.json / forecast_comparison.csv",
+        },
+        {
+            "mechanism": "FINN advisory bridge",
+            "status": "not present",
+            "artifact": "finn/finn_manifest.json / finn/external_model_metrics.csv",
         },
         {
             "mechanism": "Hierarchy coherence",
@@ -429,6 +441,12 @@ def write_workbook(run: ForecastRun, output_path: str | Path) -> Path:
         build_model_win_rates(run).to_excel(writer, sheet_name="Model Win Rates", index=False)
         build_model_tradeoff_scores(run).to_excel(writer, sheet_name="Model Tradeoffs", index=False)
         build_model_pareto_frontier(run).to_excel(writer, sheet_name="Pareto Frontier", index=False)
+        ensemble_artifacts = build_ensemble_lab_artifacts(run)
+        ensemble_artifacts["ensemble_policy_receipts"].to_excel(writer, sheet_name="Ensemble Receipts", index=False)
+        if not ensemble_artifacts["ensemble_selection"].empty:
+            ensemble_artifacts["ensemble_selection"].to_excel(writer, sheet_name="Ensemble Selection", index=False)
+        if not ensemble_artifacts["ensemble_forecast"].empty:
+            ensemble_artifacts["ensemble_forecast"].to_excel(writer, sheet_name="Ensemble Forecast", index=False)
         feature_receipts = build_feature_selection_receipts(run)
         if not feature_receipts.empty:
             feature_receipts.to_excel(writer, sheet_name="Feature Receipts", index=False)
@@ -4301,4 +4319,3 @@ def _is_missing(value: Any) -> bool:
         return bool(pd.isna(value))
     except (TypeError, ValueError):
         return value is None
-

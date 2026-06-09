@@ -183,3 +183,7 @@ def test_ledger_cli_registers_forecast_and_official_lock(tmp_path) -> None:
     app.session_state["active_workbench_section"] = "Ledger view"
     app.run()
     assert not app.exception
+    pipeline_app = AppTest.from_file(str(output_dir / "streamlit_app.py"), default_timeout=120)
+    pipeline_app.session_state["active_workbench_section"] = "Pipeline map"
+    pipeline_app.run()
+    assert not pipeline_app.exception

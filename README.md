@@ -13,12 +13,13 @@ Simple, explainable Nixtla forecasting scaffolding for finance users and AI agen
 | Feature | Why it matters |
 | --- | --- |
 | **Fast forecast runs** | Start from a CSV or workbook with `unique_id`, `ds`, and `y`; single-series files can omit `unique_id`. |
-| **Model tournament** | Runs simple baselines plus StatsForecast candidates by default, with optional MLForecast, smooth ADAM, hierarchy, custom challengers, and BYO finance models. |
+| **Model tournament** | Runs simple baselines plus StatsForecast candidates by default, with optional MLForecast, smooth ADAM, hierarchy, custom challengers, BYO finance models, and advisory ensemble labs. |
 | **Trust-first outputs** | Shows model evidence, interval status, horizon validation, caveats, and next actions instead of pretending every forecast is planning-ready. |
 | **Finance-friendly review** | Writes a clean HTML landing page, Excel workbook, selected forecast CSV, model card, diagnostics, and Streamlit app. |
 | **Exploration and experiments** | Use MCP/query sources to find candidate drivers, then test events, known-future regressors, target transforms, scenarios, and normalization factors. |
 | **Hierarchy and reconciliation** | Forecast parent/child rollups, reconcile coherent totals, and surface gaps before planning use. |
 | **Forecast operating loop** | Track versions, landed actuals, drift, and forecast trends over time in the ledger view. |
+| **Optional FINN bridge** | Canonicalize, compare, and score FINN/finnts R outputs as advisory external forecasts without making R a default dependency. |
 | **Agent handoff** | Produces `llm_context.json` for each run and ships a forecasting skill for AI agents. |
 
 ## Workbench views
@@ -110,6 +111,69 @@ nixtla-scaffold forecast --input plan.xlsx --sheet Data --id-col Product --time-
 | `streamlit_app.py` | Interactive local dashboard. |
 | `llm_context.json` | Single-file handoff packet for an LLM or agent. |
 | `appendix\hierarchy_rollup.csv` | Parent/child rollup coverage and reconciliation gaps when hierarchy is enabled. |
+| `appendix\ensemble_policy_receipts.csv` | Advisory ensemble policy receipts; extra ensemble artifacts are written when `--ensemble-policy` is requested. |
+| `.github\agents\finn-forecast-analyst.agent.md` | Repo-level Copilot custom-agent profile for FINN/scaffold review workflows. |
+
+## FINN-inspired options
+
+FINN/finnts remains optional. The scaffold stays the canonical Python/Nixtla workbench, while FINN outputs can be imported as advisory external forecasts:
+
+### One-command FINN challenger lane
+
+The preferred integration is the spec-driven challenger lane: add `--finn` to a normal forecast (or a `challengers` block to the spec JSON) and the pipeline runs FINN automatically after the native tournament — env check, spec-generated R runner (no R authoring needed), run, compare, cutoff scoring, and a unified leaderboard:
+
+```powershell
+nixtla-scaffold forecast --input data.csv --horizon 6 --freq ME --season-length 12 `
+  --finn --finn-models ets snaive --finn-back-test-scenarios 4 --output runs\demo
+nixtla-scaffold finn pipeline --run runs\demo --models ets snaive   # retrofit an existing run
+```
+
+Spec form (round-trips through manifests, refresh, and pipelines):
+
+```json
+{"challengers": [{"engine": "finn", "enabled": true, "models": ["ets", "snaive"], "back_test_scenarios": 4, "on_error": "skip"}]}
+```
+
+Semantics:
+
+- **Soft-fail by default** (`on_error: "skip"`): if R/finnts is missing or FINN errors, the native run still succeeds and `finn\challenger_status.json` records the skip/failure reason plus a remediation hint. Use `on_error: "fail"` to make challenger failures fatal.
+- **Apples-to-apples**: FINN cutoff-labeled backtests are scored against the scaffold's own actuals and metric contract; `appendix\challenger_leaderboard.csv` merges native and challenger lanes with `lane`, `comparable`, and cutoff-coverage columns. Champion selection still ignores challenger rows.
+- **Agent-friendly**: `finn\agent_brief.json` summarizes status, environment, comparable metrics, artifact paths, and suggested next commands; everything is registered in `manifest.json` and `llm_context.json`.
+
+### Manual bridge (pre-produced FINN files)
+
+Direct FINN execution needs a local R install with `Rscript` on `PATH` plus the `finnts` R package (common Windows install paths are auto-discovered). On Windows, install R first, restart your terminal, then run `nixtla-scaffold finn check`. The no-R path still works for generating the runner template and for ingesting/comparing/scoring FINN-shaped CSV outputs.
+
+```powershell
+nixtla-scaffold finn check
+nixtla-scaffold finn run --input data.csv --output runs\finn_template
+nixtla-scaffold finn ingest --input finn_forecast.csv --output runs\finn_ingest
+nixtla-scaffold finn compare --run runs\demo --input finn_forecast.csv
+nixtla-scaffold finn score --run runs\demo --actuals actuals.csv --input finn_backtest.csv --season-length 12 --horizon 6
+```
+
+When attached to a scaffold run, FINN artifacts land under `runs\demo\finn` and are picked up by the generated Streamlit dashboard, HTML report file guide, `manifest.json`, and `llm_context.json`. Treat `finn\external_model_metrics.csv` as the apples-to-apples evidence table; FINN remains advisory unless a human explicitly promotes or locks a version.
+
+Native FINN/finnts usage is now mapped at the workflow level:
+
+| FINN path | Core functions | How it should consolidate with this scaffold |
+| --- | --- | --- |
+| One-shot forecast | `forecast_time_series()` | Produces future forecast, backtest results, and best-model outputs that can be canonicalized into `finn\finn_forecasts.csv` and scored through the shared external-model scoring contract. |
+| Staged run | `set_run_info()` -> `prep_data()` -> `prep_models()` -> `train_models()` -> `ensemble_models()` -> `final_models()` -> `get_forecast_data()` | Best fit for a deeper bridge because each stage maps to scaffold receipts: prep/data quality, model candidates, ensemble policy, final forecast, and backtest evidence. |
+| Agent loop | `set_project_info()` -> `set_agent_info()` -> `iterate_forecast()` / `update_forecast()` / `ask_agent()` | FINN can run an R-native forecast agent with LLM objects; scaffold should ingest its artifacts, show agent answers in reporting, and still require shared cutoff scoring before greenlighting comparable model evidence. |
+
+Important FINN knobs to preserve when bridging include `back_test_scenarios`, `back_test_spacing`, `forecast_approach`, `run_global_models`, `run_local_models`, `run_ensemble_models`, `average_models`, `max_model_average`, `recipes_to_run`, `models_to_run`, `models_not_to_run`, `feature_selection`, `external_regressors`, `clean_missing_values`, `clean_outliers`, `negative_forecast`, `parallel_processing`, and `inner_parallel`.
+
+Native ensemble labs are also opt-in and do not change champion selection:
+
+```powershell
+nixtla-scaffold forecast --input data.csv --horizon 6 --ensemble-policy top_k_average --ensemble-policy family_diverse_average --output runs\ensemble_lab
+nixtla-scaffold optimize --input data.csv --horizon 6 --variants baseline all_models --output runs\optimizer
+```
+
+The manifest also records FINN-inspired recipe metadata such as `--fiscal-year-start`, `--lag-period`, `--rolling-window-period`, cleaning policies, and parallel execution intent for auditable experiments.
+
+For Copilot SDK or Copilot CLI agent workflows, use `.github\agents\finn-forecast-analyst.agent.md` as the specialized custom-agent profile. The SDK host can attach that prompt to a custom agent that calls the package CLI and reads run manifests; the Python package itself intentionally does not depend on the Copilot SDK.
 
 ## More paths
 

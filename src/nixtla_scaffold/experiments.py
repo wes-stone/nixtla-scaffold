@@ -18,6 +18,7 @@ from nixtla_scaffold.schema import ForecastRun, ForecastSpec
 
 EXPERIMENT_SCHEMA_VERSION = "nixtla_scaffold.experiment.v1"
 COMPARE_MODELS_SCHEMA_VERSION = "nixtla_scaffold.compare_models.v1"
+OPTIMIZER_SCHEMA_VERSION = "nixtla_scaffold.optimizer.v1"
 DEFAULT_EXPERIMENT_VARIANTS = ("baseline", "all_models", "events", "known_future_regressors", "hierarchy_methods")
 EXPERIMENT_VARIANTS = (
     "baseline",
@@ -129,6 +130,15 @@ class ExperimentResult:
     summary: pd.DataFrame
     recommendation_markdown: str
     llm_context: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class OptimizerResult:
+    output_dir: Path
+    manifest: dict[str, Any]
+    iteration_summary: pd.DataFrame
+    decisions: tuple[dict[str, Any], ...]
+    next_iteration_questions_markdown: str
 
 
 def compare_models(
@@ -271,6 +281,68 @@ def run_experiment(
         summary=summary,
         recommendation_markdown=recommendation,
         llm_context=llm_context,
+    )
+
+
+def run_optimizer(
+    data: str | Path | pd.DataFrame,
+    spec: ForecastSpec | None = None,
+    *,
+    sheet: str | int | None = None,
+    output_dir: str | Path = "runs/optimizer_latest",
+    variants: Sequence[str] | None = None,
+    max_iterations: int = 1,
+    max_variants: int = 4,
+) -> OptimizerResult:
+    """Run one bounded deterministic optimizer pass using existing experiment infrastructure."""
+
+    if max_iterations < 1:
+        raise ValueError("max_iterations must be >= 1")
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    experiment_dir = out / "iteration_001"
+    experiment = run_experiment(
+        data,
+        spec or ForecastSpec(),
+        sheet=sheet,
+        output_dir=experiment_dir,
+        variants=variants,
+        max_variants=max_variants,
+    )
+    iteration_summary = experiment.summary.copy()
+    if not iteration_summary.empty:
+        iteration_summary.insert(0, "iteration", 1)
+    decisions = tuple(_optimizer_decisions(iteration_summary))
+    next_questions = _optimizer_next_questions_markdown(experiment.llm_context)
+    manifest = {
+        "schema_version": OPTIMIZER_SCHEMA_VERSION,
+        "purpose": "Bounded deterministic optimizer loop over scaffold experiment variants; advisory only and does not mutate forecast.csv.",
+        "max_iterations": max_iterations,
+        "executed_iterations": 1,
+        "stopped_reason": "single deterministic pass complete; rerun with the next_iteration_questions guidance after adding human/business context",
+        "experiment_manifest": str(experiment_dir / "experiment_manifest.json"),
+        "experiment_llm_context": str(experiment_dir / "experiment_llm_context.json"),
+        "best_variant": experiment.llm_context.get("recommendation", {}).get("best_variant", "unknown"),
+        "base_spec": (spec or ForecastSpec()).to_dict(),
+        "outputs": {
+            "iteration_summary": "iteration_summary.csv",
+            "iteration_decisions": "iteration_decisions.jsonl",
+            "next_iteration_questions": "next_iteration_questions.md",
+            "manifest": "iteration_manifest.json",
+        },
+    }
+    iteration_summary.to_csv(out / "iteration_summary.csv", index=False)
+    with (out / "iteration_decisions.jsonl").open("w", encoding="utf-8") as handle:
+        for decision in decisions:
+            handle.write(json.dumps(decision, default=str) + "\n")
+    (out / "next_iteration_questions.md").write_text(next_questions, encoding="utf-8")
+    (out / "iteration_manifest.json").write_text(json.dumps(manifest, indent=2, default=str) + "\n", encoding="utf-8")
+    return OptimizerResult(
+        output_dir=out,
+        manifest=manifest,
+        iteration_summary=iteration_summary,
+        decisions=decisions,
+        next_iteration_questions_markdown=next_questions,
     )
 
 
@@ -452,6 +524,66 @@ def _recommendation_payload(summary: pd.DataFrame, context: ExperimentContext) -
         "candidate_drivers": list(context.candidate_drivers),
         "autoresearch_hypotheses": list(context.autoresearch_hypotheses),
     }
+
+
+def _optimizer_decisions(summary: pd.DataFrame) -> list[dict[str, Any]]:
+    if summary.empty:
+        return []
+    decisions: list[dict[str, Any]] = []
+    for _, row in summary.iterrows():
+        status = str(row.get("status", "unknown"))
+        rank = row.get("advisory_rank")
+        keep = status == "success" and pd.notna(rank) and int(rank) == 1
+        decisions.append(
+            {
+                "schema_version": OPTIMIZER_SCHEMA_VERSION,
+                "iteration": int(row.get("iteration", 1)),
+                "variant": str(row.get("variant", "")),
+                "decision": "keep_advisory_best" if keep else ("review_skip" if status != "success" else "reject_advisory_lower_rank"),
+                "status": status,
+                "advisory_rank": None if pd.isna(rank) else int(rank),
+                "avg_rmse": row.get("avg_rmse"),
+                "avg_mae": row.get("avg_mae"),
+                "reason": str(row.get("reason", "")),
+                "advisory_only": True,
+            }
+        )
+    return decisions
+
+
+def _optimizer_next_questions_markdown(llm_context: dict[str, Any]) -> str:
+    recommendation = llm_context.get("recommendation", {}) if isinstance(llm_context, dict) else {}
+    next_iteration = recommendation.get("autoresearch_next_iteration", {}) if isinstance(recommendation, dict) else {}
+    questions = llm_context.get("human_context_questions", []) if isinstance(llm_context, dict) else []
+    candidate_drivers = llm_context.get("candidate_drivers", []) if isinstance(llm_context, dict) else []
+    lines = [
+        "# Next iteration questions",
+        "",
+        "This optimizer pass is advisory and bounded. Add human/business context before running another iteration.",
+        "",
+        "## Suggested next hypothesis",
+        "",
+        str(next_iteration.get("hypothesis", "Collect context, then test one new event, driver, or hierarchy assumption.")),
+        "",
+        "## Keep rule",
+        "",
+        str(next_iteration.get("keep_rule", "Keep only if RMSE improves without worse MAE/Pareto or trust caveats.")),
+        "",
+        "## Questions for the human",
+        "",
+    ]
+    if questions:
+        lines.extend(f"- {question}" for question in questions)
+    else:
+        lines.append("- What known future event, driver, or planning constraint should be tested next?")
+    lines.extend(["", "## Candidate drivers to audit", ""])
+    if candidate_drivers:
+        for candidate in candidate_drivers:
+            lines.append(f"- `{candidate.get('value_col', 'unknown')}`: {candidate.get('lag_interpretation', 'audit for leakage and future availability')}")
+    else:
+        lines.append("- No automatic candidate drivers were detected.")
+    lines.append("")
+    return "\n".join(lines)
 
 
 def _successful_row(name: str, description: str, path: Path, run: ForecastRun) -> dict[str, Any]:
@@ -1051,4 +1183,3 @@ def _frame_to_markdown(frame: pd.DataFrame) -> str:
     ]
     lines.extend("| " + " | ".join(row) + " |" for row in rows)
     return "\n".join(lines)
-

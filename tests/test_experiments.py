@@ -4,7 +4,7 @@ import json
 
 import pandas as pd
 
-from nixtla_scaffold import ForecastSpec, compare_models, run_experiment
+from nixtla_scaffold import ForecastSpec, compare_models, run_experiment, run_optimizer
 from nixtla_scaffold.experiments import _detect_candidate_drivers, _lagged_correlation_evidence
 
 
@@ -74,6 +74,28 @@ def test_run_experiment_records_skips_and_autoresearch_next_step(tmp_path) -> No
     assert "avg_mae" in next_iteration["metric"]
     assert "avg_wape" not in next_iteration["metric"]
     assert "avg_wape" not in recommendation
+
+
+def test_run_optimizer_writes_iteration_receipts(tmp_path) -> None:
+    output_dir = tmp_path / "optimizer"
+
+    result = run_optimizer(
+        _demo_frame(),
+        ForecastSpec(horizon=2, model_policy="baseline"),
+        output_dir=output_dir,
+        variants=("baseline", "events"),
+        max_iterations=1,
+        max_variants=2,
+    )
+
+    assert result.manifest["schema_version"] == "nixtla_scaffold.optimizer.v1"
+    assert result.manifest["executed_iterations"] == 1
+    assert (output_dir / "iteration_001" / "experiment_manifest.json").exists()
+    assert (output_dir / "iteration_summary.csv").exists()
+    assert (output_dir / "iteration_decisions.jsonl").exists()
+    assert (output_dir / "next_iteration_questions.md").exists()
+    assert result.decisions
+    assert any(decision["decision"] == "keep_advisory_best" for decision in result.decisions)
 
 
 def test_run_experiment_detects_candidate_drivers_for_autoresearch_context(tmp_path) -> None:
@@ -156,4 +178,3 @@ def test_run_experiment_caps_requested_variants(tmp_path) -> None:
 
     capped = result.summary[result.summary["status"].eq("max_variants_cap")]
     assert set(capped["variant"]) == {"all_models", "rolling_features"}
-

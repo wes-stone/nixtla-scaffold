@@ -9,7 +9,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Sequence
 
 import pandas as pd
 
@@ -23,6 +23,11 @@ HierarchyReconciliationMethod = Literal["none", "bottom_up", "top_down", "both",
 RegressorAvailability = Literal["calendar", "contracted", "scheduled", "plan", "forecasted", "historical_only"]
 RegressorMode = Literal["audit_only", "model_candidate"]
 MLForecastFeaturePolicy = Literal["basic", "rolling"]
+EnsemblePolicy = Literal["legacy_weighted", "top_k_average", "family_diverse_average"]
+EnsembleScoringMode = Literal["prior_only"]
+EnsembleDeploymentMode = Literal["full_backtest", "last_cutoff"]
+ParallelProcessingMode = Literal["none", "local_machine", "spark"]
+ChallengerOnError = Literal["skip", "fail"]
 
 
 @dataclass(frozen=True)
@@ -112,6 +117,188 @@ class TransformSpec:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class FeatureRecipeSpec:
+    """FINN-inspired feature recipe metadata for audited native experiments."""
+
+    fiscal_year_start: int = 1
+    fourier_periods: tuple[int, ...] = ()
+    lag_periods: tuple[int, ...] = ()
+    rolling_window_periods: tuple[int, ...] = ()
+    recipes_to_run: tuple[str, ...] = ()
+    pca: bool | None = None
+    feature_selection: bool = False
+    weekly_to_daily: bool = True
+
+    def __post_init__(self) -> None:
+        if self.fiscal_year_start < 1 or self.fiscal_year_start > 12:
+            raise ValueError("feature_recipe.fiscal_year_start must be between 1 and 12")
+        object.__setattr__(self, "fourier_periods", _positive_int_tuple(self.fourier_periods, "feature_recipe.fourier_periods"))
+        object.__setattr__(self, "lag_periods", _positive_int_tuple(self.lag_periods, "feature_recipe.lag_periods"))
+        object.__setattr__(
+            self,
+            "rolling_window_periods",
+            _positive_int_tuple(self.rolling_window_periods, "feature_recipe.rolling_window_periods"),
+        )
+        object.__setattr__(self, "recipes_to_run", tuple(str(item).strip() for item in self.recipes_to_run if str(item).strip()))
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.fourier_periods or self.lag_periods or self.rolling_window_periods or self.recipes_to_run or self.pca or self.feature_selection)
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["fourier_periods"] = list(self.fourier_periods)
+        data["lag_periods"] = list(self.lag_periods)
+        data["rolling_window_periods"] = list(self.rolling_window_periods)
+        data["recipes_to_run"] = list(self.recipes_to_run)
+        return data
+
+
+@dataclass(frozen=True)
+class CleaningSpec:
+    """FINN-inspired data cleaning and forecast-bound controls."""
+
+    clean_missing_values: bool = True
+    clean_outliers: bool = False
+    negative_forecast: bool = True
+    combo_cleanup_date: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.combo_cleanup_date is not None and not str(self.combo_cleanup_date).strip():
+            raise ValueError("cleaning.combo_cleanup_date cannot be blank")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class EnsembleSpec:
+    """Audited ensemble policies inspired by FINN's model averaging workflow."""
+
+    policies: tuple[EnsemblePolicy, ...] = ("legacy_weighted",)
+    max_models: int = 3
+    scoring: EnsembleScoringMode = "prior_only"
+    deployment: EnsembleDeploymentMode = "full_backtest"
+
+    def __post_init__(self) -> None:
+        allowed = {"legacy_weighted", "top_k_average", "family_diverse_average"}
+        policies = tuple(dict.fromkeys(str(policy) for policy in self.policies))
+        invalid = sorted(set(policies) - allowed)
+        if invalid:
+            raise ValueError(f"ensemble.policies contains unknown value(s): {invalid}; expected one of {sorted(allowed)}")
+        if self.max_models < 1:
+            raise ValueError("ensemble.max_models must be >= 1")
+        if self.scoring != "prior_only":
+            raise ValueError("ensemble.scoring must be 'prior_only'")
+        if self.deployment not in {"full_backtest", "last_cutoff"}:
+            raise ValueError("ensemble.deployment must be 'full_backtest' or 'last_cutoff'")
+        object.__setattr__(self, "policies", policies or ("legacy_weighted",))
+
+    @property
+    def advisory_policies(self) -> tuple[EnsemblePolicy, ...]:
+        return tuple(policy for policy in self.policies if policy != "legacy_weighted")
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["policies"] = list(self.policies)
+        return data
+
+
+@dataclass(frozen=True)
+class ParallelSpec:
+    """Local/remote execution intent metadata; no cloud orchestration is implied."""
+
+    processing: ParallelProcessingMode = "none"
+    inner_parallel: bool = False
+    num_cores: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.processing not in {"none", "local_machine", "spark"}:
+            raise ValueError("parallel.processing must be one of: none, local_machine, spark")
+        if self.num_cores is not None and self.num_cores < 1:
+            raise ValueError("parallel.num_cores must be >= 1 when provided")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class ChallengerSpec:
+    """External challenger engine run beside the canonical pipeline in an advisory lane.
+
+    Challengers never mutate the canonical ``forecast.csv``; they contribute
+    compare/score artifacts under ``<run>/<source_id>`` for apples-to-apples review.
+    """
+
+    engine: str = "finn"
+    enabled: bool = True
+    on_error: ChallengerOnError = "skip"
+    models: tuple[str, ...] = ()
+    back_test_scenarios: int | None = None
+    back_test_spacing: int | None = None
+    forecast_approach: str = "bottoms_up"
+    run_ensemble_models: bool = False
+    feature_selection: bool = False
+    rscript: str = "Rscript"
+    timeout_seconds: int = 3600
+    seed: int = 123
+    source_id: str = ""
+    model_name: str = ""
+    extra: tuple[tuple[str, str], ...] = ()
+
+    def __post_init__(self) -> None:
+        engine = str(self.engine).strip().lower()
+        if not engine:
+            raise ValueError("challenger engine is required")
+        object.__setattr__(self, "engine", engine)
+        if self.on_error not in {"skip", "fail"}:
+            raise ValueError("challenger on_error must be 'skip' or 'fail'")
+        models = tuple(dict.fromkeys(str(model).strip() for model in self.models if str(model).strip()))
+        object.__setattr__(self, "models", models)
+        if self.back_test_scenarios is not None and self.back_test_scenarios < 1:
+            raise ValueError("challenger back_test_scenarios must be >= 1 when provided")
+        if self.back_test_spacing is not None and self.back_test_spacing < 1:
+            raise ValueError("challenger back_test_spacing must be >= 1 when provided")
+        if self.forecast_approach not in {"bottoms_up", "standard_hierarchy", "grouped_hierarchy"}:
+            raise ValueError("challenger forecast_approach must be one of: bottoms_up, standard_hierarchy, grouped_hierarchy")
+        if self.timeout_seconds < 1:
+            raise ValueError("challenger timeout_seconds must be >= 1")
+        if not str(self.rscript).strip():
+            raise ValueError("challenger rscript cannot be blank")
+        source_id = str(self.source_id).strip() or engine
+        object.__setattr__(self, "source_id", source_id)
+        model_name = str(self.model_name).strip() or engine.upper()
+        object.__setattr__(self, "model_name", model_name)
+        extra: list[tuple[str, str]] = []
+        for item in self.extra:
+            key, value = item
+            key = str(key).strip()
+            if not key:
+                raise ValueError("challenger extra keys cannot be blank")
+            extra.append((key, str(value)))
+        object.__setattr__(self, "extra", tuple(extra))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "engine": self.engine,
+            "enabled": self.enabled,
+            "on_error": self.on_error,
+            "models": list(self.models),
+            "back_test_scenarios": self.back_test_scenarios,
+            "back_test_spacing": self.back_test_spacing,
+            "forecast_approach": self.forecast_approach,
+            "run_ensemble_models": self.run_ensemble_models,
+            "feature_selection": self.feature_selection,
+            "rscript": self.rscript,
+            "timeout_seconds": self.timeout_seconds,
+            "seed": self.seed,
+            "source_id": self.source_id,
+            "model_name": self.model_name,
+            "extra": {key: value for key, value in self.extra},
+        }
 
 
 @dataclass(frozen=True)
@@ -205,7 +392,12 @@ class ForecastSpec:
     events: tuple[DriverEvent, ...] = field(default_factory=tuple)
     regressors: tuple[KnownFutureRegressor, ...] = field(default_factory=tuple)
     custom_models: tuple[CustomModelSpec, ...] = field(default_factory=tuple)
+    challengers: tuple[ChallengerSpec, ...] = field(default_factory=tuple)
     transform: TransformSpec = field(default_factory=TransformSpec)
+    feature_recipe: FeatureRecipeSpec = field(default_factory=FeatureRecipeSpec)
+    cleaning: CleaningSpec = field(default_factory=CleaningSpec)
+    ensemble: EnsembleSpec = field(default_factory=EnsembleSpec)
+    parallel: ParallelSpec = field(default_factory=ParallelSpec)
     hierarchy_reconciliation: HierarchyReconciliationMethod = "none"
     train_known_future_regressors: bool = False
     mlforecast_feature_policy: MLForecastFeaturePolicy = "basic"
@@ -243,6 +435,12 @@ class ForecastSpec:
         custom_names = [custom.model_name for custom in self.custom_models]
         if len(custom_names) != len(set(custom_names)):
             raise ValueError("custom model names must be unique")
+        challenger_engines = [challenger.engine for challenger in self.challengers]
+        if len(challenger_engines) != len(set(challenger_engines)):
+            raise ValueError("challenger engines must be unique")
+        challenger_source_ids = [challenger.source_id for challenger in self.challengers]
+        if len(challenger_source_ids) != len(set(challenger_source_ids)):
+            raise ValueError("challenger source_ids must be unique")
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -255,17 +453,38 @@ class ForecastSpec:
             data["custom_models"] = [custom.to_dict() for custom in self.custom_models]
         else:
             data.pop("custom_models", None)
+        if self.challengers:
+            data["challengers"] = [challenger.to_dict() for challenger in self.challengers]
+        else:
+            data.pop("challengers", None)
         data["transform"] = self.transform.to_dict()
+        data["feature_recipe"] = self.feature_recipe.to_dict()
+        data["cleaning"] = self.cleaning.to_dict()
+        data["ensemble"] = self.ensemble.to_dict()
+        data["parallel"] = self.parallel.to_dict()
         return data
+
+
+def _positive_int_tuple(values: Sequence[Any], field_name: str) -> tuple[int, ...]:
+    out = tuple(int(value) for value in values)
+    invalid = [value for value in out if value < 1]
+    if invalid:
+        raise ValueError(f"{field_name} values must be positive integers, got {invalid}")
+    return out
 
 
 def forecast_spec_from_dict(data: dict[str, Any]) -> ForecastSpec:
     """Rehydrate a persisted manifest spec into a ForecastSpec."""
 
     transform_data = data.get("transform") if isinstance(data.get("transform"), dict) else {}
+    feature_recipe_data = data.get("feature_recipe") if isinstance(data.get("feature_recipe"), dict) else {}
+    cleaning_data = data.get("cleaning") if isinstance(data.get("cleaning"), dict) else {}
+    ensemble_data = data.get("ensemble") if isinstance(data.get("ensemble"), dict) else {}
+    parallel_data = data.get("parallel") if isinstance(data.get("parallel"), dict) else {}
     events = tuple(_driver_event_from_dict(item) for item in data.get("events", []) if isinstance(item, dict))
     regressors = tuple(_known_future_regressor_from_dict(item) for item in data.get("regressors", []) if isinstance(item, dict))
     custom_models = tuple(_custom_model_from_dict(item) for item in data.get("custom_models", []) if isinstance(item, dict))
+    challengers = tuple(_challenger_from_dict(item) for item in data.get("challengers", []) if isinstance(item, dict))
     return ForecastSpec(
         horizon=int(data.get("horizon", 12)),
         freq=data.get("freq"),
@@ -282,10 +501,38 @@ def forecast_spec_from_dict(data: dict[str, Any]) -> ForecastSpec:
         events=events,
         regressors=regressors,
         custom_models=custom_models,
+        challengers=challengers,
         transform=TransformSpec(
             target=transform_data.get("target", "none"),
             normalization_factor_col=transform_data.get("normalization_factor_col"),
             normalization_label=transform_data.get("normalization_label", ""),
+        ),
+        feature_recipe=FeatureRecipeSpec(
+            fiscal_year_start=int(feature_recipe_data.get("fiscal_year_start", 1)),
+            fourier_periods=tuple(feature_recipe_data.get("fourier_periods", ())),
+            lag_periods=tuple(feature_recipe_data.get("lag_periods", ())),
+            rolling_window_periods=tuple(feature_recipe_data.get("rolling_window_periods", ())),
+            recipes_to_run=tuple(feature_recipe_data.get("recipes_to_run", ())),
+            pca=feature_recipe_data.get("pca"),
+            feature_selection=bool(feature_recipe_data.get("feature_selection", False)),
+            weekly_to_daily=bool(feature_recipe_data.get("weekly_to_daily", True)),
+        ),
+        cleaning=CleaningSpec(
+            clean_missing_values=bool(cleaning_data.get("clean_missing_values", True)),
+            clean_outliers=bool(cleaning_data.get("clean_outliers", False)),
+            negative_forecast=bool(cleaning_data.get("negative_forecast", True)),
+            combo_cleanup_date=str(cleaning_data["combo_cleanup_date"]) if cleaning_data.get("combo_cleanup_date") not in (None, "") else None,
+        ),
+        ensemble=EnsembleSpec(
+            policies=tuple(ensemble_data.get("policies", ("legacy_weighted",))),
+            max_models=int(ensemble_data.get("max_models", 3)),
+            scoring=ensemble_data.get("scoring", "prior_only"),
+            deployment=ensemble_data.get("deployment", "full_backtest"),
+        ),
+        parallel=ParallelSpec(
+            processing=parallel_data.get("processing", "none"),
+            inner_parallel=bool(parallel_data.get("inner_parallel", False)),
+            num_cores=_optional_int(parallel_data.get("num_cores")),
         ),
         hierarchy_reconciliation=data.get("hierarchy_reconciliation", "none"),
         train_known_future_regressors=bool(data.get("train_known_future_regressors", False)),
@@ -328,6 +575,31 @@ def _known_future_regressor_from_dict(data: dict[str, Any]) -> KnownFutureRegres
         owner=str(data.get("owner", "")),
         refresh_latency_days=_optional_int(data.get("refresh_latency_days")),
         notes=str(data.get("notes", "")),
+    )
+
+
+def _challenger_from_dict(data: dict[str, Any]) -> ChallengerSpec:
+    extra_data = data.get("extra")
+    if isinstance(extra_data, dict):
+        extra = tuple((str(key), str(value)) for key, value in extra_data.items())
+    else:
+        extra = tuple((str(key), str(value)) for key, value in (extra_data or ()))
+    return ChallengerSpec(
+        engine=str(data.get("engine", "finn")),
+        enabled=bool(data.get("enabled", True)),
+        on_error=data.get("on_error", "skip"),
+        models=tuple(str(model) for model in data.get("models", ())),
+        back_test_scenarios=_optional_int(data.get("back_test_scenarios")),
+        back_test_spacing=_optional_int(data.get("back_test_spacing")),
+        forecast_approach=str(data.get("forecast_approach", "bottoms_up")),
+        run_ensemble_models=bool(data.get("run_ensemble_models", False)),
+        feature_selection=bool(data.get("feature_selection", False)),
+        rscript=str(data.get("rscript", "Rscript")),
+        timeout_seconds=int(data.get("timeout_seconds", 3600)),
+        seed=int(data.get("seed", 123)),
+        source_id=str(data.get("source_id", "")),
+        model_name=str(data.get("model_name", "")),
+        extra=extra,
     )
 
 
@@ -436,6 +708,7 @@ class ForecastRun:
             "model_tradeoff_scores": "appendix/model_tradeoff_scores.csv",
             "model_pareto_frontier": "appendix/model_pareto_frontier.csv",
             "feature_selection_receipts": "appendix/feature_selection_receipts.csv",
+            "ensemble_policy_receipts": "appendix/ensemble_policy_receipts.csv",
             "model_window_metrics": "appendix/model_window_metrics.csv",
             "residual_diagnostics": "appendix/residual_diagnostics.csv",
             "residual_tests": "appendix/residual_tests.csv",
@@ -503,6 +776,10 @@ class ForecastRun:
             outputs["known_future_regressors"] = "appendix/known_future_regressors.csv"
             outputs["driver_availability_audit"] = "appendix/driver_availability_audit.csv"
             outputs["driver_experiment_summary"] = "appendix/driver_experiment_summary.csv"
+        if self.spec.ensemble.advisory_policies:
+            outputs["ensemble_backtest"] = "appendix/ensemble_backtest.csv"
+            outputs["ensemble_selection"] = "appendix/ensemble_selection.csv"
+            outputs["ensemble_forecast"] = "appendix/ensemble_forecast.csv"
         if not self.driver_model_features.empty:
             outputs["driver_model_features"] = "appendix/driver_model_features.csv"
         if not self.driver_model_cv_delta.empty:
@@ -623,4 +900,3 @@ def _git_sha() -> str | None:
         return None
     sha = result.stdout.strip()
     return sha or None
-
