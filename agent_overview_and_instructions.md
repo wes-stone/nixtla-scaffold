@@ -12,6 +12,10 @@ When asked to forecast a metric, keep the run explainable and conservative:
 4. Open `appendix\accuracy_gate.json` first, then cite the curated artifacts: `OPEN_ME_FIRST.html`, `output\forecast_review.xlsx`, `appendix\trust_summary.csv`, `forecast.csv`, `report.html`, and `llm_context.json`.
 5. Treat `planning_eligible=True` as a horizon-validation flag only. It does not override Low trust, interval failures, residual warnings, hierarchy gaps, data-quality caveats, or business review.
 6. Quote the deterministic executive headline from `diagnostics.json.executive_headline.paragraph` or `llm_context.json`; do not paraphrase it into a stronger claim.
+7. Launch the official run's generated `run_streamlit.ps1` / `streamlit_app.py` before creating any custom UI. A custom dashboard is supplemental only when explicitly requested.
+8. Do not stitch per-series winners from different experiment runs into an unofficial hybrid. One official forecast comes from one frozen spec and its within-run selection.
+9. Treat `forecast.xlsx` and `output\forecast_review.xlsx` as automatic package artifacts. Do not invoke Excel COM, LibreOffice, or custom workbook automation unless the user explicitly requests a custom workbook.
+10. Stop when the installed skill and executable package disagree. Use the matching worktree or Git ref instead of hand-building missing capabilities.
 
 The bundled skill at `skills\nixtla-forecast\SKILL.md` is the most complete agent playbook. From an installed wheel, run:
 
@@ -97,7 +101,7 @@ Ask these before modeling:
 5. Which model families are allowed: baseline, StatsForecast, MLForecast, HierarchicalForecast, or research-only NeuralForecast?
 6. Should exploration run before forecasting?
 7. Can the agent use MCPs to find candidate drivers or regressors?
-8. Which outputs are needed: clean review pack, CSV, Excel, HTML, Streamlit, diagnostics, model card, or all?
+8. Which standard review surface should open first? Default to the canonical Streamlit workbench; the package already generates the standard CSV, Excel, HTML, diagnostics, and model-card artifacts.
 
 ## Data contract
 

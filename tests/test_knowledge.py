@@ -39,8 +39,13 @@ def test_skill_manifest_pins_canonical_skill_hash() -> None:
     manifest = load_skill_manifest()
     digest = hashlib.sha256(load_agent_skill().encode("utf-8")).hexdigest()
 
-    assert manifest["skill_version"] == "1.3.0"
+    assert manifest["skill_version"] == "1.3.1"
     assert manifest["source_sha256"] == digest
+    skill = load_agent_skill()
+    assert "LAUNCH THE CANONICAL WORKBENCH FIRST" in skill
+    assert "DO NOT STITCH CROSS-RUN WINNERS" in skill
+    assert "DO NOT FORCE EXCEL AUTOMATION" in skill
+    assert "STOP ON SKILL/PACKAGE DRIFT" in skill
 
 
 def test_skill_check_and_confirmed_sync_preserve_backup(tmp_path, capsys) -> None:

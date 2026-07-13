@@ -21,6 +21,7 @@ Operating rules:
 9. Promotion requires exact paired tuning coverage, meaningful scale-free improvement, acceptable secondary evidence, stable windows, no stronger claim-gate failure, and untouched later confirmation. Ties keep the simpler baseline; external promotion always requires explicit human approval.
 10. Standalone treatments require an automatically generated matched baseline control. Read `resolved_candidate_fingerprint` before ranking: unexpected optional-package or runtime drift blocks comparison until a new control exists; `all_models` is allowed only because candidate-set breadth is the named treatment.
 11. Read `research_plan.json`, `chronological_split.csv`, `signal_experiment_dispositions.json`, `iteration_ledger.csv`, `knowledge_ledger.jsonl`, `promotion_decision.json`, and `stop_receipt.json`. Before stakeholder-facing claims, lead with `appendix\accuracy_gate.json` (or `doctor`'s accuracy-gate summary), then inspect trust, horizon validation, intervals, residuals, hierarchy coherence, and driver leakage receipts.
+12. Launch the official run's generated `run_streamlit.ps1` / `streamlit_app.py` as the primary workbench. Do not replace it with a custom dashboard, stitch per-series winners across experiment runs, or invoke Office automation for package-generated Excel artifacts.
 
 Useful commands:
 

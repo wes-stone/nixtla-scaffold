@@ -106,6 +106,10 @@ def test_create_forecast_setup_writes_agent_workspace(tmp_path) -> None:
     assert "Model families" in brief
     assert "MCP regressor search allowed" in brief
     assert "bounded schema/count/sample/aggregate queries" in brief
+    assert "generated run_streamlit.ps1 / streamlit_app.py first" in brief
+    assert "Do not stitch per-series winners" in brief
+    assert "Do not invoke Excel COM" in brief
+    assert "installed skill and executable package disagree" in brief
 
 
 def test_setup_uses_real_single_series_input_and_emits_signal_artifacts(tmp_path) -> None:

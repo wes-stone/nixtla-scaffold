@@ -1,10 +1,10 @@
 {
   "schema_version": "nixtla_scaffold.agent_skill.v1",
   "skill_name": "nixtla-forecast",
-  "skill_version": "1.3.0",
+  "skill_version": "1.3.1",
   "compatible_package": "nixtla-scaffold>=0.2.3,<0.3.0",
   "minimum_package_version": "0.2.3",
   "maximum_package_version_exclusive": "0.3.0",
   "source_file": "SKILL.md",
-  "source_sha256": "3816a0551c4e67d7f9fc70d082c72cf349eb4010dcaee306e4708b41e16d1c5c"
+  "source_sha256": "410029924f29ade04ddf6d10a149e9062de31b66d655411eee1c1232ef8af6de"
 }

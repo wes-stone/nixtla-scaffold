@@ -219,8 +219,12 @@ def setup_questions(answers: SetupAnswers | None = None) -> list[dict[str, Any]]
             "id": "outputs",
             "question": "Which outputs do we want?",
             "answer": list(selected.outputs),
-            "options": ["all", "csv", "excel", "html", "base64_html", "streamlit", "diagnostics", "model_card"],
-            "why_it_matters": "Stakeholder reporting often needs Excel/HTML, while agent handoff needs JSON diagnostics and base64 HTML.",
+            "options": ["streamlit", "all", "csv", "excel", "html", "base64_html", "diagnostics", "model_card"],
+            "why_it_matters": (
+                "Forecast runs generate the standard Streamlit, CSV, Excel, HTML, and "
+                "diagnostic artifacts automatically. This answer sets review priority; "
+                "it does not authorize a replacement dashboard or Office automation."
+            ),
         },
     ]
 
@@ -358,6 +362,10 @@ def _agent_brief(
             "9. Never copy discovered drivers into model regressors. Admit them only after future-availability, latency, leakage, and rolling-origin evidence pass.",
             "10. Read appendix/accuracy_gate.json after the run. Directional-only output must not be described as planning-ready.",
             "11. Work signal_needs.json in priority order. Append every bounded query to signal_probe_ledger.jsonl and put only validated dispositions in signal_contracts.json.",
+            "12. Launch the official run's generated run_streamlit.ps1 / streamlit_app.py first. Never replace it with a custom dashboard unless the user explicitly requests a supplemental UI.",
+            "13. Do not stitch per-series winners from different experiment runs into a hybrid official forecast. One official forecast must come from one frozen spec and its within-run selection.",
+            "14. forecast.xlsx and output/forecast_review.xlsx are automatic artifacts. Do not invoke Excel COM, LibreOffice, or custom workbook automation unless the user explicitly asks for a custom workbook.",
+            "15. Stop if the installed skill and executable package disagree; use a matching worktree or Git ref instead of hand-building missing capabilities.",
             "",
             "## Next commands",
             "",
