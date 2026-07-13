@@ -19,7 +19,7 @@ from nixtla_scaffold.external_scoring import write_external_forecast_scores
 from nixtla_scaffold.finn_bridge import canonicalize_finn_forecasts, check_finn_environment, compare_finn_forecasts, run_finn_bridge, score_finn_forecasts
 from nixtla_scaffold.forecast import run_forecast
 from nixtla_scaffold.hierarchy import aggregate_hierarchy_frame, hierarchy_summary
-from nixtla_scaffold.knowledge import format_knowledge, load_agent_skill, search_knowledge
+from nixtla_scaffold.knowledge import check_agent_skill, format_knowledge, load_agent_skill, search_knowledge, sync_agent_skill
 from nixtla_scaffold.ledger import (
     DEFAULT_LEDGER_PATH,
     compare_versions,
@@ -45,7 +45,20 @@ from nixtla_scaffold.release_gates import OPTIONAL_EXTRAS, format_release_gate_c
 from nixtla_scaffold.reports import write_report_artifacts_from_directory
 from nixtla_scaffold.refresh import write_refresh_artifacts
 from nixtla_scaffold.scenario_lab import run_scenario_lab
-from nixtla_scaffold.schema import ChallengerSpec, CleaningSpec, CustomModelSpec, EnsembleSpec, FeatureRecipeSpec, ForecastSpec, ParallelSpec, TransformSpec, forecast_spec_from_dict
+from nixtla_scaffold.schema import (
+    ChallengerSpec,
+    CleaningSpec,
+    CustomModelSpec,
+    EnsembleSpec,
+    FeatureRecipeSpec,
+    ForecastContext,
+    ForecastSpec,
+    ParallelSpec,
+    ResearchBudget,
+    TransformSpec,
+    forecast_spec_from_dict,
+    load_forecast_context,
+)
 from nixtla_scaffold.setup import (
     DATA_SOURCES,
     INTERVAL_MODES,
@@ -79,8 +92,15 @@ def main(argv: list[str] | None = None) -> int:
     setup_cmd.add_argument("--interactive", action="store_true", help="Ask setup questions interactively")
     setup_cmd.add_argument("--name", default="forecast", help="Forecast/project name")
     setup_cmd.add_argument("--data-source", choices=DATA_SOURCES, default="unknown")
+    setup_cmd.add_argument("--input", dest="setup_input", default=None, help="Existing source/export file for generated commands")
     setup_cmd.add_argument("--series-count", choices=SERIES_COUNTS, default="unknown")
     setup_cmd.add_argument("--target-name", default="y", help="Metric/target column or name")
+    setup_cmd.add_argument("--target-semantics", default="", help="Business definition of the target")
+    setup_cmd.add_argument("--units", default="", help="Target units, e.g. USD, seats, minutes")
+    setup_cmd.add_argument("--grain", default="", help="Business/time grain, e.g. monthly by product")
+    setup_cmd.add_argument("--decision", default="", help="Decision this forecast supports")
+    setup_cmd.add_argument("--audience", default="", help="Primary decision audience")
+    setup_cmd.add_argument("--refresh-cadence", default="", help="Expected refresh cadence")
     setup_cmd.add_argument("--time-col", default="ds")
     setup_cmd.add_argument("--id-col", default="unique_id")
     setup_cmd.add_argument("--id-value", default=None, help="Series ID to inject for one-metric query results")
@@ -90,7 +110,14 @@ def main(argv: list[str] | None = None) -> int:
     setup_cmd.add_argument("--intervals", choices=INTERVAL_MODES, default="auto")
     setup_cmd.add_argument("--model-families", nargs="+", choices=MODEL_FAMILIES, default=["standard"])
     setup_cmd.add_argument("--exploration-mode", action=argparse.BooleanOptionalAction, default=True)
+    setup_cmd.add_argument("--source-discovery", action=argparse.BooleanOptionalAction, default=True)
     setup_cmd.add_argument("--mcp-regressor-search", action=argparse.BooleanOptionalAction, default=False)
+    setup_cmd.add_argument("--research-budget", choices=["time-boxed", "balanced", "deep", "custom"], default="balanced")
+    setup_cmd.add_argument("--research-max-iterations", type=int, default=None)
+    setup_cmd.add_argument("--research-max-variants-per-iteration", type=int, default=None)
+    setup_cmd.add_argument("--research-max-wall-clock-minutes", type=int, default=None)
+    setup_cmd.add_argument("--research-max-source-queries", type=int, default=None)
+    setup_cmd.add_argument("--research-max-compute-units", type=float, default=None)
     setup_cmd.add_argument("--outputs", nargs="+", default=["all"], help="Outputs to produce: all csv excel html base64_html streamlit diagnostics model_card")
     setup_cmd.add_argument("--hierarchy-cols", nargs="*", default=[])
     setup_cmd.add_argument("--query-file", default=None)
@@ -104,7 +131,7 @@ def main(argv: list[str] | None = None) -> int:
 
     forecast_cmd = sub.add_parser("forecast", help="Run an explainable forecast")
     _add_input_args(forecast_cmd)
-    forecast_cmd.add_argument("--preset", choices=PRESET_NAMES, default=None, help="Opinionated defaults: quick, standard, strict, or hierarchy; finance is a legacy alias for standard")
+    forecast_cmd.add_argument("--preset", choices=PRESET_NAMES, default=None, help="Opinionated defaults: quick, accuracy-first, standard, strict, or hierarchy; finance is a legacy alias for standard")
     forecast_cmd.add_argument("--horizon", type=int, default=12)
     forecast_cmd.add_argument("--freq", default=None)
     forecast_cmd.add_argument("--season-length", type=int, default=None)
@@ -148,6 +175,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Include inverse-error weighted ensemble forecasts and audit/model_weights.csv diagnostics",
     )
     _add_finn_inspired_args(forecast_cmd)
+    _add_context_args(forecast_cmd)
     forecast_cmd.add_argument(
         "--verbose",
         action=argparse.BooleanOptionalAction,
@@ -243,6 +271,7 @@ def main(argv: list[str] | None = None) -> int:
     experiment_cmd.add_argument("--strict-cv-horizon", action=argparse.BooleanOptionalAction, default=False)
     experiment_cmd.add_argument("--weighted-ensemble", action=argparse.BooleanOptionalAction, default=True)
     _add_finn_inspired_args(experiment_cmd)
+    _add_context_args(experiment_cmd)
     experiment_cmd.add_argument("--verbose", action=argparse.BooleanOptionalAction, default=True)
     experiment_cmd.add_argument("--event", action="append", default=[])
     experiment_cmd.add_argument("--event-file", action="append", default=[])
@@ -256,9 +285,10 @@ def main(argv: list[str] | None = None) -> int:
         help="Named advisory variants to test. Defaults to a small data-aware set.",
     )
     experiment_cmd.add_argument("--max-variants", type=int, default=4, help="Safety cap for requested variants")
+    experiment_cmd.add_argument("--hypothesis", default=None, help="Falsifiable hypothesis statement to record and test")
     experiment_cmd.add_argument("--output", default="runs/experiment")
 
-    optimize_cmd = sub.add_parser("optimize", help="Run one bounded deterministic optimizer pass over forecast variants")
+    optimize_cmd = sub.add_parser("optimize", help="Run bounded evidence-led experiments with untouched promotion confirmation")
     _add_input_args(optimize_cmd)
     optimize_cmd.add_argument("--preset", choices=PRESET_NAMES, default=None)
     optimize_cmd.add_argument("--horizon", type=int, default=12)
@@ -279,6 +309,7 @@ def main(argv: list[str] | None = None) -> int:
     optimize_cmd.add_argument("--strict-cv-horizon", action=argparse.BooleanOptionalAction, default=False)
     optimize_cmd.add_argument("--weighted-ensemble", action=argparse.BooleanOptionalAction, default=True)
     _add_finn_inspired_args(optimize_cmd)
+    _add_context_args(optimize_cmd)
     optimize_cmd.add_argument("--verbose", action=argparse.BooleanOptionalAction, default=True)
     optimize_cmd.add_argument("--event", action="append", default=[])
     optimize_cmd.add_argument("--event-file", action="append", default=[])
@@ -286,7 +317,13 @@ def main(argv: list[str] | None = None) -> int:
     optimize_cmd.add_argument("--regressor-file", action="append", default=[])
     optimize_cmd.add_argument("--variants", nargs="+", choices=sorted((*EXPERIMENT_VARIANTS, "all")), default=None)
     optimize_cmd.add_argument("--max-variants", type=int, default=4)
-    optimize_cmd.add_argument("--max-iterations", type=int, default=1)
+    optimize_cmd.add_argument(
+        "--max-iterations",
+        type=int,
+        default=None,
+        help="Defaults to the context research budget, or one iteration without context",
+    )
+    optimize_cmd.add_argument("--patience", type=int, default=2)
     optimize_cmd.add_argument("--output", default="runs/optimizer")
 
     refresh_cmd = sub.add_parser("refresh", help="Refresh a forecast by reusing a previous run's persisted setup")
@@ -353,6 +390,7 @@ def main(argv: list[str] | None = None) -> int:
     ingest_cmd.add_argument("--strict-cv-horizon", action=argparse.BooleanOptionalAction, default=False, help="Require CV folds to match --horizon when forecasting after ingest")
     ingest_cmd.add_argument("--weighted-ensemble", action=argparse.BooleanOptionalAction, default=True)
     _add_finn_inspired_args(ingest_cmd)
+    _add_context_args(ingest_cmd)
     ingest_cmd.add_argument("--verbose", action=argparse.BooleanOptionalAction, default=True)
     ingest_cmd.add_argument("--event", action="append", default=[], help="Driver/event scenario JSON when forecasting after ingest")
     ingest_cmd.add_argument("--event-file", action="append", default=[], help="JSON/YAML/CSV event file when forecasting after ingest")
@@ -416,6 +454,7 @@ def main(argv: list[str] | None = None) -> int:
     score_external_cmd.add_argument("--actual-target-col", default="y", help="Actual value column")
     score_external_cmd.add_argument("--season-length", type=int, default=1, help="Seasonal period for leakage-safe MASE/RMSSE scales")
     score_external_cmd.add_argument("--horizon", type=int, default=None, help="Optional business horizon to record in scoring metrics")
+    score_external_cmd.add_argument("--cutoff-contract", default=None, help="Optional native cutoff_contract.csv required for exact comparability")
 
     byo_cmd = sub.add_parser("byo-model", help="Import, compare, and score Excel-owned finance model outputs")
     byo_sub = byo_cmd.add_subparsers(dest="byo_command", required=True)
@@ -628,6 +667,14 @@ def main(argv: list[str] | None = None) -> int:
     pipeline_refresh.add_argument("--previous-run", required=True, help="Prior forecast run directory with manifest.json")
     pipeline_refresh.add_argument("--output", default=None, help="Pipeline output folder; defaults to runs\\pipeline_<name>_<timestamp>")
 
+    skill_cmd = sub.add_parser("skill", help="Check or install the canonical nixtla-forecast agent skill")
+    skill_sub = skill_cmd.add_subparsers(dest="skill_command", required=True)
+    skill_check = skill_sub.add_parser("check", help="Report canonical and installed skill hashes")
+    skill_check.add_argument("--target", default=None, help="Skill directory or SKILL.md path; defaults to ~/.copilot/skills/nixtla-forecast")
+    skill_sync = skill_sub.add_parser("sync", help="Install the canonical skill with a timestamped backup")
+    skill_sync.add_argument("--target", default=None, help="Skill directory or SKILL.md path; defaults to ~/.copilot/skills/nixtla-forecast")
+    skill_sync.add_argument("--yes", action="store_true", required=True, help="Confirm replacing the installed skill when it differs")
+
     guide_cmd = sub.add_parser("guide", help="Search Nixtla/FPPy best-practice guidance")
     guide_cmd.add_argument("query", nargs="?", default=None, help="Optional search term, e.g. intervals or hierarchy")
 
@@ -676,6 +723,9 @@ def _run(args: argparse.Namespace) -> int:
         challenger_summary = _maybe_run_challengers(output_dir)
         ledger_result = _maybe_register_ledger(args, output_dir)
         print(f"Forecast written to {output_dir}")
+        accuracy_line = _accuracy_gate_summary_line(output_dir)
+        if accuracy_line:
+            print(accuracy_line)
         policy_line = _model_policy_summary_line(run)
         if policy_line:
             print(policy_line)
@@ -702,6 +752,7 @@ def _run(args: argparse.Namespace) -> int:
             output_dir=args.output,
             variants=args.variants,
             max_variants=args.max_variants,
+            hypothesis=args.hypothesis,
             sheet=_coerce_sheet(args.sheet),
         )
         print(f"Experiment written to {result.output_dir}")
@@ -718,10 +769,13 @@ def _run(args: argparse.Namespace) -> int:
             variants=args.variants,
             max_iterations=args.max_iterations,
             max_variants=args.max_variants,
+            patience=args.patience,
             sheet=_coerce_sheet(args.sheet),
         )
-        print(f"Optimizer pass written to {result.output_dir}")
-        print("Next questions: review next_iteration_questions.md")
+        print(f"Research optimizer written to {result.output_dir}")
+        print(f"Stop reason: {result.manifest.get('stopped_reason', 'unknown')}")
+        print(f"Promotion recommended: {result.manifest.get('promotion_recommended', False)}")
+        print("Review promotion_decision.json and stop_receipt.json")
         return 0
 
     if args.command == "refresh":
@@ -732,6 +786,9 @@ def _run(args: argparse.Namespace) -> int:
         challenger_summary = _maybe_run_challengers(output_dir)
         ledger_result = _maybe_register_ledger(args, output_dir)
         print(f"Refresh forecast written to {output_dir}")
+        accuracy_line = _accuracy_gate_summary_line(output_dir)
+        if accuracy_line:
+            print(accuracy_line)
         print(f"Refresh delta rows: {refresh_result['delta_rows']}")
         if challenger_summary:
             print(challenger_summary)
@@ -761,6 +818,9 @@ def _run(args: argparse.Namespace) -> int:
             run = run_forecast(args.output, replace(spec, id_col="unique_id", time_col="ds", target_col="y"))
             output_dir = run.to_directory(args.forecast_output)
             metadata["forecast_output"] = str(output_dir)
+            accuracy_line = _accuracy_gate_summary_line(output_dir)
+            if accuracy_line:
+                metadata["accuracy_gate"] = accuracy_line
             ledger_result = _maybe_register_ledger(args, output_dir, source_metadata_path=metadata.get("metadata_file"))
             if ledger_result:
                 metadata["ledger"] = ledger_result
@@ -830,6 +890,7 @@ def _run(args: argparse.Namespace) -> int:
             actual_value_col=args.actual_target_col,
             season_length=args.season_length,
             requested_horizon=args.horizon,
+            cutoff_contract=args.cutoff_contract,
         )
         print(json.dumps(result.manifest, indent=2, default=str))
         return 0
@@ -915,6 +976,17 @@ def _run(args: argparse.Namespace) -> int:
         payload = _run_pipeline_command(args)
         print(json.dumps(payload, indent=2, default=str))
         return 0
+
+    if args.command == "skill":
+        if args.skill_command == "check":
+            payload = check_agent_skill(args.target)
+            print(json.dumps(payload, indent=2, default=str))
+            return 0 if payload["in_sync"] else 1
+        if args.skill_command == "sync":
+            payload = sync_agent_skill(args.target, confirmed=args.yes)
+            print(json.dumps(payload, indent=2, default=str))
+            return 0
+        raise ValueError(f"unknown skill command: {args.skill_command}")
 
     if args.command == "guide":
         if args.query in {"skill", "agent-skill", "nixtla-forecast"}:
@@ -1144,6 +1216,22 @@ def _add_finn_inspired_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--finn-timeout", type=int, default=3600, help="FINN challenger timeout in seconds")
 
 
+def _add_context_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--context-file", default=None, help="Accuracy-first ForecastContext JSON or YAML produced during intake/discovery")
+    parser.add_argument("--research-budget", choices=["time-boxed", "balanced", "deep", "custom"], default=None)
+    parser.add_argument("--research-max-iterations", type=int, default=None)
+    parser.add_argument("--research-max-variants-per-iteration", type=int, default=None)
+    parser.add_argument("--research-max-wall-clock-minutes", type=int, default=None)
+    parser.add_argument("--research-max-source-queries", type=int, default=None)
+    parser.add_argument("--research-max-compute-units", type=float, default=None)
+    parser.add_argument(
+        "--source-discovery",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Record bounded connected-source discovery or an explicit opt-out in context_receipt.json",
+    )
+
+
 def _add_ledger_registration_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--ledger", default=None, help="Optional ledger folder; use runs\\forecast_ledger for the standard Power BI-friendly tracker")
     parser.add_argument("--forecast-key", default=None, help="Business key used when registering the run in a forecast ledger")
@@ -1164,6 +1252,24 @@ def _configure_stdout() -> None:
     reconfigure = getattr(sys.stdout, "reconfigure", None)
     if callable(reconfigure):
         reconfigure(encoding="utf-8", errors="replace")
+
+
+def _accuracy_gate_summary_line(run_dir: str | Path) -> str:
+    gate_path = Path(run_dir) / "appendix" / "accuracy_gate.json"
+    if not gate_path.exists():
+        return ""
+    payload = json.loads(gate_path.read_text(encoding="utf-8"))
+    status = str(payload.get("status") or "unknown")
+    failed = sorted(
+        {
+            str(gate_name)
+            for series in payload.get("series", [])
+            if isinstance(series, dict)
+            for gate_name in series.get("failed_gates", [])
+        }
+    )
+    suffix = f"; failed gates: {', '.join(failed)}" if failed else ""
+    return f"Accuracy claim status: {status}{suffix}"
 
 
 def _run_ledger(args: argparse.Namespace) -> dict[str, Any]:
@@ -1477,6 +1583,7 @@ def _spec_from_args(args: argparse.Namespace) -> ForecastSpec:
             timeout_seconds=getattr(args, "finn_timeout", 3600),
         )
         challengers = tuple(challenger for challenger in challengers if challenger.engine != "finn") + (finn_challenger,)
+    context = _context_from_args(args, base.context)
     return ForecastSpec(
         horizon=horizon,
         freq=freq,
@@ -1509,7 +1616,40 @@ def _spec_from_args(args: argparse.Namespace) -> ForecastSpec:
         strict_cv_horizon=strict_cv_horizon,
         weighted_ensemble=weighted_ensemble,
         verbose=verbose,
+        context=context,
     )
+
+
+def _context_from_args(args: argparse.Namespace, base: ForecastContext | None) -> ForecastContext | None:
+    context = base
+    context_file = getattr(args, "context_file", None)
+    if context_file:
+        context = load_forecast_context(context_file)
+
+    budget_fields = {
+        "max_iterations": getattr(args, "research_max_iterations", None),
+        "max_variants_per_iteration": getattr(args, "research_max_variants_per_iteration", None),
+        "max_wall_clock_minutes": getattr(args, "research_max_wall_clock_minutes", None),
+        "max_source_queries": getattr(args, "research_max_source_queries", None),
+        "max_compute_units": getattr(args, "research_max_compute_units", None),
+    }
+    requested_profile = getattr(args, "research_budget", None)
+    if requested_profile is not None or any(value is not None for value in budget_fields.values()):
+        if requested_profile is None and context is not None:
+            requested_profile = context.research_budget.profile
+            budget_fields = {
+                name: value if value is not None else getattr(context.research_budget, name)
+                for name, value in budget_fields.items()
+            }
+        elif requested_profile is None:
+            requested_profile = "custom"
+        budget = ResearchBudget(profile=requested_profile, **budget_fields)
+        context = replace(context or ForecastContext(), research_budget=budget)
+
+    source_discovery = getattr(args, "source_discovery", None)
+    if source_discovery is not None:
+        context = replace(context or ForecastContext(), source_discovery_enabled=source_discovery)
+    return context
 
 
 def _refresh_spec_from_args(args: argparse.Namespace) -> ForecastSpec:
@@ -1667,6 +1807,7 @@ def _setup_answers_from_args(args: argparse.Namespace) -> SetupAnswers:
     return SetupAnswers(
         name=args.name,
         data_source=args.data_source,
+        input_path=args.setup_input,
         series_count=args.series_count,
         target_name=args.target_name,
         time_col=args.time_col,
@@ -1678,7 +1819,22 @@ def _setup_answers_from_args(args: argparse.Namespace) -> SetupAnswers:
         intervals=args.intervals,
         model_families=tuple(args.model_families),
         exploration_mode=args.exploration_mode,
+        source_discovery=args.source_discovery,
         mcp_regressor_search=args.mcp_regressor_search,
+        research_budget=ResearchBudget(
+            profile=args.research_budget,
+            max_iterations=args.research_max_iterations,
+            max_variants_per_iteration=args.research_max_variants_per_iteration,
+            max_wall_clock_minutes=args.research_max_wall_clock_minutes,
+            max_source_queries=args.research_max_source_queries,
+            max_compute_units=args.research_max_compute_units,
+        ),
+        decision=args.decision,
+        audience=args.audience,
+        target_semantics=args.target_semantics,
+        units=args.units,
+        grain=args.grain,
+        refresh_cadence=args.refresh_cadence,
         outputs=tuple(args.outputs),
         hierarchy_cols=tuple(args.hierarchy_cols),
         query_file=args.query_file,

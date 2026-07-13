@@ -49,6 +49,10 @@ def run_forecast(
     if history.empty:
         raise ValueError("no usable rows remain after repair; adjust fill_method or input data")
     reporting_history = _inverse_history_target_transform(history, spec.transform.target)
+    reporting_history = _restore_audited_reporting_target(
+        reporting_history,
+        transformation_audit,
+    )
     repaired_profile = profile_dataset(reporting_history, spec)
 
     model_result = forecast_with_policy(history, repaired_profile, spec)
@@ -133,6 +137,25 @@ def run_forecast(
 
 def _inverse_history_target_transform(history: pd.DataFrame, transform: TargetTransform) -> pd.DataFrame:
     return inverse_target_transform_frame(history, transform, columns=["y"])
+
+
+def _restore_audited_reporting_target(
+    history: pd.DataFrame,
+    transformation_audit: pd.DataFrame,
+) -> pd.DataFrame:
+    required = {"unique_id", "ds", "y_adjusted"}
+    if history.empty or transformation_audit.empty or not required.issubset(transformation_audit.columns):
+        return history
+    audited = transformation_audit[["unique_id", "ds", "y_adjusted"]].copy()
+    audited["unique_id"] = audited["unique_id"].astype(str)
+    audited["ds"] = pd.to_datetime(audited["ds"])
+    audited = audited.drop_duplicates(["unique_id", "ds"], keep="last")
+    out = history.copy()
+    out["unique_id"] = out["unique_id"].astype(str)
+    out["ds"] = pd.to_datetime(out["ds"])
+    out = out.merge(audited, on=["unique_id", "ds"], how="left", validate="many_to_one")
+    out["y"] = pd.to_numeric(out["y_adjusted"], errors="coerce").fillna(out["y"])
+    return out.drop(columns=["y_adjusted"])
 
 
 def _inverse_model_result_target_transform(result: ModelResult, transform: TargetTransform) -> ModelResult:
@@ -257,4 +280,3 @@ def _ensure_selected_intervals_contain_point(frame: pd.DataFrame) -> None:
         valid = lo.notna() & hi.notna() & yhat.notna()
         frame.loc[valid, lo_col] = lower.loc[valid]
         frame.loc[valid, hi_col] = upper.loc[valid]
-

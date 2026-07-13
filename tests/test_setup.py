@@ -5,6 +5,7 @@ import json
 import yaml
 
 from nixtla_scaffold.cli import main
+from nixtla_scaffold.schema import ResearchBudget
 from nixtla_scaffold.setup import SetupAnswers, create_forecast_setup, setup_questions
 
 
@@ -12,11 +13,16 @@ def test_setup_questions_cover_agent_intake_topics() -> None:
     questions = {item["id"]: item for item in setup_questions(SetupAnswers(data_source="kusto", mcp_regressor_search=True))}
 
     assert set(questions) == {
+        "decision",
+        "target_context",
         "preset",
         "data_source",
+        "input_path",
         "series_count",
         "intervals",
         "model_families",
+        "research_budget",
+        "source_discovery",
         "exploration_mode",
         "mcp_regressor_search",
         "outputs",
@@ -28,6 +34,8 @@ def test_setup_questions_cover_agent_intake_topics() -> None:
     assert "NeuralForecast is research-only" in questions["model_families"]["caveat"]
     assert questions["mcp_regressor_search"]["answer"] is True
     assert "leakage" in questions["mcp_regressor_search"]["caveat"]
+    assert questions["research_budget"]["answer"]["profile"] == "balanced"
+    assert questions["source_discovery"]["answer"] is True
 
 
 def test_setup_legacy_aliases_canonicalize_in_generated_config() -> None:
@@ -35,7 +43,7 @@ def test_setup_legacy_aliases_canonicalize_in_generated_config() -> None:
 
     assert answers.preset == "standard"
     assert answers.model_families == ("light",)
-    assert setup_questions(answers)[0]["answer"] == "standard"
+    assert next(item for item in setup_questions(answers) if item["id"] == "preset")["answer"] == "standard"
 
 
 def test_create_forecast_setup_writes_agent_workspace(tmp_path) -> None:
@@ -53,7 +61,15 @@ def test_create_forecast_setup_writes_agent_workspace(tmp_path) -> None:
             intervals="auto",
             model_families=("statsforecast", "mlforecast", "hierarchicalforecast"),
             exploration_mode=True,
+            source_discovery=True,
             mcp_regressor_search=True,
+            research_budget=ResearchBudget(profile="deep"),
+            decision="Set the hosted-compute plan",
+            audience="Finance leadership",
+            target_semantics="Monthly usage overage ARR",
+            units="USD ARR",
+            grain="monthly",
+            refresh_cadence="monthly",
             outputs=("all",),
         ),
     )
@@ -65,6 +81,7 @@ def test_create_forecast_setup_writes_agent_workspace(tmp_path) -> None:
     assert artifact.files["config"].exists()
     assert artifact.files["questions"].exists()
     assert artifact.files["agent_brief"].exists()
+    assert artifact.files["context"].exists()
     assert artifact.files["query_template"].suffix == ".kql"
     config = yaml.safe_load(artifact.files["config"].read_text(encoding="utf-8"))
     assert config["answers"]["data_source"] == "kusto"
@@ -72,16 +89,57 @@ def test_create_forecast_setup_writes_agent_workspace(tmp_path) -> None:
     assert config["forecast_preset"] == "standard"
     assert config["forecast_spec"]["horizon"] == 6
     assert config["forecast_spec"]["freq"] == "ME"
+    assert config["forecast_spec"]["context"]["research_budget"]["profile"] == "deep"
+    assert config["forecast_context"]["decision"] == "Set the hosted-compute plan"
     assert "preset_catalog" in config
     assert "MLForecast" in config["policy"]["model_family_caveat"]
     assert config["policy"]["mcp_regressor_search_allowed"] is True
     assert "nixtla-scaffold ingest" in artifact.next_commands[0]
     assert "--preset standard" in artifact.next_commands[0]
     assert "--forecast-output" in artifact.next_commands[0]
+    assert "--context-file" in artifact.next_commands[0]
+    context = json.loads(artifact.files["context"].read_text(encoding="utf-8"))
+    assert context["sources"][0]["status"] == "planned"
+    assert context["research_budget"]["max_source_queries"] == 30
     brief = artifact.files["agent_brief"].read_text(encoding="utf-8")
     assert "Required exploration checks" in brief
     assert "Model families" in brief
     assert "MCP regressor search allowed" in brief
+    assert "bounded schema/count/sample/aggregate queries" in brief
+
+
+def test_setup_uses_real_single_series_input_and_emits_signal_artifacts(tmp_path) -> None:
+    input_path = tmp_path / "source data" / "air passengers.csv"
+    input_path.parent.mkdir()
+    input_path.write_text("month,passengers\n2025-01-31,100\n", encoding="utf-8")
+
+    artifact = create_forecast_setup(
+        tmp_path / "air workspace",
+        SetupAnswers(
+            name="air_passengers",
+            data_source="csv",
+            input_path=str(input_path),
+            series_count="single",
+            target_name="passengers",
+            time_col="month",
+            id_value="AirPassengers",
+            horizon=12,
+            freq="ME",
+            preset="accuracy-first",
+            research_budget=ResearchBudget(profile="balanced"),
+        ),
+    )
+
+    command = artifact.next_commands[0]
+    context = json.loads(artifact.files["context"].read_text(encoding="utf-8"))
+    assert f'--input "{input_path}"' in command
+    assert '--id-value "AirPassengers"' in command
+    assert "--time-col month --target-col passengers" in command
+    assert context["sources"][0]["status"] == "available"
+    assert context["sources"][0]["provenance"] == str(input_path.resolve())
+    assert artifact.files["signal_needs"].exists()
+    assert artifact.files["signal_probe_ledger"].exists()
+    assert artifact.files["signal_contracts"].exists()
 
 
 def test_setup_cli_writes_questions_and_next_commands(tmp_path, capsys) -> None:
@@ -117,6 +175,20 @@ def test_setup_cli_writes_questions_and_next_commands(tmp_path, capsys) -> None:
             "mlforecast",
             "hierarchicalforecast",
             "--mcp-regressor-search",
+            "--research-budget",
+            "time-boxed",
+            "--decision",
+            "Set plan",
+            "--audience",
+            "CFO",
+            "--target-semantics",
+            "Monthly ARR",
+            "--units",
+            "USD",
+            "--grain",
+            "monthly by product",
+            "--refresh-cadence",
+            "monthly",
             "--outputs",
             "excel",
             "html",
@@ -130,8 +202,11 @@ def test_setup_cli_writes_questions_and_next_commands(tmp_path, capsys) -> None:
     assert (workspace / "forecast_setup.yaml").exists()
     assert (workspace / "questions.json").exists()
     assert (workspace / "agent_brief.md").exists()
+    assert (workspace / "forecast_context.json").exists()
     assert (workspace / "queries" / "source.dax").exists()
     assert "nixtla-scaffold ingest" in payload["next_commands"][0]
     config = yaml.safe_load((workspace / "forecast_setup.yaml").read_text(encoding="utf-8"))
     assert config["forecast_preset"] == "strict"
     assert config["forecast_spec"]["strict_cv_horizon"] is True
+    assert config["forecast_context"]["research_budget"]["profile"] == "time-boxed"
+    assert config["forecast_context"]["audience"] == "CFO"

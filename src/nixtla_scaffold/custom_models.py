@@ -690,7 +690,18 @@ def _custom_policy_resolution(
         }
     )
     out["families"] = families
-    return out
+    from nixtla_scaffold.models import _with_resolved_candidate_identity
+
+    prior_identity = out.get("resolved_candidate_identity", {})
+    prior_candidates = (
+        list(prior_identity.get("resolved_candidates", ()))
+        if isinstance(prior_identity, dict)
+        else []
+    )
+    return _with_resolved_candidate_identity(
+        out,
+        resolved_candidates=[*prior_candidates, *contributed_models],
+    )
 
 
 def _replace_model_result(result: ModelResult, **updates: Any) -> ModelResult:

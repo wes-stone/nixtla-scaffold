@@ -10,15 +10,17 @@ Use the scaffold as the canonical forecasting workbench. Treat FINN/finnts outpu
 
 Operating rules:
 
-1. Start with the forecasting intake: target, grain, horizon, history length, known future events, candidate drivers, hierarchy needs, and intended planning decision.
-2. Keep baseline, scenario, plan, and external forecasts separate. Never concatenate external `yhat` rows into observed history.
+1. Start with the forecasting intake: target, grain, horizon, history length, known future events, candidate drivers, hierarchy needs, intended planning decision, and a time-boxed, balanced, deep, or custom research budget. Use the `accuracy-first` preset unless the user explicitly asks for an exploratory run.
+2. Read `signal_needs.json` before choosing a model experiment. Route needs by source capability, execute only bounded read-only schema/count/sample/aggregate probes, append receipts to `signal_probe_ledger.jsonl`, and admit only mechanism-, grain-, vintage-, latency-, leakage-, and future-path-safe signals to `signal_contracts.json`.
 3. Prefer the one-command challenger flow first: `forecast --finn` (or a spec `challengers` block) runs FINN automatically after the native run, soft-fails when R is missing, and writes `finn\challenger_status.json`, `finn\agent_brief.json`, and `appendix\challenger_leaderboard.csv`. Use `finn pipeline --run <run>` to retrofit an existing run. Fall back to the manual `finn ingest`/`compare`/`score` bridge only for pre-produced FINN files.
 4. Use `finn check` before any direct FINN/R run. If `Rscript` or `finnts` is missing, `--finn` will soft-skip with a remediation hint in `challenger_status.json`; the manual `finn run` without `--runner` still generates `finn_runner_template.R` for no-R bridge tests.
-5. When reviewing FINN output attached to a scaffold run, first read `finn\challenger_status.json` and `finn\agent_brief.json` (status, comparable metrics, suggested next commands), then `appendix\challenger_leaderboard.csv` for the unified native-vs-challenger ranking, then `finn\external_model_metrics.csv` and `finn\external_scoring_manifest.json` for scoring evidence.
-6. Explain guardrails plainly: challenger rows are scored on the scaffold's own rolling-origin cutoffs (`comparable=True` only when cutoff-scored), FINN compare is directional triangulation, and neither changes scaffold champion selection.
+5. When reviewing FINN output attached to a scaffold run, first read `finn\challenger_status.json` and `finn\agent_brief.json`, then `finn\comparability_receipt.json`, `appendix\challenger_leaderboard.csv`, `finn\external_model_metrics.csv`, and `finn\scoring_manifest.json`.
+6. Explain guardrails plainly: `comparable=True` requires an exact row-level match to `appendix\cutoff_contract.csv` on series, cutoff, forecast date, horizon step, and actual. FINN compare is directional triangulation, and neither comparison nor scoring changes scaffold champion selection.
 7. For ensembles, require prior-cutoff or walk-forward evidence. Do not score weights on the same fold that learned them.
-8. For optimizer work, keep iterations bounded and auditable. Prefer one hypothesis per iteration and record why variants were kept or rejected.
-9. Before stakeholder-facing claims, inspect trust, horizon validation, intervals, residuals, hierarchy coherence, and driver leakage receipts.
+8. For optimizer work, do not begin generic catalog experiments while typed signal needs remain open unless the source-query budget is exhausted. Run the reusable baseline outside the iteration count, change one meaningful dimension per iteration, and keep tuning separate from the latest untouched confirmation rows. Read every iteration's data, forecast, business-context, and claim reviews before choosing the next hypothesis.
+9. Promotion requires exact paired tuning coverage, meaningful scale-free improvement, acceptable secondary evidence, stable windows, no stronger claim-gate failure, and untouched later confirmation. Ties keep the simpler baseline; external promotion always requires explicit human approval.
+10. Standalone treatments require an automatically generated matched baseline control. Read `resolved_candidate_fingerprint` before ranking: unexpected optional-package or runtime drift blocks comparison until a new control exists; `all_models` is allowed only because candidate-set breadth is the named treatment.
+11. Read `research_plan.json`, `chronological_split.csv`, `signal_experiment_dispositions.json`, `iteration_ledger.csv`, `knowledge_ledger.jsonl`, `promotion_decision.json`, and `stop_receipt.json`. Before stakeholder-facing claims, lead with `appendix\accuracy_gate.json` (or `doctor`'s accuracy-gate summary), then inspect trust, horizon validation, intervals, residuals, hierarchy coherence, and driver leakage receipts.
 
 Useful commands:
 
@@ -29,7 +31,7 @@ uv run nixtla-scaffold finn check
 uv run nixtla-scaffold finn ingest --input finn_forecast.csv --output runs\finn_ingest
 uv run nixtla-scaffold finn compare --run runs\forecast --input finn_forecast.csv
 uv run nixtla-scaffold finn score --run runs\forecast --actuals actuals.csv --input finn_backtest.csv --season-length 12 --horizon 6
-uv run nixtla-scaffold optimize --input data.csv --preset standard --horizon 6 --variants baseline all_models rolling_features --output runs\optimizer
+uv run nixtla-scaffold optimize --input data.csv --preset accuracy-first --context-file forecast_context.json --horizon 6 --output runs\optimizer
 ```
 
 `--finn` and `finn pipeline` orchestrate the full challenger lifecycle (env check → spec-generated R runner → run → compare → score → unified leaderboard) with soft-fail semantics; check `finn\challenger_status.json` for status/skip reasons. Omitting `--output` on `finn compare`, or using `finn score --run`, attaches FINN artifacts under `runs\forecast\finn` and registers them in `manifest.json` / `llm_context.json` for Streamlit and agent review.

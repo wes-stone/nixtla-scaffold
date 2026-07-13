@@ -3,16 +3,24 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any, Literal
 
-from nixtla_scaffold.schema import ForecastSpec
+from nixtla_scaffold.schema import ForecastContext, ForecastSpec
 
-ForecastPresetName = Literal["quick", "standard", "strict", "hierarchy", "finance"]
-CANONICAL_PRESET_NAMES: tuple[str, ...] = ("quick", "standard", "strict", "hierarchy")
+ForecastPresetName = Literal["quick", "accuracy-first", "standard", "strict", "hierarchy", "finance"]
+CANONICAL_PRESET_NAMES: tuple[str, ...] = ("quick", "accuracy-first", "standard", "strict", "hierarchy")
 PRESET_ALIASES: dict[str, str] = {"finance": "standard"}
 PRESET_NAMES: tuple[str, ...] = CANONICAL_PRESET_NAMES + tuple(PRESET_ALIASES)
 
 
 _PRESET_SPECS: dict[str, ForecastSpec] = {
     "quick": ForecastSpec(horizon=6, model_policy="baseline", weighted_ensemble=True, verbose=False),
+    "accuracy-first": ForecastSpec(
+        horizon=6,
+        model_policy="standard",
+        strict_cv_horizon=True,
+        weighted_ensemble=True,
+        verbose=True,
+        context=ForecastContext(),
+    ),
     "standard": ForecastSpec(horizon=6, model_policy="standard", weighted_ensemble=True, verbose=True),
     "strict": ForecastSpec(
         horizon=6,
@@ -32,7 +40,8 @@ _PRESET_SPECS: dict[str, ForecastSpec] = {
 }
 
 _PRESET_DESCRIPTIONS: dict[str, str] = {
-    "quick": "Fast first pass for exploration: baseline ladder, intervals when available, and concise output.",
+    "quick": "Exploratory, non-promotable first pass: baseline ladder, intervals when available, and concise output.",
+    "accuracy-first": "Accuracy-first workflow: serious native tournament, full-horizon validation when feasible, bounded context research, and explicit claim gates with directional fallback.",
     "standard": "Default audit-ready forecast: standard model policy, trust/action artifacts, intervals, and full audit output.",
     "strict": "High-stakes mode: requires backtests and only selects champions from full-horizon CV windows.",
     "hierarchy": "Planning-coherent hierarchy mode: standard defaults plus bottom-up reconciliation unless overridden.",
@@ -72,6 +81,8 @@ def preset_catalog() -> list[dict[str, Any]]:
                 "mlforecast_feature_policy": spec.mlforecast_feature_policy,
                 "weighted_ensemble": spec.weighted_ensemble,
                 "verbose": spec.verbose,
+                "accuracy_first": spec.context is not None,
+                "research_budget_profile": spec.context.research_budget.profile if spec.context is not None else None,
             }
         )
     return rows

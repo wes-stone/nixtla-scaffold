@@ -1,8 +1,18 @@
 from __future__ import annotations
 
+import hashlib
+import json
+
 from nixtla_scaffold.cli import main
 from nixtla_scaffold.citations import FPPY_CITATION
-from nixtla_scaffold.knowledge import format_knowledge, load_agent_skill, search_knowledge
+from nixtla_scaffold.knowledge import (
+    check_agent_skill,
+    format_knowledge,
+    load_agent_skill,
+    load_skill_manifest,
+    search_knowledge,
+    sync_agent_skill,
+)
 from nixtla_scaffold.mcp_contracts import describe_contract
 
 
@@ -23,6 +33,34 @@ def test_guide_skill_prints_bundled_agent_skill(capsys) -> None:
     assert exit_code == 0
     assert "name: nixtla-forecast" in output
     assert "End-to-end FPPy-aligned time series forecasting" in output
+
+
+def test_skill_manifest_pins_canonical_skill_hash() -> None:
+    manifest = load_skill_manifest()
+    digest = hashlib.sha256(load_agent_skill().encode("utf-8")).hexdigest()
+
+    assert manifest["skill_version"] == "1.3.0"
+    assert manifest["source_sha256"] == digest
+
+
+def test_skill_check_and_confirmed_sync_preserve_backup(tmp_path, capsys) -> None:
+    target = tmp_path / "nixtla-forecast"
+    target.mkdir()
+    (target / "SKILL.md").write_text("stale skill\n", encoding="utf-8")
+
+    before = check_agent_skill(target)
+    assert before["status"] == "drift"
+
+    synced = sync_agent_skill(target, confirmed=True)
+    assert synced["synced"] is True
+    assert synced["backup_path"]
+    assert (target / "skill_manifest.json").exists()
+    assert (target / "SKILL.md").read_bytes() == load_agent_skill().encode("utf-8")
+
+    exit_code = main(["skill", "check", "--target", str(target)])
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["status"] == "in_sync"
 
 
 def test_guide_search_includes_agent_recipes() -> None:
@@ -63,4 +101,3 @@ def test_mcp_contract_describes_required_columns_and_recipes() -> None:
 
     assert set(contract["required_columns"]) == {"unique_id", "ds", "y"}
     assert contract["recipes"]
-

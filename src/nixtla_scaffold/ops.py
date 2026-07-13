@@ -359,6 +359,35 @@ def build_doctor_payload(run_dir: str | Path) -> dict[str, Any]:
     run = Path(run_dir)
     rows: list[dict[str, str]] = []
     _append_check(rows, "run_directory_exists", "run", run.exists(), f"Run directory: {run}.", "Point --run to a forecast output folder.")
+    accuracy_gate_path = run / "appendix" / "accuracy_gate.json"
+    accuracy_gate = _read_json(accuracy_gate_path)
+    if accuracy_gate:
+        gate_status = str(accuracy_gate.get("status", "unknown"))
+        remediation = [
+            str(item)
+            for series in accuracy_gate.get("series", [])
+            if isinstance(series, dict)
+            for item in series.get("remediation", [])
+        ]
+        _append_check(
+            rows,
+            "accuracy_gate_review",
+            "forecast_readiness",
+            gate_status == "planning_ready",
+            f"Authoritative accuracy gate: {gate_status}.",
+            remediation[0] if remediation else "Read appendix\\accuracy_gate.json before narrating the run.",
+            fail_severity="warn",
+        )
+    else:
+        gate_status = "legacy_or_unavailable"
+        _append_check(
+            rows,
+            "accuracy_gate_review",
+            "forecast_readiness",
+            True,
+            "No accuracy gate is available; treat this as a legacy or non-accuracy-first run.",
+            "Rerun with the accuracy-first preset when planning-ready claims are required.",
+        )
     manifest = _read_json(run / "manifest.json")
     outputs = manifest.get("outputs", {}) if isinstance(manifest, dict) else {}
     _append_check(rows, "manifest_exists", "run", (run / "manifest.json").exists(), "manifest.json is present.", "Regenerate the run.")
@@ -479,6 +508,14 @@ def build_doctor_payload(run_dir: str | Path) -> dict[str, Any]:
         "schema_version": DOCTOR_SCHEMA_VERSION,
         "generated_at_utc": _utc_now(),
         "run_dir": str(run),
+        "accuracy_gate": {
+            "available": bool(accuracy_gate),
+            "status": gate_status,
+            "planning_ready_claim_allowed": bool(
+                accuracy_gate.get("planning_ready_claim_allowed", False)
+            ),
+            "path": str(accuracy_gate_path),
+        },
         "overall_status": _overall_status(checks),
         "summary": _status_counts(checks),
         "checks": checks.to_dict(orient="records"),

@@ -54,6 +54,10 @@ def test_run_forecast_applies_log1p_transform_and_reports_original_scale(tmp_pat
     assert run.history["y"].round(6).tolist() == df["y"].astype(float).round(6).tolist()
     assert run.forecast["yhat"].min() > 100
     assert run.backtest_predictions["y"].min() > 100
+    expected_actuals = df.assign(ds=pd.to_datetime(df["ds"]))[["unique_id", "ds", "y"]]
+    actuals = run.backtest_predictions[["unique_id", "ds", "y"]].drop_duplicates(["unique_id", "ds"])
+    matched = actuals.merge(expected_actuals, on=["unique_id", "ds"], suffixes=("_backtest", "_source"))
+    assert matched["y_backtest"].tolist() == matched["y_source"].astype(float).tolist()
     assert not run.transformation_audit.empty
     assert run.transformation_audit["target_transform"].unique().tolist() == ["log1p"]
     assert (run.transformation_audit["y_modeled"].round(8) == pd.Series(np.log1p(df["y"])).round(8)).all()

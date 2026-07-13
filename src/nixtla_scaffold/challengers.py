@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from hashlib import sha256
+from importlib import metadata as importlib_metadata
 import json
 from pathlib import Path
 import time
@@ -31,13 +33,16 @@ CHALLENGERS_SCHEMA_VERSION = "nixtla_scaffold.challengers.v1"
 CHALLENGER_STATUS_OUTPUT = "challenger_status.json"
 CHALLENGER_AGENT_BRIEF_OUTPUT = "agent_brief.json"
 CHALLENGER_LEADERBOARD_OUTPUT = "appendix/challenger_leaderboard.csv"
-FINN_SPEC_RUNNER_OUTPUT = "finn_spec_runner.R"
-FINN_PARAMS_OUTPUT = "finn_params.json"
-FINN_INPUT_OUTPUT = "finn_input.csv"
-FINN_RAW_FUTURE_OUTPUT = "finn_raw_future.csv"
-FINN_RAW_BACKTEST_OUTPUT = "finn_raw_backtest.csv"
+CHALLENGER_RUN_MANIFEST_OUTPUT = "challenger_run_manifest.json"
+FINN_RAW_DIR = "raw"
+FINN_SPEC_RUNNER_OUTPUT = f"{FINN_RAW_DIR}/finn_spec_runner.R"
+FINN_PARAMS_OUTPUT = f"{FINN_RAW_DIR}/finn_params.json"
+FINN_INPUT_OUTPUT = f"{FINN_RAW_DIR}/finn_input.csv"
+FINN_RAW_FUTURE_OUTPUT = f"{FINN_RAW_DIR}/finn_raw_future.csv"
+FINN_RAW_BACKTEST_OUTPUT = f"{FINN_RAW_DIR}/finn_raw_backtest.csv"
 
 _LEADERBOARD_METRIC_COLUMNS = ["rmse", "mae", "wape", "mase", "rmsse", "bias", "abs_bias", "observations"]
+_TRUE_VALUES = frozenset({"1", "true", "t", "yes", "y"})
 
 
 class ChallengerSkip(RuntimeError):
@@ -133,6 +138,8 @@ def run_challengers(
             leaderboard.to_csv(leaderboard_path, index=False)
             payload["challenger_leaderboard"] = CHALLENGER_LEADERBOARD_OUTPUT
             _register_run_output(run_path, "challenger_leaderboard", CHALLENGER_LEADERBOARD_OUTPUT)
+    for challenger, status in zip(challengers, statuses, strict=True):
+        _write_agent_brief(run_path, run_path / challenger.source_id, challenger, status)
     return payload
 
 
@@ -151,6 +158,8 @@ def _run_single_challenger(
         "on_error": challenger.on_error,
         "spec": challenger.to_dict(),
         "advisory_only": True,
+        "nixtla_scaffold_version": _package_version(),
+        "input_sha256": _sha256(history_path) if history_path.exists() else None,
         "created_at_utc": _now_utc(),
     }
     if not challenger.enabled:
@@ -197,6 +206,7 @@ def _run_single_challenger(
         )
         if challenger.on_error == "fail":
             _write_status(run_path, out, status)
+            _write_agent_brief(run_path, out, challenger, status)
             raise
     except Exception as error:  # soft-fail lane: record and continue unless on_error=fail
         status.update(
@@ -209,9 +219,9 @@ def _run_single_challenger(
         )
         if challenger.on_error == "fail":
             _write_status(run_path, out, status)
+            _write_agent_brief(run_path, out, challenger, status)
             raise
     _write_status(run_path, out, status)
-    _write_agent_brief(run_path, out, challenger, status)
     return status
 
 
@@ -228,7 +238,8 @@ def _attach_challenger_artifacts(
     if not forecasts.future.empty:
         compare_finn_forecasts(run_path, forecasts.future, output_dir=out, **common)
         artifacts["forecast_comparison"] = str(out / "forecast_comparison.csv")
-        artifacts["manifest"] = str(out / "finn_manifest.json")
+        artifacts["future_forecasts"] = str(out / "future_forecasts.csv")
+        artifacts["comparison_manifest"] = str(out / "comparison_manifest.json")
     if not forecasts.backtest.empty:
         score_finn_forecasts(
             forecasts.backtest,
@@ -241,6 +252,9 @@ def _attach_challenger_artifacts(
         )
         artifacts["external_model_metrics"] = str(out / "external_model_metrics.csv")
         artifacts["external_backtest_long"] = str(out / "external_backtest_long.csv")
+        artifacts["cutoff_forecasts"] = str(out / "cutoff_forecasts.csv")
+        artifacts["comparability_receipt"] = str(out / "comparability_receipt.json")
+        artifacts["scoring_manifest"] = str(out / "scoring_manifest.json")
     return artifacts
 
 
@@ -255,7 +269,7 @@ def build_challenger_leaderboard(run_dir: str | Path) -> pd.DataFrame:
         if not native.empty:
             native["lane"] = "native"
             native["source_id"] = "scaffold"
-            native["comparable"] = native.get("cv_horizon_matches_requested", True)
+            native = _attach_native_comparability(run_path, native)
             native["cutoff_count"] = native.get("cv_windows")
             frames.append(native)
     for metrics_path in sorted(run_path.glob("*/external_model_metrics.csv")):
@@ -265,30 +279,99 @@ def build_challenger_leaderboard(run_dir: str | Path) -> pd.DataFrame:
         external["lane"] = "challenger"
         if "source_id" not in external.columns:
             external["source_id"] = metrics_path.parent.name
-        if "scoring_evidence_status" in external.columns:
-            external["comparable"] = external["scoring_evidence_status"] == "external_cutoff_scored"
-        else:
+        if "comparable" not in external.columns:
             external["comparable"] = False
         frames.append(external)
     if not frames:
         return pd.DataFrame()
-    columns = ["unique_id", "model", "lane", "source_id", "comparable", "cutoff_count", *_LEADERBOARD_METRIC_COLUMNS]
+    columns = [
+        "unique_id",
+        "model",
+        "lane",
+        "source_id",
+        "scenario_name",
+        "comparability_status",
+        "comparable",
+        "cutoff_coverage",
+        "matched_cutoff_rows",
+        "expected_cutoff_rows",
+        "cutoff_count",
+        *_LEADERBOARD_METRIC_COLUMNS,
+    ]
     combined = pd.concat(frames, ignore_index=True, sort=False)
     for column in columns:
         if column not in combined.columns:
             combined[column] = pd.NA
     leaderboard = combined[columns].copy()
+    leaderboard["comparable"] = _boolean_series(leaderboard["comparable"])
     leaderboard = leaderboard.sort_values(["unique_id", "rmse"], kind="stable").reset_index(drop=True)
     leaderboard["lane_rank"] = leaderboard.groupby(["unique_id", "lane"])["rmse"].rank(method="first")
-    leaderboard["overall_rank"] = leaderboard.groupby("unique_id")["rmse"].rank(method="first")
+    leaderboard["directional_rank"] = pd.NA
+    directional = ~leaderboard["comparable"]
+    leaderboard.loc[directional, "directional_rank"] = (
+        leaderboard.loc[directional]
+        .groupby(["unique_id", "lane"])["rmse"]
+        .rank(method="first")
+    )
+    leaderboard["overall_rank"] = pd.NA
+    comparable = leaderboard["comparable"]
+    leaderboard.loc[comparable, "overall_rank"] = (
+        leaderboard.loc[comparable]
+        .groupby("unique_id")["rmse"]
+        .rank(method="first")
+    )
     return leaderboard
+
+
+def _attach_native_comparability(run_path: Path, native: pd.DataFrame) -> pd.DataFrame:
+    out = native.copy()
+    contract_path = run_path / "appendix" / "cutoff_contract.csv"
+    if not contract_path.exists():
+        out["comparability_status"] = "cutoff_contract_unavailable"
+        out["comparable"] = False
+        out["expected_cutoff_rows"] = 0
+        out["matched_cutoff_rows"] = 0
+        out["cutoff_coverage"] = 0.0
+        return out
+
+    contract = pd.read_csv(contract_path)
+    expected = contract.groupby(contract["unique_id"].astype(str)).size()
+    expected_rows = out["unique_id"].astype(str).map(expected).fillna(0).astype(int)
+    observations = out["observations"] if "observations" in out.columns else pd.Series(pd.NA, index=out.index)
+    observed_rows = pd.to_numeric(observations, errors="coerce").fillna(0).astype(int)
+    if "cv_horizon_matches_requested" in out.columns:
+        horizon_match = _boolean_series(out["cv_horizon_matches_requested"])
+    else:
+        horizon_match = pd.Series(False, index=out.index)
+    out["expected_cutoff_rows"] = expected_rows
+    out["matched_cutoff_rows"] = observed_rows.clip(upper=expected_rows)
+    out["cutoff_coverage"] = out["matched_cutoff_rows"].divide(expected_rows.where(expected_rows.gt(0)), fill_value=0.0)
+    out["comparable"] = horizon_match & expected_rows.gt(0) & observed_rows.eq(expected_rows)
+    out["comparability_status"] = out["comparable"].map(
+        {True: "exact_cutoff_contract_match", False: "native_cutoff_contract_mismatch"}
+    )
+    return out
+
+
+def _boolean_series(values: pd.Series) -> pd.Series:
+    """Normalize booleans loaded from CSV without treating non-empty 'false' strings as true."""
+
+    return values.astype("string").str.strip().str.lower().isin(_TRUE_VALUES)
 
 
 def _write_status(run_path: Path, out: Path, status: dict[str, Any]) -> None:
     out.mkdir(parents=True, exist_ok=True)
-    (out / CHALLENGER_STATUS_OUTPUT).write_text(json.dumps(status, indent=2, default=str) + "\n", encoding="utf-8")
+    status["artifact_sha256"] = _artifact_hashes(out)
+    payload = json.dumps(status, indent=2, default=str) + "\n"
+    (out / CHALLENGER_STATUS_OUTPUT).write_text(payload, encoding="utf-8")
+    (out / CHALLENGER_RUN_MANIFEST_OUTPUT).write_text(payload, encoding="utf-8")
     relative = f"{out.name}/{CHALLENGER_STATUS_OUTPUT}"
     _register_run_output(run_path, f"{status['source_id']}_challenger_status", relative)
+    _register_run_output(
+        run_path,
+        f"{status['source_id']}_challenger_run_manifest",
+        f"{out.name}/{CHALLENGER_RUN_MANIFEST_OUTPUT}",
+    )
 
 
 def _write_agent_brief(run_path: Path, out: Path, challenger: ChallengerSpec, status: dict[str, Any]) -> None:
@@ -303,14 +386,18 @@ def _write_agent_brief(run_path: Path, out: Path, challenger: ChallengerSpec, st
         "comparable_evidence": f"{challenger.source_id}/external_model_metrics.csv"
         if (out / "external_model_metrics.csv").exists()
         else None,
+        "comparability_receipt": f"{challenger.source_id}/comparability_receipt.json"
+        if (out / "comparability_receipt.json").exists()
+        else None,
         "directional_comparison": f"{challenger.source_id}/forecast_comparison.csv"
         if (out / "forecast_comparison.csv").exists()
         else None,
         "leaderboard": CHALLENGER_LEADERBOARD_OUTPUT if (run_path / CHALLENGER_LEADERBOARD_OUTPUT).exists() else None,
         "guidance": [
             "Challenger forecasts are advisory and never mutate forecast.csv.",
-            "Use external_model_metrics.csv (cutoff-scored) for apples-to-apples accuracy claims; forecast_comparison.csv is directional only.",
-            "appendix/challenger_leaderboard.csv merges native and challenger lanes; champion selection ignores challenger rows.",
+            "Use only external_model_metrics.csv rows with comparable=true and cutoff_coverage=1 for cross-lane accuracy claims.",
+            "Forecast comparisons and non-comparable cutoff scores are directional evidence only.",
+            "appendix/challenger_leaderboard.csv gives overall_rank only to exact cutoff-contract matches; champion selection ignores challenger rows.",
         ],
         "next_commands": [
             f"nixtla-scaffold finn pipeline --run {run_path}",
@@ -360,6 +447,7 @@ class FinnChallengerEngine:
         output_dir: Path,
     ) -> ChallengerForecasts:
         output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / FINN_RAW_DIR).mkdir(parents=True, exist_ok=True)
         date_type = _finn_date_type(str(run_spec.get("freq") or ""), history)
         params = {
             "schema_version": CHALLENGERS_SCHEMA_VERSION,
@@ -397,7 +485,7 @@ class FinnChallengerEngine:
             str(backtest_path),
         ]
         result = _run_command(command, timeout_seconds=spec.timeout_seconds)
-        (output_dir / "finn_spec_runner_log.json").write_text(
+        (output_dir / FINN_RAW_DIR / "finn_spec_runner_log.json").write_text(
             json.dumps({"command": command, **result}, indent=2, default=str) + "\n", encoding="utf-8"
         )
         if result["returncode"] != 0:
@@ -484,7 +572,7 @@ def _canonicalize_engine_frame(
         if with_cutoff_from_horizon and "horizon" in out.columns:
             raise ChallengerSkip(
                 "could not infer a period alias from canonical history to label challenger backtest cutoffs",
-                remediation="provide an explicit freq in the spec so cutoffs can be derived apples-to-apples",
+                remediation="provide an explicit freq so candidate cutoffs can be derived, then verify exact overlap in comparability_receipt.json",
             )
     out["unique_id"] = out["unique_id"].astype(str)
     out["model"] = out.get("model", pd.Series(["selected"] * len(out))).fillna("selected").astype(str)
@@ -589,6 +677,30 @@ if (nrow(backtest) > 0) {
   )
 }
 """
+
+
+def _artifact_hashes(output_dir: Path) -> dict[str, str]:
+    excluded = {CHALLENGER_STATUS_OUTPUT, CHALLENGER_RUN_MANIFEST_OUTPUT, CHALLENGER_AGENT_BRIEF_OUTPUT}
+    return {
+        path.relative_to(output_dir).as_posix(): _sha256(path)
+        for path in sorted(output_dir.rglob("*"))
+        if path.is_file() and path.name not in excluded
+    }
+
+
+def _sha256(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _package_version() -> str:
+    try:
+        return importlib_metadata.version("nixtla-scaffold")
+    except importlib_metadata.PackageNotFoundError:
+        return "source"
 
 
 def _now_utc() -> str:

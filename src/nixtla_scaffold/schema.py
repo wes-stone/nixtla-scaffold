@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from importlib import metadata
 import platform
 import re
@@ -12,6 +13,7 @@ from pathlib import Path
 from typing import Any, Literal, Sequence
 
 import pandas as pd
+import yaml
 
 from nixtla_scaffold.model_families import MODEL_ALLOWLIST_CANDIDATES, canonicalize_model_allowlist
 
@@ -28,6 +30,17 @@ EnsembleScoringMode = Literal["prior_only"]
 EnsembleDeploymentMode = Literal["full_backtest", "last_cutoff"]
 ParallelProcessingMode = Literal["none", "local_machine", "spark"]
 ChallengerOnError = Literal["skip", "fail"]
+ResearchBudgetProfile = Literal["time-boxed", "balanced", "deep", "custom"]
+ContextSourceStatus = Literal["planned", "attempted", "available", "unavailable", "irrelevant", "opted_out"]
+ReferenceAvailability = Literal["unknown", "available", "unavailable", "not_applicable"]
+CandidateDriverStatus = Literal["discovered", "audit_only", "eligible_for_experiment", "rejected"]
+DriverFutureAvailability = Literal["unknown", "known", "planned", "scenario", "forecasted", "historical_only", "unavailable"]
+LeakageVerdict = Literal["unreviewed", "pass", "warning", "fail"]
+SignalNeedStatus = Literal["open", "probing", "satisfied", "exhausted", "unavailable", "opted_out"]
+SignalProbeStage = Literal["schema", "count", "sample", "aggregate"]
+SignalProbeStatus = Literal["planned", "completed", "failed", "skipped"]
+SignalDisposition = Literal["context", "scenario", "regressor_candidate", "reject"]
+SignalExperimentStatus = Literal["not_requested", "queued", "tested", "blocked", "not_applicable"]
 
 
 @dataclass(frozen=True)
@@ -95,6 +108,449 @@ class KnownFutureRegressor:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+_RESEARCH_BUDGET_DEFAULTS: dict[str, dict[str, int | float | None]] = {
+    "time-boxed": {
+        "max_iterations": 2,
+        "max_variants_per_iteration": 3,
+        "max_wall_clock_minutes": 15,
+        "max_source_queries": 4,
+        "max_compute_units": None,
+    },
+    "balanced": {
+        "max_iterations": 5,
+        "max_variants_per_iteration": 4,
+        "max_wall_clock_minutes": 60,
+        "max_source_queries": 12,
+        "max_compute_units": None,
+    },
+    "deep": {
+        "max_iterations": 10,
+        "max_variants_per_iteration": 8,
+        "max_wall_clock_minutes": 240,
+        "max_source_queries": 30,
+        "max_compute_units": None,
+    },
+}
+
+
+@dataclass(frozen=True)
+class ResearchBudget:
+    """Hard bounds for context discovery and forecast improvement research."""
+
+    profile: ResearchBudgetProfile = "balanced"
+    max_iterations: int | None = None
+    max_variants_per_iteration: int | None = None
+    max_wall_clock_minutes: int | None = None
+    max_source_queries: int | None = None
+    max_compute_units: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.profile not in {"time-boxed", "balanced", "deep", "custom"}:
+            raise ValueError("research budget profile must be one of: time-boxed, balanced, deep, custom")
+        if self.profile != "custom":
+            defaults = _RESEARCH_BUDGET_DEFAULTS[self.profile]
+            for field_name, default in defaults.items():
+                if getattr(self, field_name) is None:
+                    object.__setattr__(self, field_name, default)
+        bounds = {
+            "max_iterations": self.max_iterations,
+            "max_variants_per_iteration": self.max_variants_per_iteration,
+            "max_wall_clock_minutes": self.max_wall_clock_minutes,
+            "max_source_queries": self.max_source_queries,
+            "max_compute_units": self.max_compute_units,
+        }
+        if not any(value is not None for value in bounds.values()):
+            raise ValueError("research budget requires at least one hard bound")
+        invalid = [name for name, value in bounds.items() if value is not None and value <= 0]
+        if invalid:
+            raise ValueError(f"research budget bounds must be positive: {invalid}")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class AccuracyPolicy:
+    """Claim gates for an accuracy-first forecast."""
+
+    minimum_trust_score: int = 70
+    require_full_horizon_validation: bool = True
+    require_interval_evidence: bool = True
+    require_hierarchy_coherence: bool = True
+    require_driver_clearance: bool = True
+    require_context_discovery: bool = True
+    allow_directional_baseline: bool = True
+
+    def __post_init__(self) -> None:
+        if self.minimum_trust_score < 0 or self.minimum_trust_score > 100:
+            raise ValueError("accuracy policy minimum_trust_score must be between 0 and 100")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class PromotionPolicy:
+    """Chronological evidence required before recommending a new champion."""
+
+    exact_cutoff_coverage: float = 1.0
+    minimum_primary_metric_improvement: float = 0.02
+    maximum_secondary_metric_regression: float = 0.01
+    minimum_confirmation_cutoffs: int = 1
+    require_untouched_confirmation: bool = True
+    require_no_new_gate_failures: bool = True
+    human_approval_required: bool = True
+
+    def __post_init__(self) -> None:
+        if self.exact_cutoff_coverage <= 0 or self.exact_cutoff_coverage > 1:
+            raise ValueError("promotion policy exact_cutoff_coverage must be in (0, 1]")
+        if self.minimum_primary_metric_improvement < 0:
+            raise ValueError("promotion policy minimum_primary_metric_improvement must be >= 0")
+        if self.maximum_secondary_metric_regression < 0:
+            raise ValueError("promotion policy maximum_secondary_metric_regression must be >= 0")
+        if self.minimum_confirmation_cutoffs < 1:
+            raise ValueError("promotion policy minimum_confirmation_cutoffs must be >= 1")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class ContextSource:
+    """Auditable disposition for one potentially relevant connected source."""
+
+    source_id: str
+    kind: str
+    status: ContextSourceStatus = "planned"
+    provenance: str = ""
+    query_ref: str = ""
+    query_count: int = 0
+    row_count: int | None = None
+    known_as_of: str = ""
+    notes: str = ""
+
+    def __post_init__(self) -> None:
+        if not str(self.source_id).strip():
+            raise ValueError("context source_id is required")
+        if not str(self.kind).strip():
+            raise ValueError("context source kind is required")
+        if self.status not in {"planned", "attempted", "available", "unavailable", "irrelevant", "opted_out"}:
+            raise ValueError("context source status must be one of: planned, attempted, available, unavailable, irrelevant, opted_out")
+        if self.query_count < 0:
+            raise ValueError("context source query_count must be >= 0")
+        if self.row_count is not None and self.row_count < 0:
+            raise ValueError("context source row_count must be >= 0")
+        if self.status == "available" and not (str(self.provenance).strip() or str(self.query_ref).strip()):
+            raise ValueError("available context sources require provenance or query_ref")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class CandidateDriver:
+    """Driver discovery evidence that remains separate from model admission."""
+
+    name: str
+    source_id: str
+    status: CandidateDriverStatus = "discovered"
+    timing: str = ""
+    refresh_latency_days: int | None = None
+    future_availability: DriverFutureAvailability = "unknown"
+    leakage_verdict: LeakageVerdict = "unreviewed"
+    business_rationale: str = ""
+    evidence_ref: str = ""
+    notes: str = ""
+
+    def __post_init__(self) -> None:
+        if not str(self.name).strip():
+            raise ValueError("candidate driver name is required")
+        if not str(self.source_id).strip():
+            raise ValueError("candidate driver source_id is required")
+        if self.status not in {"discovered", "audit_only", "eligible_for_experiment", "rejected"}:
+            raise ValueError("candidate driver status must be one of: discovered, audit_only, eligible_for_experiment, rejected")
+        if self.future_availability not in {"unknown", "known", "planned", "scenario", "forecasted", "historical_only", "unavailable"}:
+            raise ValueError("candidate driver future_availability is invalid")
+        if self.leakage_verdict not in {"unreviewed", "pass", "warning", "fail"}:
+            raise ValueError("candidate driver leakage_verdict must be one of: unreviewed, pass, warning, fail")
+        if self.refresh_latency_days is not None and self.refresh_latency_days < 0:
+            raise ValueError("candidate driver refresh_latency_days must be >= 0")
+        if self.status == "eligible_for_experiment" and self.leakage_verdict != "pass":
+            raise ValueError("candidate drivers require leakage_verdict='pass' before becoming eligible_for_experiment")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class SignalNeed:
+    """A diagnosis-led information need before choosing a model experiment."""
+
+    need_id: str
+    signal_family: str
+    question: str
+    business_mechanism: str
+    route_capabilities: tuple[str, ...] = ()
+    priority: int = 3
+    status: SignalNeedStatus = "open"
+    evidence_refs: tuple[str, ...] = ()
+    next_probe: str = ""
+    notes: str = ""
+
+    def __post_init__(self) -> None:
+        required = {
+            "need_id": self.need_id,
+            "signal_family": self.signal_family,
+            "question": self.question,
+            "business_mechanism": self.business_mechanism,
+        }
+        missing = [name for name, value in required.items() if not str(value).strip()]
+        if missing:
+            raise ValueError(f"signal need requires non-blank fields: {missing}")
+        if self.priority < 1 or self.priority > 5:
+            raise ValueError("signal need priority must be between 1 and 5")
+        if self.status not in {"open", "probing", "satisfied", "exhausted", "unavailable", "opted_out"}:
+            raise ValueError("signal need status is invalid")
+        if any(not str(capability).strip() for capability in self.route_capabilities):
+            raise ValueError("signal need route_capabilities cannot contain blanks")
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["route_capabilities"] = list(self.route_capabilities)
+        data["evidence_refs"] = list(self.evidence_refs)
+        return data
+
+
+@dataclass(frozen=True)
+class SignalProbe:
+    """One bounded, read-only source probe executed by the agent."""
+
+    probe_id: str
+    need_id: str
+    source_id: str
+    capability: str
+    stage: SignalProbeStage
+    status: SignalProbeStatus = "planned"
+    query_count: int = 0
+    query_ref: str = ""
+    provenance: str = ""
+    row_count: int | None = None
+    known_as_of: str = ""
+    result_summary: str = ""
+    next_blocked_probe: str = ""
+    notes: str = ""
+
+    def __post_init__(self) -> None:
+        required = {
+            "probe_id": self.probe_id,
+            "need_id": self.need_id,
+            "source_id": self.source_id,
+            "capability": self.capability,
+        }
+        missing = [name for name, value in required.items() if not str(value).strip()]
+        if missing:
+            raise ValueError(f"signal probe requires non-blank fields: {missing}")
+        if self.stage not in {"schema", "count", "sample", "aggregate"}:
+            raise ValueError("signal probe stage must be one of: schema, count, sample, aggregate")
+        if self.status not in {"planned", "completed", "failed", "skipped"}:
+            raise ValueError("signal probe status must be one of: planned, completed, failed, skipped")
+        if self.query_count < 0:
+            raise ValueError("signal probe query_count must be >= 0")
+        if self.row_count is not None and self.row_count < 0:
+            raise ValueError("signal probe row_count must be >= 0")
+        if self.status == "completed" and not (str(self.query_ref).strip() or str(self.provenance).strip()):
+            raise ValueError("completed signal probes require query_ref or provenance")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class SignalContract:
+    """Validated signal disposition and temporal/grain contract."""
+
+    signal_id: str
+    need_id: str
+    probe_id: str
+    name: str
+    source_id: str
+    disposition: SignalDisposition
+    business_mechanism: str = ""
+    entity_keys: tuple[str, ...] = ()
+    time_key: str = ""
+    grain: str = ""
+    value_col: str = ""
+    known_as_of_col: str = ""
+    refresh_latency_days: int | None = None
+    future_value_mode: DriverFutureAvailability = "unknown"
+    coverage: float | None = None
+    query_ref: str = ""
+    provenance: str = ""
+    leakage_verdict: LeakageVerdict = "unreviewed"
+    target_proxy_verdict: LeakageVerdict = "unreviewed"
+    next_blocked_probe: str = ""
+    experiment_status: SignalExperimentStatus = "not_requested"
+    experiment_reason: str = ""
+    notes: str = ""
+
+    def __post_init__(self) -> None:
+        required = {
+            "signal_id": self.signal_id,
+            "need_id": self.need_id,
+            "probe_id": self.probe_id,
+            "name": self.name,
+            "source_id": self.source_id,
+        }
+        missing = [name for name, value in required.items() if not str(value).strip()]
+        if missing:
+            raise ValueError(f"signal contract requires non-blank fields: {missing}")
+        if self.disposition not in {"context", "scenario", "regressor_candidate", "reject"}:
+            raise ValueError("signal contract disposition is invalid")
+        if self.refresh_latency_days is not None and self.refresh_latency_days < 0:
+            raise ValueError("signal contract refresh_latency_days must be >= 0")
+        if self.coverage is not None and (self.coverage < 0 or self.coverage > 1):
+            raise ValueError("signal contract coverage must be between 0 and 1")
+        if self.future_value_mode not in {"unknown", "known", "planned", "scenario", "forecasted", "historical_only", "unavailable"}:
+            raise ValueError("signal contract future_value_mode is invalid")
+        if self.leakage_verdict not in {"unreviewed", "pass", "warning", "fail"}:
+            raise ValueError("signal contract leakage_verdict is invalid")
+        if self.target_proxy_verdict not in {"unreviewed", "pass", "warning", "fail"}:
+            raise ValueError("signal contract target_proxy_verdict is invalid")
+        if self.experiment_status not in {"not_requested", "queued", "tested", "blocked", "not_applicable"}:
+            raise ValueError("signal contract experiment_status is invalid")
+        if self.disposition == "regressor_candidate":
+            regressor_required = {
+                "business_mechanism": self.business_mechanism,
+                "time_key": self.time_key,
+                "grain": self.grain,
+                "value_col": self.value_col,
+                "known_as_of_col": self.known_as_of_col,
+            }
+            missing_regressor_fields = [
+                name for name, value in regressor_required.items() if not str(value).strip()
+            ]
+            if not self.entity_keys:
+                missing_regressor_fields.append("entity_keys")
+            if missing_regressor_fields:
+                raise ValueError(
+                    "regressor-candidate signal contracts require: "
+                    + ", ".join(missing_regressor_fields)
+                )
+            if self.leakage_verdict != "pass" or self.target_proxy_verdict != "pass":
+                raise ValueError(
+                    "regressor-candidate signal contracts require leakage_verdict='pass' "
+                    "and target_proxy_verdict='pass'"
+                )
+            if self.future_value_mode in {"unknown", "unavailable"}:
+                raise ValueError(
+                    "regressor-candidate signal contracts require a usable future_value_mode"
+                )
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["entity_keys"] = list(self.entity_keys)
+        return data
+
+
+@dataclass(frozen=True)
+class ForecastContext:
+    """Decision context, discovery provenance, and accuracy claim policies."""
+
+    decision: str = ""
+    audience: str = ""
+    target_semantics: str = ""
+    units: str = ""
+    grain: str = ""
+    constraints: tuple[str, ...] = ()
+    requested_horizon: int | None = None
+    refresh_cadence: str = ""
+    known_breaks: tuple[str, ...] = ()
+    exclusions: tuple[str, ...] = ()
+    adjustments: tuple[str, ...] = ()
+    known_events: tuple[str, ...] = ()
+    hierarchy_required: bool = False
+    plan_status: ReferenceAvailability = "unknown"
+    budget_status: ReferenceAvailability = "unknown"
+    prior_year_status: ReferenceAvailability = "unknown"
+    benchmark_status: ReferenceAvailability = "unknown"
+    source_discovery_enabled: bool = True
+    sources: tuple[ContextSource, ...] = ()
+    candidate_drivers: tuple[CandidateDriver, ...] = ()
+    signal_needs: tuple[SignalNeed, ...] = ()
+    signal_probes: tuple[SignalProbe, ...] = ()
+    signal_contracts: tuple[SignalContract, ...] = ()
+    research_budget: ResearchBudget = field(default_factory=ResearchBudget)
+    accuracy_policy: AccuracyPolicy = field(default_factory=AccuracyPolicy)
+    promotion_policy: PromotionPolicy = field(default_factory=PromotionPolicy)
+
+    def __post_init__(self) -> None:
+        if self.requested_horizon is not None and self.requested_horizon < 1:
+            raise ValueError("forecast context requested_horizon must be >= 1")
+        allowed_reference_statuses = {"unknown", "available", "unavailable", "not_applicable"}
+        statuses = {
+            self.plan_status,
+            self.budget_status,
+            self.prior_year_status,
+            self.benchmark_status,
+        }
+        if not statuses.issubset(allowed_reference_statuses):
+            raise ValueError("forecast context reference statuses must be unknown, available, unavailable, or not_applicable")
+        source_ids = [source.source_id for source in self.sources]
+        if len(source_ids) != len(set(source_ids)):
+            raise ValueError("forecast context source_ids must be unique")
+        driver_names = [driver.name for driver in self.candidate_drivers]
+        if len(driver_names) != len(set(driver_names)):
+            raise ValueError("forecast context candidate driver names must be unique")
+        unknown_source_ids = sorted({driver.source_id for driver in self.candidate_drivers} - set(source_ids))
+        if unknown_source_ids:
+            raise ValueError(f"candidate drivers reference unknown context sources: {unknown_source_ids}")
+        need_ids = [need.need_id for need in self.signal_needs]
+        if len(need_ids) != len(set(need_ids)):
+            raise ValueError("forecast context signal need_ids must be unique")
+        probe_ids = [probe.probe_id for probe in self.signal_probes]
+        if len(probe_ids) != len(set(probe_ids)):
+            raise ValueError("forecast context signal probe_ids must be unique")
+        contract_ids = [contract.signal_id for contract in self.signal_contracts]
+        if len(contract_ids) != len(set(contract_ids)):
+            raise ValueError("forecast context signal_ids must be unique")
+        unknown_probe_needs = sorted({probe.need_id for probe in self.signal_probes} - set(need_ids))
+        if unknown_probe_needs:
+            raise ValueError(f"signal probes reference unknown signal needs: {unknown_probe_needs}")
+        unknown_probe_sources = sorted({probe.source_id for probe in self.signal_probes} - set(source_ids))
+        if unknown_probe_sources:
+            raise ValueError(f"signal probes reference unknown context sources: {unknown_probe_sources}")
+        unknown_contract_needs = sorted({contract.need_id for contract in self.signal_contracts} - set(need_ids))
+        if unknown_contract_needs:
+            raise ValueError(f"signal contracts reference unknown signal needs: {unknown_contract_needs}")
+        unknown_contract_probes = sorted({contract.probe_id for contract in self.signal_contracts} - set(probe_ids))
+        if unknown_contract_probes:
+            raise ValueError(f"signal contracts reference unknown signal probes: {unknown_contract_probes}")
+        unknown_contract_sources = sorted({contract.source_id for contract in self.signal_contracts} - set(source_ids))
+        if unknown_contract_sources:
+            raise ValueError(f"signal contracts reference unknown context sources: {unknown_contract_sources}")
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        for field_name in ("constraints", "known_breaks", "exclusions", "adjustments", "known_events"):
+            data[field_name] = list(getattr(self, field_name))
+        data["sources"] = [source.to_dict() for source in self.sources]
+        data["candidate_drivers"] = [driver.to_dict() for driver in self.candidate_drivers]
+        data["signal_needs"] = [need.to_dict() for need in self.signal_needs]
+        data["signal_probes"] = [probe.to_dict() for probe in self.signal_probes]
+        data["signal_contracts"] = [contract.to_dict() for contract in self.signal_contracts]
+        data["research_budget"] = self.research_budget.to_dict()
+        data["accuracy_policy"] = self.accuracy_policy.to_dict()
+        data["promotion_policy"] = self.promotion_policy.to_dict()
+        return data
+
+    def source_query_count(self) -> int:
+        """Return one conservative count when source and probe receipts overlap."""
+
+        source_total = sum(source.query_count for source in self.sources)
+        probe_total = sum(probe.query_count for probe in self.signal_probes)
+        return max(source_total, probe_total)
 
 
 @dataclass(frozen=True)
@@ -230,7 +686,7 @@ class ChallengerSpec:
     """External challenger engine run beside the canonical pipeline in an advisory lane.
 
     Challengers never mutate the canonical ``forecast.csv``; they contribute
-    compare/score artifacts under ``<run>/<source_id>`` for apples-to-apples review.
+    compare/score artifacts under ``<run>/<source_id>`` with explicit cutoff-contract evidence classes.
     """
 
     engine: str = "finn"
@@ -405,6 +861,7 @@ class ForecastSpec:
     strict_cv_horizon: bool = False
     weighted_ensemble: bool = True
     verbose: bool = True
+    context: ForecastContext | None = None
 
     def __post_init__(self) -> None:
         if self.horizon < 1:
@@ -441,6 +898,8 @@ class ForecastSpec:
         challenger_source_ids = [challenger.source_id for challenger in self.challengers]
         if len(challenger_source_ids) != len(set(challenger_source_ids)):
             raise ValueError("challenger source_ids must be unique")
+        if self.context is not None and self.context.requested_horizon not in {None, self.horizon}:
+            raise ValueError("forecast context requested_horizon must match ForecastSpec.horizon")
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -462,6 +921,10 @@ class ForecastSpec:
         data["cleaning"] = self.cleaning.to_dict()
         data["ensemble"] = self.ensemble.to_dict()
         data["parallel"] = self.parallel.to_dict()
+        if self.context is None:
+            data.pop("context", None)
+        else:
+            data["context"] = self.context.to_dict()
         return data
 
 
@@ -485,6 +948,7 @@ def forecast_spec_from_dict(data: dict[str, Any]) -> ForecastSpec:
     regressors = tuple(_known_future_regressor_from_dict(item) for item in data.get("regressors", []) if isinstance(item, dict))
     custom_models = tuple(_custom_model_from_dict(item) for item in data.get("custom_models", []) if isinstance(item, dict))
     challengers = tuple(_challenger_from_dict(item) for item in data.get("challengers", []) if isinstance(item, dict))
+    context_data = data.get("context") if isinstance(data.get("context"), dict) else None
     return ForecastSpec(
         horizon=int(data.get("horizon", 12)),
         freq=data.get("freq"),
@@ -541,6 +1005,182 @@ def forecast_spec_from_dict(data: dict[str, Any]) -> ForecastSpec:
         strict_cv_horizon=bool(data.get("strict_cv_horizon", False)),
         weighted_ensemble=bool(data.get("weighted_ensemble", True)),
         verbose=bool(data.get("verbose", True)),
+        context=forecast_context_from_dict(context_data) if context_data is not None else None,
+    )
+
+
+def forecast_context_from_dict(data: dict[str, Any]) -> ForecastContext:
+    """Rehydrate a persisted accuracy-first context contract."""
+
+    budget_data = data.get("research_budget") if isinstance(data.get("research_budget"), dict) else {}
+    accuracy_data = data.get("accuracy_policy") if isinstance(data.get("accuracy_policy"), dict) else {}
+    promotion_data = data.get("promotion_policy") if isinstance(data.get("promotion_policy"), dict) else {}
+    sources = tuple(_context_source_from_dict(item) for item in data.get("sources", ()) if isinstance(item, dict))
+    drivers = tuple(_candidate_driver_from_dict(item) for item in data.get("candidate_drivers", ()) if isinstance(item, dict))
+    signal_needs = tuple(_signal_need_from_dict(item) for item in data.get("signal_needs", ()) if isinstance(item, dict))
+    signal_probes = tuple(_signal_probe_from_dict(item) for item in data.get("signal_probes", ()) if isinstance(item, dict))
+    signal_contracts = tuple(
+        _signal_contract_from_dict(item)
+        for item in data.get("signal_contracts", ())
+        if isinstance(item, dict)
+    )
+    return ForecastContext(
+        decision=str(data.get("decision", "")),
+        audience=str(data.get("audience", "")),
+        target_semantics=str(data.get("target_semantics", "")),
+        units=str(data.get("units", "")),
+        grain=str(data.get("grain", "")),
+        constraints=_string_tuple(data.get("constraints", ())),
+        requested_horizon=_optional_int(data.get("requested_horizon")),
+        refresh_cadence=str(data.get("refresh_cadence", "")),
+        known_breaks=_string_tuple(data.get("known_breaks", ())),
+        exclusions=_string_tuple(data.get("exclusions", ())),
+        adjustments=_string_tuple(data.get("adjustments", ())),
+        known_events=_string_tuple(data.get("known_events", ())),
+        hierarchy_required=_coerce_bool(data.get("hierarchy_required"), default=False),
+        plan_status=data.get("plan_status", "unknown"),
+        budget_status=data.get("budget_status", "unknown"),
+        prior_year_status=data.get("prior_year_status", "unknown"),
+        benchmark_status=data.get("benchmark_status", "unknown"),
+        source_discovery_enabled=_coerce_bool(data.get("source_discovery_enabled"), default=True),
+        sources=sources,
+        candidate_drivers=drivers,
+        signal_needs=signal_needs,
+        signal_probes=signal_probes,
+        signal_contracts=signal_contracts,
+        research_budget=ResearchBudget(
+            profile=budget_data.get("profile", "balanced"),
+            max_iterations=_optional_int(budget_data.get("max_iterations")),
+            max_variants_per_iteration=_optional_int(budget_data.get("max_variants_per_iteration")),
+            max_wall_clock_minutes=_optional_int(budget_data.get("max_wall_clock_minutes")),
+            max_source_queries=_optional_int(budget_data.get("max_source_queries")),
+            max_compute_units=_optional_float(budget_data.get("max_compute_units")),
+        ),
+        accuracy_policy=AccuracyPolicy(
+            minimum_trust_score=int(accuracy_data.get("minimum_trust_score", 70)),
+            require_full_horizon_validation=_coerce_bool(accuracy_data.get("require_full_horizon_validation"), default=True),
+            require_interval_evidence=_coerce_bool(accuracy_data.get("require_interval_evidence"), default=True),
+            require_hierarchy_coherence=_coerce_bool(accuracy_data.get("require_hierarchy_coherence"), default=True),
+            require_driver_clearance=_coerce_bool(accuracy_data.get("require_driver_clearance"), default=True),
+            require_context_discovery=_coerce_bool(accuracy_data.get("require_context_discovery"), default=True),
+            allow_directional_baseline=_coerce_bool(accuracy_data.get("allow_directional_baseline"), default=True),
+        ),
+        promotion_policy=PromotionPolicy(
+            exact_cutoff_coverage=float(promotion_data.get("exact_cutoff_coverage", 1.0)),
+            minimum_primary_metric_improvement=float(promotion_data.get("minimum_primary_metric_improvement", 0.02)),
+            maximum_secondary_metric_regression=float(promotion_data.get("maximum_secondary_metric_regression", 0.01)),
+            minimum_confirmation_cutoffs=int(promotion_data.get("minimum_confirmation_cutoffs", 1)),
+            require_untouched_confirmation=_coerce_bool(promotion_data.get("require_untouched_confirmation"), default=True),
+            require_no_new_gate_failures=_coerce_bool(promotion_data.get("require_no_new_gate_failures"), default=True),
+            human_approval_required=_coerce_bool(promotion_data.get("human_approval_required"), default=True),
+        ),
+    )
+
+
+def load_forecast_context(path: str | Path) -> ForecastContext:
+    """Load a ForecastContext from JSON or YAML."""
+
+    context_path = Path(path)
+    if context_path.suffix.lower() in {".yaml", ".yml"}:
+        payload = yaml.safe_load(context_path.read_text(encoding="utf-8"))
+    else:
+        payload = json.loads(context_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("forecast context file must contain an object")
+    nested = payload.get("forecast_context")
+    if isinstance(nested, dict):
+        payload = nested
+    return forecast_context_from_dict(payload)
+
+
+def _context_source_from_dict(data: dict[str, Any]) -> ContextSource:
+    return ContextSource(
+        source_id=str(data.get("source_id", "")),
+        kind=str(data.get("kind", "")),
+        status=data.get("status", "planned"),
+        provenance=str(data.get("provenance", "")),
+        query_ref=str(data.get("query_ref", "")),
+        query_count=_optional_int(data.get("query_count")) or 0,
+        row_count=_optional_int(data.get("row_count")),
+        known_as_of=str(data.get("known_as_of", "")),
+        notes=str(data.get("notes", "")),
+    )
+
+
+def _candidate_driver_from_dict(data: dict[str, Any]) -> CandidateDriver:
+    return CandidateDriver(
+        name=str(data.get("name", "")),
+        source_id=str(data.get("source_id", "")),
+        status=data.get("status", "discovered"),
+        timing=str(data.get("timing", "")),
+        refresh_latency_days=_optional_int(data.get("refresh_latency_days")),
+        future_availability=data.get("future_availability", "unknown"),
+        leakage_verdict=data.get("leakage_verdict", "unreviewed"),
+        business_rationale=str(data.get("business_rationale", "")),
+        evidence_ref=str(data.get("evidence_ref", "")),
+        notes=str(data.get("notes", "")),
+    )
+
+
+def _signal_need_from_dict(data: dict[str, Any]) -> SignalNeed:
+    return SignalNeed(
+        need_id=str(data.get("need_id", "")),
+        signal_family=str(data.get("signal_family", "")),
+        question=str(data.get("question", "")),
+        business_mechanism=str(data.get("business_mechanism", "")),
+        route_capabilities=_string_tuple(data.get("route_capabilities", ())),
+        priority=int(data.get("priority", 3)),
+        status=data.get("status", "open"),
+        evidence_refs=_string_tuple(data.get("evidence_refs", ())),
+        next_probe=str(data.get("next_probe", "")),
+        notes=str(data.get("notes", "")),
+    )
+
+
+def _signal_probe_from_dict(data: dict[str, Any]) -> SignalProbe:
+    return SignalProbe(
+        probe_id=str(data.get("probe_id", "")),
+        need_id=str(data.get("need_id", "")),
+        source_id=str(data.get("source_id", "")),
+        capability=str(data.get("capability", "")),
+        stage=data.get("stage", "schema"),
+        status=data.get("status", "planned"),
+        query_count=_optional_int(data.get("query_count")) or 0,
+        query_ref=str(data.get("query_ref", "")),
+        provenance=str(data.get("provenance", "")),
+        row_count=_optional_int(data.get("row_count")),
+        known_as_of=str(data.get("known_as_of", "")),
+        result_summary=str(data.get("result_summary", "")),
+        next_blocked_probe=str(data.get("next_blocked_probe", "")),
+        notes=str(data.get("notes", "")),
+    )
+
+
+def _signal_contract_from_dict(data: dict[str, Any]) -> SignalContract:
+    return SignalContract(
+        signal_id=str(data.get("signal_id", "")),
+        need_id=str(data.get("need_id", "")),
+        probe_id=str(data.get("probe_id", "")),
+        name=str(data.get("name", "")),
+        source_id=str(data.get("source_id", "")),
+        disposition=data.get("disposition", "reject"),
+        business_mechanism=str(data.get("business_mechanism", "")),
+        entity_keys=_string_tuple(data.get("entity_keys", ())),
+        time_key=str(data.get("time_key", "")),
+        grain=str(data.get("grain", "")),
+        value_col=str(data.get("value_col", "")),
+        known_as_of_col=str(data.get("known_as_of_col", "")),
+        refresh_latency_days=_optional_int(data.get("refresh_latency_days")),
+        future_value_mode=data.get("future_value_mode", "unknown"),
+        coverage=_optional_float(data.get("coverage")),
+        query_ref=str(data.get("query_ref", "")),
+        provenance=str(data.get("provenance", "")),
+        leakage_verdict=data.get("leakage_verdict", "unreviewed"),
+        target_proxy_verdict=data.get("target_proxy_verdict", "unreviewed"),
+        next_blocked_probe=str(data.get("next_blocked_probe", "")),
+        experiment_status=data.get("experiment_status", "not_requested"),
+        experiment_reason=str(data.get("experiment_reason", "")),
+        notes=str(data.get("notes", "")),
     )
 
 
@@ -625,6 +1265,35 @@ def _optional_int(value: Any) -> int | None:
     return int(value)
 
 
+def _optional_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    return float(value)
+
+
+def _coerce_bool(value: Any, *, default: bool) -> bool:
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "y"}:
+            return True
+        if normalized in {"false", "0", "no", "n"}:
+            return False
+        raise ValueError(f"expected a boolean value, got {value!r}")
+    return bool(value)
+
+
+def _string_tuple(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return tuple(part.strip() for part in value.replace(";", ",").split(",") if part.strip())
+    return tuple(str(item).strip() for item in value if str(item).strip())
+
+
 @dataclass(frozen=True)
 class SeriesProfile:
     unique_id: str
@@ -700,6 +1369,7 @@ class ForecastRun:
             "forecast": "forecast.csv",
             "forecast_long": "appendix/forecast_long.csv",
             "backtest_long": "appendix/backtest_long.csv",
+            "cutoff_contract": "appendix/cutoff_contract.csv",
             "series_summary": "appendix/series_summary.csv",
             "series_features": "appendix/series_features.csv",
             "borrowed_strength_advisor": "appendix/borrowed_strength_advisor.csv",
@@ -772,6 +1442,20 @@ class ForecastRun:
             outputs["scenario_assumptions"] = "appendix/scenario_assumptions.csv"
             outputs["scenario_forecast"] = "appendix/scenario_forecast.csv"
             outputs["driver_experiment_summary"] = "appendix/driver_experiment_summary.csv"
+        if self.spec.context is not None:
+            outputs["context_receipt"] = "appendix/context_receipt.json"
+            outputs["context_receipt_markdown"] = "appendix/context_receipt.md"
+            outputs["research_budget"] = "appendix/research_budget.json"
+            outputs["accuracy_gate"] = "appendix/accuracy_gate.json"
+            outputs["accuracy_gate_markdown"] = "appendix/accuracy_gate.md"
+            if (
+                self.spec.context.signal_needs
+                or self.spec.context.signal_probes
+                or self.spec.context.signal_contracts
+            ):
+                outputs["signal_needs"] = "appendix/signal_needs.json"
+                outputs["signal_probe_ledger"] = "appendix/signal_probe_ledger.jsonl"
+                outputs["signal_contracts"] = "appendix/signal_contracts.json"
         if self.spec.regressors or not self.driver_availability_audit.empty:
             outputs["known_future_regressors"] = "appendix/known_future_regressors.csv"
             outputs["driver_availability_audit"] = "appendix/driver_availability_audit.csv"

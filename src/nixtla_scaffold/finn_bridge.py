@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
+from importlib import metadata as importlib_metadata
 import json
 from pathlib import Path
 import shutil
@@ -23,6 +24,7 @@ from nixtla_scaffold.comparisons import (
 from nixtla_scaffold.external import build_external_forecast_metadata, canonicalize_external_forecasts, load_external_forecasts
 from nixtla_scaffold.external_scoring import (
     EXTERNAL_BACKTEST_LONG_OUTPUT,
+    COMPARABILITY_RECEIPT_OUTPUT,
     EXTERNAL_MODEL_METRICS_OUTPUT,
     EXTERNAL_SCORING_MANIFEST_OUTPUT,
     ExternalForecastScoreResult,
@@ -33,6 +35,11 @@ FINN_BRIDGE_SCHEMA_VERSION = "nixtla_scaffold.finn_bridge.v1"
 FINN_REPORTING_DIR = "finn"
 FINN_FORECAST_OUTPUT = "finn_forecasts.csv"
 FINN_MANIFEST_OUTPUT = "finn_manifest.json"
+FINN_FUTURE_FORECAST_OUTPUT = "future_forecasts.csv"
+FINN_CUTOFF_FORECAST_OUTPUT = "cutoff_forecasts.csv"
+FINN_COMPARISON_MANIFEST_OUTPUT = "comparison_manifest.json"
+FINN_SCORING_MANIFEST_OUTPUT = "scoring_manifest.json"
+FINN_CHALLENGER_RUN_MANIFEST_OUTPUT = "challenger_run_manifest.json"
 FINN_RUNNER_TEMPLATE_OUTPUT = "finn_runner_template.R"
 FINN_INSTALL_HINTS = (
     "Direct FINN execution requires R/Rscript plus the finnts R package. "
@@ -109,6 +116,7 @@ def canonicalize_finn_forecasts(
     value_col: str = "yhat",
     model_col: str = "model",
     forecast_origin_col: str = "cutoff",
+    artifact_role: str = "auto",
 ) -> FINNRunResult:
     """Canonicalize FINN-produced forecasts into the scaffold external forecast contract."""
 
@@ -127,6 +135,8 @@ def canonicalize_finn_forecasts(
     )
     forecasts["source_system"] = "FINN"
     forecasts["advisory_only"] = True
+    resolved_role = _resolve_forecast_role(forecasts, artifact_role)
+    forecast_output = _forecast_output_for_role(resolved_role)
     manifest = _build_finn_manifest(
         operation="canonicalize",
         forecasts=forecasts,
@@ -140,11 +150,13 @@ def canonicalize_finn_forecasts(
             "value_col": value_col,
             "model_col": model_col,
             "forecast_origin_col": forecast_origin_col,
+            "artifact_role": resolved_role,
         },
+        forecast_output=forecast_output,
     )
     result = FINNRunResult(forecasts=forecasts, manifest=manifest)
     if output_dir is not None:
-        result_to_directory(result, output_dir)
+        _write_canonical_finn_result(result, output_dir, forecast_output=forecast_output)
     return result
 
 
@@ -192,9 +204,13 @@ def run_finn_bridge(
             **base_manifest,
             "status": "template_only",
             "status_reason": "no --runner provided; edit finn_runner_template.R or pass a FINN R runner script",
-            "outputs": {"runner_template": FINN_RUNNER_TEMPLATE_OUTPUT, "manifest": FINN_MANIFEST_OUTPUT},
+            "outputs": {
+                "runner_template": FINN_RUNNER_TEMPLATE_OUTPUT,
+                "challenger_run_manifest": FINN_CHALLENGER_RUN_MANIFEST_OUTPUT,
+                "manifest": FINN_MANIFEST_OUTPUT,
+            },
         }
-        (out / FINN_MANIFEST_OUTPUT).write_text(json.dumps(manifest, indent=2, default=str) + "\n", encoding="utf-8")
+        _write_operation_manifest(out, manifest, FINN_CHALLENGER_RUN_MANIFEST_OUTPUT)
         return FINNRunResult(forecasts=pd.DataFrame(columns=["unique_id", "ds", "model", "yhat"]), manifest=manifest)
 
     runner_path = Path(runner)
@@ -220,9 +236,13 @@ def run_finn_bridge(
             "returncode": command_result["returncode"],
             "stdout": command_result["stdout"],
             "stderr": command_result["stderr"],
-            "outputs": {"runner_template": FINN_RUNNER_TEMPLATE_OUTPUT, "manifest": FINN_MANIFEST_OUTPUT},
+            "outputs": {
+                "runner_template": FINN_RUNNER_TEMPLATE_OUTPUT,
+                "challenger_run_manifest": FINN_CHALLENGER_RUN_MANIFEST_OUTPUT,
+                "manifest": FINN_MANIFEST_OUTPUT,
+            },
         }
-        (out / FINN_MANIFEST_OUTPUT).write_text(json.dumps(manifest, indent=2, default=str) + "\n", encoding="utf-8")
+        _write_operation_manifest(out, manifest, FINN_CHALLENGER_RUN_MANIFEST_OUTPUT)
         raise RuntimeError(f"FINN runner failed with exit code {command_result['returncode']}; see {out / FINN_MANIFEST_OUTPUT}")
     if not raw_path.exists():
         raise FileNotFoundError(f"FINN runner completed but did not write expected output: {raw_path}")
@@ -239,7 +259,9 @@ def run_finn_bridge(
         "stderr": command_result["stderr"],
         "outputs": {
             "raw_output": raw_output,
-            "forecasts": FINN_FORECAST_OUTPUT,
+            "forecasts": FINN_FUTURE_FORECAST_OUTPUT,
+            "legacy_forecasts": FINN_FORECAST_OUTPUT,
+            "challenger_run_manifest": FINN_CHALLENGER_RUN_MANIFEST_OUTPUT,
             "manifest": FINN_MANIFEST_OUTPUT,
             "runner_template": FINN_RUNNER_TEMPLATE_OUTPUT,
         },
@@ -251,9 +273,13 @@ def run_finn_bridge(
 
 def result_to_directory(result: FINNRunResult, output_dir: str | Path) -> Path:
     out = Path(output_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    result.forecasts.to_csv(out / FINN_FORECAST_OUTPUT, index=False)
-    (out / FINN_MANIFEST_OUTPUT).write_text(json.dumps(result.manifest, indent=2, default=str) + "\n", encoding="utf-8")
+    forecast_output = _forecast_output_for_role(_resolve_forecast_role(result.forecasts, "auto"))
+    _write_canonical_finn_result(
+        result,
+        out,
+        forecast_output=forecast_output,
+        operation_manifest=FINN_CHALLENGER_RUN_MANIFEST_OUTPUT,
+    )
     return out
 
 
@@ -266,7 +292,7 @@ def compare_finn_forecasts(
     **kwargs: Any,
 ) -> FINNComparisonResult:
     out = Path(output_dir) if output_dir is not None else Path(run_dir) / FINN_REPORTING_DIR
-    finn = canonicalize_finn_forecasts(finn_forecasts, output_dir=out, **kwargs)
+    finn = canonicalize_finn_forecasts(finn_forecasts, output_dir=out, artifact_role="future", **kwargs)
     comparison = write_forecast_comparison(
         run_dir,
         finn.forecasts,
@@ -288,9 +314,10 @@ def compare_finn_forecasts(
             "forecast_comparison_report": FORECAST_COMPARISON_REPORT_OUTPUT,
             "forecast_comparison_llm_context": FORECAST_COMPARISON_LLM_CONTEXT_OUTPUT,
             "forecast_comparison_manifest": FORECAST_COMPARISON_MANIFEST_OUTPUT,
+            "comparison_manifest": FINN_COMPARISON_MANIFEST_OUTPUT,
         },
     }
-    (out / FINN_MANIFEST_OUTPUT).write_text(json.dumps(manifest, indent=2, default=str) + "\n", encoding="utf-8")
+    manifest = _write_operation_manifest(out, manifest, FINN_COMPARISON_MANIFEST_OUTPUT)
     register_finn_reporting_artifacts(run_dir, out, manifest)
     return FINNComparisonResult(run=finn, comparison=comparison, manifest=manifest)
 
@@ -312,7 +339,12 @@ def score_finn_forecasts(
     if output_dir is None and run_dir is None:
         raise ValueError("output_dir is required unless run_dir is supplied")
     out = Path(output_dir) if output_dir is not None else Path(run_dir) / FINN_REPORTING_DIR
-    finn = canonicalize_finn_forecasts(finn_forecasts, output_dir=out, **kwargs)
+    finn = canonicalize_finn_forecasts(finn_forecasts, output_dir=out, artifact_role="cutoff", **kwargs)
+    cutoff_contract = None
+    if run_dir is not None:
+        candidate_contract = Path(run_dir) / "appendix" / "cutoff_contract.csv"
+        if candidate_contract.exists():
+            cutoff_contract = candidate_contract
     scores = write_external_forecast_scores(
         finn.forecasts,
         actuals,
@@ -324,20 +356,24 @@ def score_finn_forecasts(
         actual_value_col=actual_value_col,
         season_length=season_length,
         requested_horizon=requested_horizon,
+        cutoff_contract=cutoff_contract,
     )
     manifest = {
         **finn.manifest,
         "operation": "score",
         "actuals_source": str(Path(actuals)),
+        "actuals_sha256": _sha256(Path(actuals)) if isinstance(actuals, (str, Path)) and Path(actuals).exists() else None,
         "scoring": scores.manifest,
         "outputs": {
             **finn.manifest.get("outputs", {}),
             "external_backtest_long": EXTERNAL_BACKTEST_LONG_OUTPUT,
             "external_model_metrics": EXTERNAL_MODEL_METRICS_OUTPUT,
             "external_scoring_manifest": EXTERNAL_SCORING_MANIFEST_OUTPUT,
+            "comparability_receipt": COMPARABILITY_RECEIPT_OUTPUT,
+            "scoring_manifest": FINN_SCORING_MANIFEST_OUTPUT,
         },
     }
-    (out / FINN_MANIFEST_OUTPUT).write_text(json.dumps(manifest, indent=2, default=str) + "\n", encoding="utf-8")
+    manifest = _write_operation_manifest(out, manifest, FINN_SCORING_MANIFEST_OUTPUT)
     if run_dir is not None:
         register_finn_reporting_artifacts(run_dir, out, manifest)
     return FINNScoreResult(run=finn, scores=scores, manifest=manifest)
@@ -357,7 +393,12 @@ def register_finn_reporting_artifacts(run_dir: str | Path, output_dir: str | Pat
     relative_prefix = _posix_path(relative_output)
     known_outputs = {
         "forecasts": FINN_FORECAST_OUTPUT,
+        "future_forecasts": FINN_FUTURE_FORECAST_OUTPUT,
+        "cutoff_forecasts": FINN_CUTOFF_FORECAST_OUTPUT,
         "manifest": FINN_MANIFEST_OUTPUT,
+        "comparison_manifest": FINN_COMPARISON_MANIFEST_OUTPUT,
+        "scoring_manifest": FINN_SCORING_MANIFEST_OUTPUT,
+        "challenger_run_manifest": FINN_CHALLENGER_RUN_MANIFEST_OUTPUT,
         "runner_template": FINN_RUNNER_TEMPLATE_OUTPUT,
         "forecast_comparison": FORECAST_COMPARISON_OUTPUT,
         "forecast_comparison_summary": FORECAST_COMPARISON_SUMMARY_OUTPUT,
@@ -368,6 +409,7 @@ def register_finn_reporting_artifacts(run_dir: str | Path, output_dir: str | Pat
         "external_backtest_long": EXTERNAL_BACKTEST_LONG_OUTPUT,
         "external_model_metrics": EXTERNAL_MODEL_METRICS_OUTPUT,
         "external_scoring_manifest": EXTERNAL_SCORING_MANIFEST_OUTPUT,
+        "comparability_receipt": COMPARABILITY_RECEIPT_OUTPUT,
     }
     attached = {
         f"finn_{key}": f"{relative_prefix}/{filename}" if relative_prefix else filename
@@ -414,6 +456,7 @@ def _build_finn_manifest(
     forecasts: pd.DataFrame,
     source: Path | None,
     options: dict[str, Any],
+    forecast_output: str,
 ) -> dict[str, Any]:
     metadata = build_external_forecast_metadata(forecasts)
     return {
@@ -421,12 +464,81 @@ def _build_finn_manifest(
         "operation": operation,
         "source": str(source) if source is not None else "dataframe",
         "source_sha256": _sha256(source) if source is not None and source.exists() else None,
+        "nixtla_scaffold_version": _package_version(),
         "metadata": metadata,
         "options": options,
         "advisory_only": True,
         "created_at_utc": _now_utc(),
-        "outputs": {"forecasts": FINN_FORECAST_OUTPUT, "manifest": FINN_MANIFEST_OUTPUT},
+        "outputs": {
+            "forecasts": forecast_output,
+            "legacy_forecasts": FINN_FORECAST_OUTPUT,
+            "manifest": FINN_MANIFEST_OUTPUT,
+        },
     }
+
+
+def _write_canonical_finn_result(
+    result: FINNRunResult,
+    output_dir: str | Path,
+    *,
+    forecast_output: str,
+    operation_manifest: str | None = None,
+) -> dict[str, Any]:
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    result.forecasts.to_csv(out / forecast_output, index=False)
+    if forecast_output != FINN_FORECAST_OUTPUT:
+        result.forecasts.to_csv(out / FINN_FORECAST_OUTPUT, index=False)
+    manifest = dict(result.manifest)
+    manifest["artifact_sha256"] = _artifact_hashes(out, manifest.get("outputs", {}))
+    if operation_manifest:
+        (out / operation_manifest).write_text(json.dumps(manifest, indent=2, default=str) + "\n", encoding="utf-8")
+    (out / FINN_MANIFEST_OUTPUT).write_text(json.dumps(manifest, indent=2, default=str) + "\n", encoding="utf-8")
+    return manifest
+
+
+def _write_operation_manifest(output_dir: Path, manifest: dict[str, Any], filename: str) -> dict[str, Any]:
+    enriched = dict(manifest)
+    enriched["artifact_sha256"] = _artifact_hashes(output_dir, enriched.get("outputs", {}))
+    payload = json.dumps(enriched, indent=2, default=str) + "\n"
+    (output_dir / filename).write_text(payload, encoding="utf-8")
+    (output_dir / FINN_MANIFEST_OUTPUT).write_text(payload, encoding="utf-8")
+    return enriched
+
+
+def _resolve_forecast_role(forecasts: pd.DataFrame, requested: str) -> str:
+    normalized = str(requested).strip().lower()
+    if normalized not in {"auto", "future", "cutoff"}:
+        raise ValueError("artifact_role must be one of: auto, future, cutoff")
+    if normalized != "auto":
+        return normalized
+    if "cutoff" in forecasts.columns and pd.to_datetime(forecasts["cutoff"], errors="coerce").notna().any():
+        return "cutoff"
+    return "future"
+
+
+def _forecast_output_for_role(role: str) -> str:
+    return FINN_CUTOFF_FORECAST_OUTPUT if role == "cutoff" else FINN_FUTURE_FORECAST_OUTPUT
+
+
+def _artifact_hashes(output_dir: Path, outputs: Any) -> dict[str, str]:
+    if not isinstance(outputs, dict):
+        return {}
+    hashes: dict[str, str] = {}
+    for key, value in outputs.items():
+        if not isinstance(value, str) or value.endswith(".json"):
+            continue
+        path = output_dir / value
+        if path.is_file():
+            hashes[key] = _sha256(path)
+    return hashes
+
+
+def _package_version() -> str:
+    try:
+        return importlib_metadata.version("nixtla-scaffold")
+    except importlib_metadata.PackageNotFoundError:
+        return "source"
 
 
 def _run_command(command: list[str], *, timeout_seconds: int) -> dict[str, Any]:
@@ -496,7 +608,7 @@ def _update_control_pane_state(path: Path, outputs: dict[str, str], manifest: di
             {
                 "mechanism": "FINN advisory bridge",
                 "status": "available",
-                "artifact": "finn/finn_manifest.json / finn/external_model_metrics.csv",
+                "artifact": "finn/challenger_run_manifest.json / finn/comparability_receipt.json",
                 "advisory_only": bool(manifest.get("advisory_only", True)),
             }
         )

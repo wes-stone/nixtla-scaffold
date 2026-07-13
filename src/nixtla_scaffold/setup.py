@@ -8,6 +8,8 @@ from typing import Any
 import yaml
 
 from nixtla_scaffold.presets import PRESET_NAMES, canonical_preset_name, forecast_spec_preset, preset_catalog
+from nixtla_scaffold.schema import ContextSource, ForecastContext, ResearchBudget
+from nixtla_scaffold.signals import build_initial_signal_needs, write_signal_artifacts
 
 
 DATA_SOURCES = ("csv", "excel", "kusto", "dax", "sql", "dataframe", "unknown")
@@ -20,6 +22,7 @@ MODEL_FAMILIES = ("standard", "light", "auto", "baseline", "statsforecast", "mlf
 class SetupAnswers:
     name: str = "forecast"
     data_source: str = "unknown"
+    input_path: str | None = None
     series_count: str = "unknown"
     target_name: str = "y"
     time_col: str = "ds"
@@ -31,7 +34,15 @@ class SetupAnswers:
     intervals: str = "auto"
     model_families: tuple[str, ...] = ("standard",)
     exploration_mode: bool = True
+    source_discovery: bool = True
     mcp_regressor_search: bool = False
+    research_budget: ResearchBudget = field(default_factory=ResearchBudget)
+    decision: str = ""
+    audience: str = ""
+    target_semantics: str = ""
+    units: str = ""
+    grain: str = ""
+    refresh_cadence: str = ""
     outputs: tuple[str, ...] = ("all",)
     hierarchy_cols: tuple[str, ...] = ()
     query_file: str | None = None
@@ -51,6 +62,8 @@ class SetupAnswers:
             raise ValueError(f"model_families values must be in {MODEL_FAMILIES}, got {invalid_models}")
         if self.horizon < 1:
             raise ValueError("horizon must be >= 1")
+        if self.input_path is not None and not str(self.input_path).strip():
+            raise ValueError("input_path cannot be blank")
         object.__setattr__(self, "preset", canonical_preset_name(self.preset))
         canonical_families = tuple(dict.fromkeys("light" if model == "auto" else model for model in self.model_families))
         object.__setattr__(self, "model_families", canonical_families)
@@ -60,6 +73,7 @@ class SetupAnswers:
         data["outputs"] = list(self.outputs)
         data["hierarchy_cols"] = list(self.hierarchy_cols)
         data["model_families"] = list(self.model_families)
+        data["research_budget"] = self.research_budget.to_dict()
         return data
 
 
@@ -92,7 +106,8 @@ def create_forecast_setup(workspace: str | Path, answers: SetupAnswers) -> Setup
 
     questions = setup_questions(answers)
     next_commands = tuple(_next_commands(root, answers))
-    config = _config_payload(root, answers, next_commands)
+    context = _forecast_context(root, answers)
+    config = _config_payload(root, answers, next_commands, context)
     brief = _agent_brief(root, answers, questions, next_commands)
     query_template = _query_template(answers)
 
@@ -100,10 +115,13 @@ def create_forecast_setup(workspace: str | Path, answers: SetupAnswers) -> Setup
         "config": root / "forecast_setup.yaml",
         "questions": root / "questions.json",
         "agent_brief": root / "agent_brief.md",
+        "context": root / "forecast_context.json",
     }
     files["config"].write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
     files["questions"].write_text(json.dumps(questions, indent=2) + "\n", encoding="utf-8")
     files["agent_brief"].write_text(brief, encoding="utf-8")
+    files["context"].write_text(json.dumps(context.to_dict(), indent=2) + "\n", encoding="utf-8")
+    files.update(write_signal_artifacts(context, root))
     if query_template:
         query_path = root / "queries" / f"source{_query_extension(answers.data_source)}"
         query_path.write_text(query_template, encoding="utf-8")
@@ -115,6 +133,22 @@ def create_forecast_setup(workspace: str | Path, answers: SetupAnswers) -> Setup
 def setup_questions(answers: SetupAnswers | None = None) -> list[dict[str, Any]]:
     selected = answers or SetupAnswers()
     return [
+        {
+            "id": "decision",
+            "question": "What decision will this forecast support, and who is the audience?",
+            "answer": {"decision": selected.decision, "audience": selected.audience},
+            "why_it_matters": "Accuracy claims should be calibrated to the decision, audience, and cost of error.",
+        },
+        {
+            "id": "target_context",
+            "question": "What exactly is the target, its units, and its time grain?",
+            "answer": {
+                "semantics": selected.target_semantics or selected.target_name,
+                "units": selected.units,
+                "grain": selected.grain or selected.freq or "unknown",
+            },
+            "why_it_matters": "Prevents plausible-looking forecasts of the wrong metric, unit, or grain.",
+        },
         {
             "id": "preset",
             "question": "Which forecast preset should we start from?",
@@ -128,6 +162,12 @@ def setup_questions(answers: SetupAnswers | None = None) -> list[dict[str, Any]]
             "answer": selected.data_source,
             "options": list(DATA_SOURCES),
             "why_it_matters": "Determines whether the next step is direct forecast, ingest from MCP/query export, or workbook column mapping.",
+        },
+        {
+            "id": "input_path",
+            "question": "What existing file should the generated commands use?",
+            "answer": selected.input_path or "",
+            "why_it_matters": "Using the real path keeps the generated first command executable instead of pointing at a placeholder.",
         },
         {
             "id": "series_count",
@@ -149,6 +189,19 @@ def setup_questions(answers: SetupAnswers | None = None) -> list[dict[str, Any]]
             "answer": list(selected.model_families),
             "options": list(MODEL_FAMILIES),
                 "caveat": "Standard is the default serious model policy: StatsForecast, feasible MLForecast, and optional smooth ADAM when installed. Light is the slim path without smooth by default. NeuralForecast is research-only.",
+        },
+        {
+            "id": "research_budget",
+            "question": "How much bounded research should the agent perform?",
+            "answer": selected.research_budget.to_dict(),
+            "options": ["time-boxed", "balanced", "deep", "custom"],
+            "why_it_matters": "The agent must search beyond the first baseline without running an unbounded sweep.",
+        },
+        {
+            "id": "source_discovery",
+            "question": "Should the agent run bounded read-only discovery across relevant connected sources?",
+            "answer": selected.source_discovery,
+            "caveat": "An opt-out is allowed but is recorded in the context receipt.",
         },
         {
             "id": "exploration_mode",
@@ -177,21 +230,48 @@ def interactive_answers(defaults: SetupAnswers | None = None) -> SetupAnswers:
     current = replace(current, preset=_prompt_choice("Which forecast preset should we start from?", PRESET_NAMES, current.preset))
     current = replace(current, data_source=_prompt_choice("Where is the data coming from?", DATA_SOURCES, current.data_source))
     current = replace(current, series_count=_prompt_choice("How many different things are we forecasting?", SERIES_COUNTS, current.series_count))
+    current = replace(current, decision=_prompt_text("Decision this forecast supports", current.decision))
+    current = replace(current, audience=_prompt_text("Primary audience", current.audience))
     current = replace(current, target_name=_prompt_text("Target/metric column or name", current.target_name))
+    current = replace(current, target_semantics=_prompt_text("Target definition/semantics", current.target_semantics or current.target_name))
+    current = replace(current, units=_prompt_text("Target units", current.units))
     current = replace(current, time_col=_prompt_text("Date/time column", current.time_col))
     current = replace(current, id_col=_prompt_text("Series ID column", current.id_col))
+    current = replace(
+        current,
+        input_path=_prompt_text("Existing input file (blank for workspace placeholder)", current.input_path or "")
+        or None,
+    )
     current = replace(current, horizon=int(_prompt_text("Forecast horizon", str(current.horizon))))
     current = replace(current, freq=_prompt_text("Frequency hint (blank for auto)", current.freq or "") or None)
+    current = replace(current, grain=_prompt_text("Forecast grain", current.grain or current.freq or ""))
+    current = replace(current, refresh_cadence=_prompt_text("Refresh cadence", current.refresh_cadence))
     current = replace(current, intervals=_prompt_choice("Point forecast or intervals?", INTERVAL_MODES, current.intervals))
     models = _prompt_text("Model families, comma-separated", ",".join(current.model_families))
     current = replace(current, model_families=tuple(item.strip() for item in models.split(",") if item.strip()))
     current = replace(current, exploration_mode=_prompt_bool("Run exploration mode first?", current.exploration_mode))
+    current = replace(current, source_discovery=_prompt_bool("Run bounded connected-source discovery?", current.source_discovery))
     current = replace(current, mcp_regressor_search=_prompt_bool("Allow MCP search for candidate regressors?", current.mcp_regressor_search))
+    budget_profile = _prompt_choice(
+        "Research budget profile",
+        ("time-boxed", "balanced", "deep", "custom"),
+        current.research_budget.profile,
+    )
+    if budget_profile == "custom":
+        max_minutes = int(_prompt_text("Custom maximum wall-clock minutes", str(current.research_budget.max_wall_clock_minutes or 60)))
+        current = replace(current, research_budget=ResearchBudget(profile="custom", max_wall_clock_minutes=max_minutes))
+    else:
+        current = replace(current, research_budget=ResearchBudget(profile=budget_profile))
     outputs = _prompt_text("Outputs, comma-separated", ",".join(current.outputs))
     return replace(current, outputs=tuple(item.strip() for item in outputs.split(",") if item.strip()))
 
 
-def _config_payload(root: Path, answers: SetupAnswers, next_commands: tuple[str, ...]) -> dict[str, Any]:
+def _config_payload(
+    root: Path,
+    answers: SetupAnswers,
+    next_commands: tuple[str, ...],
+    context: ForecastContext,
+) -> dict[str, Any]:
     return {
         "setup_version": 1,
         "workspace": str(root),
@@ -201,12 +281,16 @@ def _config_payload(root: Path, answers: SetupAnswers, next_commands: tuple[str,
             answers.preset,
             horizon=answers.horizon,
             freq=answers.freq,
+            context=context,
         ).to_dict(),
+        "forecast_context": context.to_dict(),
         "preset_catalog": preset_catalog(),
         "policy": {
             "timegpt": "excluded",
             "exploration_first": answers.exploration_mode,
+            "source_discovery": answers.source_discovery,
             "mcp_regressor_search_allowed": answers.mcp_regressor_search,
+            "research_budget": answers.research_budget.to_dict(),
             "model_family_caveat": "Baseline, StatsForecast, MLForecast, and hierarchy reconciliation are active when optional dependencies/data contracts support them. NeuralForecast is research-only.",
             "interval_caveat": "Prediction intervals are gated by available history and model support.",
             "regressor_caveat": "Only use regressors as model features when future values are known and leakage checks pass.",
@@ -252,8 +336,13 @@ def _agent_brief(
             f"- Forecast horizon: `{answers.horizon}`",
             f"- Frequency hint: `{answers.freq or 'auto'}`",
             f"- Model families: `{', '.join(answers.model_families)}`",
+            f"- Decision / audience: `{answers.decision or 'not recorded'}` / `{answers.audience or 'not recorded'}`",
+            f"- Target semantics / units / grain: `{answers.target_semantics or answers.target_name}` / `{answers.units or 'not recorded'}` / `{answers.grain or answers.freq or 'not recorded'}`",
+            f"- Refresh cadence: `{answers.refresh_cadence or 'not recorded'}`",
             f"- Exploration mode: `{answers.exploration_mode}`",
+            f"- Bounded connected-source discovery: `{answers.source_discovery}`",
             f"- MCP regressor search allowed: `{answers.mcp_regressor_search}`",
+            f"- Research budget: `{answers.research_budget.profile}` — {answers.research_budget.to_dict()}",
             f"- Requested outputs: `{', '.join(answers.outputs)}`",
             "",
             "## Required exploration checks",
@@ -265,6 +354,10 @@ def _agent_brief(
             "5. Choose model families deliberately: baselines for sanity, StatsForecast for classical production, MLForecast for feasible lag/calendar ML and audited future-regressor experiments, HierarchicalForecast for reconciliation, NeuralForecast for research only.",
             "6. List possible drivers/events and separate known future assumptions from historical-only explanatory variables.",
             "7. Decide whether intervals are appropriate after seeing history length and backtest windows.",
+            "8. Inventory relevant connected sources, then use bounded schema/count/sample/aggregate queries; record available, unavailable, irrelevant, and opted-out sources in forecast_context.json.",
+            "9. Never copy discovered drivers into model regressors. Admit them only after future-availability, latency, leakage, and rolling-origin evidence pass.",
+            "10. Read appendix/accuracy_gate.json after the run. Directional-only output must not be described as planning-ready.",
+            "11. Work signal_needs.json in priority order. Append every bounded query to signal_probe_ledger.jsonl and put only validated dispositions in signal_contracts.json.",
             "",
             "## Next commands",
             "",
@@ -280,28 +373,90 @@ def _agent_brief(
 def _next_commands(root: Path, answers: SetupAnswers) -> list[str]:
     run_dir = root / "outputs" / "forecast_run"
     canonical = root / "data" / "canonical" / "forecast_input.csv"
-    raw = root / "data" / "raw" / _raw_placeholder(answers)
+    raw = Path(answers.input_path) if answers.input_path else root / "data" / "raw" / _raw_placeholder(answers)
     freq_part = f" --freq {answers.freq}" if answers.freq else ""
     preset_part = f" --preset {answers.preset}"
+    context_part = f" --context-file {_quote_path(root / 'forecast_context.json')}"
     horizon_part = f" --horizon {answers.horizon}"
     model_policy_part = _model_policy_part(answers)
-    if answers.data_source in {"kusto", "dax", "sql"}:
+    if answers.data_source in {"kusto", "dax", "sql"} or answers.series_count == "single":
         source_kind = answers.data_source
         query_file = root / "queries" / f"source{_query_extension(answers.data_source)}"
-        id_part = f' --id-value "{answers.id_value}"' if answers.id_value else f" --id-col {answers.id_col}"
-        ingest = (
-            f"nixtla-scaffold ingest --input {raw} --source {source_kind} --query-file {query_file}"
-            f"{id_part} --time-col {answers.time_col} --target-col {answers.target_name}"
-            f" --output {canonical} --forecast-output {run_dir}{preset_part}{freq_part}{horizon_part}{model_policy_part}"
+        injected_id = answers.id_value or (answers.name if answers.series_count == "single" else None)
+        id_part = f' --id-value "{injected_id}"' if injected_id else f" --id-col {answers.id_col}"
+        query_part = (
+            f" --query-file {_quote_path(query_file)}"
+            if answers.data_source in {"kusto", "dax", "sql"}
+            else ""
         )
-        return [ingest, f"nixtla-scaffold explain --run {run_dir}", f"nixtla-scaffold report --run {run_dir}"]
+        ingest = (
+            f"nixtla-scaffold ingest --input {_quote_path(raw)} --source {source_kind}{query_part}"
+            f"{id_part} --time-col {answers.time_col} --target-col {answers.target_name}"
+            f" --output {_quote_path(canonical)} --forecast-output {_quote_path(run_dir)}"
+            f"{preset_part}{context_part}{freq_part}{horizon_part}{model_policy_part}"
+        )
+        return [
+            ingest,
+            f"nixtla-scaffold explain --run {_quote_path(run_dir)}",
+            f"nixtla-scaffold report --run {_quote_path(run_dir)}",
+        ]
 
-    profile = f"nixtla-scaffold profile --input {raw} --id-col {answers.id_col} --time-col {answers.time_col} --target-col {answers.target_name}{freq_part}"
-    forecast = (
-        f"nixtla-scaffold forecast --input {raw} --id-col {answers.id_col} --time-col {answers.time_col}"
-        f" --target-col {answers.target_name}{preset_part}{freq_part}{horizon_part}{model_policy_part} --output {run_dir}"
+    profile = (
+        f"nixtla-scaffold profile --input {_quote_path(raw)} --id-col {answers.id_col}"
+        f" --time-col {answers.time_col} --target-col {answers.target_name}{freq_part}"
     )
-    return [profile, forecast, f"nixtla-scaffold explain --run {run_dir}", f"nixtla-scaffold report --run {run_dir}"]
+    forecast = (
+        f"nixtla-scaffold forecast --input {_quote_path(raw)} --id-col {answers.id_col} --time-col {answers.time_col}"
+        f" --target-col {answers.target_name}{preset_part}{context_part}{freq_part}{horizon_part}{model_policy_part}"
+        f" --output {_quote_path(run_dir)}"
+    )
+    return [
+        profile,
+        forecast,
+        f"nixtla-scaffold explain --run {_quote_path(run_dir)}",
+        f"nixtla-scaffold report --run {_quote_path(run_dir)}",
+    ]
+
+
+def _forecast_context(root: Path, answers: SetupAnswers) -> ForecastContext:
+    input_path = Path(answers.input_path) if answers.input_path else None
+    source_status = (
+        "available"
+        if input_path is not None and input_path.exists()
+        else ("planned" if answers.source_discovery else "opted_out")
+    )
+    source = ContextSource(
+        source_id=f"target_{answers.data_source}",
+        kind=answers.data_source,
+        status=source_status,
+        provenance=str(input_path.resolve()) if input_path is not None and input_path.exists() else "",
+        query_ref=str(root / "queries" / f"source{_query_extension(answers.data_source)}")
+        if answers.data_source in {"kusto", "dax", "sql"}
+        else "",
+        notes="Primary target source; add each relevant connected source before running the forecast.",
+    )
+    return ForecastContext(
+        decision=answers.decision,
+        audience=answers.audience,
+        target_semantics=answers.target_semantics or answers.target_name,
+        units=answers.units,
+        grain=answers.grain or answers.freq or "",
+        requested_horizon=answers.horizon,
+        refresh_cadence=answers.refresh_cadence,
+        hierarchy_required=answers.series_count == "hierarchy",
+        source_discovery_enabled=answers.source_discovery,
+        sources=(source,),
+        signal_needs=build_initial_signal_needs(
+            target_semantics=answers.target_semantics or answers.target_name,
+            grain=answers.grain or answers.freq or "",
+            source_discovery_enabled=answers.source_discovery,
+        ),
+        research_budget=answers.research_budget,
+    )
+
+
+def _quote_path(path: str | Path) -> str:
+    return f'"{Path(path)}"'
 
 
 def _raw_placeholder(answers: SetupAnswers) -> str:

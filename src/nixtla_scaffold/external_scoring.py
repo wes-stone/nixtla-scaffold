@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -23,6 +23,10 @@ EXTERNAL_SCORE_SCHEMA_VERSION = "nixtla_scaffold.external_forecast_score.v1"
 EXTERNAL_BACKTEST_LONG_OUTPUT = "external_backtest_long.csv"
 EXTERNAL_MODEL_METRICS_OUTPUT = "external_model_metrics.csv"
 EXTERNAL_SCORING_MANIFEST_OUTPUT = "external_scoring_manifest.json"
+COMPARABILITY_RECEIPT_OUTPUT = "comparability_receipt.json"
+COMPARABILITY_SCHEMA_VERSION = "nixtla_scaffold.cutoff_comparability.v1"
+_COMPARABILITY_KEYS = ["unique_id", "cutoff", "ds", "horizon_step"]
+_COMPARABILITY_GROUPS = ["unique_id", "model", "source_id", "scenario_name"]
 
 
 @dataclass(frozen=True)
@@ -34,12 +38,17 @@ class ExternalForecastScoreResult:
     manifest: dict[str, Any]
     external_forecasts: pd.DataFrame
     actuals: pd.DataFrame
+    comparability_receipt: dict[str, Any] = field(default_factory=dict)
 
     def to_directory(self, output_dir: str | Path) -> Path:
         out = Path(output_dir)
         out.mkdir(parents=True, exist_ok=True)
         self.backtest_long.to_csv(out / EXTERNAL_BACKTEST_LONG_OUTPUT, index=False)
         self.model_metrics.to_csv(out / EXTERNAL_MODEL_METRICS_OUTPUT, index=False)
+        (out / COMPARABILITY_RECEIPT_OUTPUT).write_text(
+            json.dumps(self.comparability_receipt, indent=2, default=str) + "\n",
+            encoding="utf-8",
+        )
         (out / EXTERNAL_SCORING_MANIFEST_OUTPUT).write_text(json.dumps(self.manifest, indent=2, default=str) + "\n", encoding="utf-8")
         return out
 
@@ -62,6 +71,7 @@ def score_external_forecasts(
     actual_value_col: str = "y",
     season_length: int = 1,
     requested_horizon: int | None = None,
+    cutoff_contract: str | Path | pd.DataFrame | None = None,
 ) -> ExternalForecastScoreResult:
     """Score historical external forecast snapshots against actual outcomes.
 
@@ -92,6 +102,12 @@ def score_external_forecasts(
     if not backtest_long["scoring_status"].eq("scored").any():
         raise ValueError(_no_matched_actuals_message(backtest_long, actual_frame))
     model_metrics = build_external_model_metrics(backtest_long, requested_horizon=requested_horizon)
+    comparability_receipt, model_metrics = evaluate_cutoff_comparability(
+        backtest_long,
+        model_metrics,
+        cutoff_contract=cutoff_contract,
+        requested_horizon=requested_horizon,
+    )
     manifest = build_external_scoring_manifest(
         external_forecasts,
         actuals,
@@ -107,12 +123,15 @@ def score_external_forecasts(
         season_length=season_length,
         requested_horizon=requested_horizon,
     )
+    manifest["comparability"] = comparability_receipt["summary"]
+    manifest["outputs"]["comparability_receipt"] = COMPARABILITY_RECEIPT_OUTPUT
     return ExternalForecastScoreResult(
         backtest_long=backtest_long,
         model_metrics=model_metrics,
         manifest=manifest,
         external_forecasts=external,
         actuals=actual_frame,
+        comparability_receipt=comparability_receipt,
     )
 
 
@@ -133,6 +152,7 @@ def write_external_forecast_scores(
         manifest=manifest,
         external_forecasts=result.external_forecasts,
         actuals=result.actuals,
+        comparability_receipt=result.comparability_receipt,
     )
     result.to_directory(output_dir)
     return result
@@ -253,6 +273,244 @@ def build_external_model_metrics(
             }
         )
     return pd.DataFrame(rows, columns=_model_metrics_columns()).sort_values(["unique_id", "source_id", "model", "scenario_name"]).reset_index(drop=True)
+
+
+def evaluate_cutoff_comparability(
+    backtest_long: pd.DataFrame,
+    model_metrics: pd.DataFrame,
+    *,
+    cutoff_contract: str | Path | pd.DataFrame | None,
+    requested_horizon: int | None,
+) -> tuple[dict[str, Any], pd.DataFrame]:
+    """Require exact native cutoff rows before external metrics are promotion-comparable."""
+
+    contract, contract_source = _load_cutoff_contract(cutoff_contract)
+    created_at = datetime.now(timezone.utc).isoformat()
+    if contract.empty:
+        groups = []
+        for row in model_metrics.to_dict(orient="records"):
+            observed_rows = _int_or_zero(row.get("observations"))
+            groups.append(
+                {
+                    **{column: row.get(column, "") for column in _COMPARABILITY_GROUPS},
+                    "comparability_status": "cutoff_contract_unavailable",
+                    "comparable": False,
+                    "expected_cutoff_rows": 0,
+                    "observed_cutoff_rows": observed_rows,
+                    "matched_cutoff_rows": 0,
+                    "cutoff_coverage": 0.0,
+                    "missing_contract_rows": 0,
+                    "extra_contract_rows": observed_rows,
+                    "duplicate_contract_rows": 0,
+                    "horizon_mismatch_rows": 0,
+                    "actual_mismatch_rows": 0,
+                    "requested_horizon_mismatch": False,
+                }
+            )
+        receipt = {
+            "schema_version": COMPARABILITY_SCHEMA_VERSION,
+            "status": "cutoff_contract_unavailable",
+            "contract_source": contract_source,
+            "summary": {
+                "comparable_groups": 0,
+                "directional_groups": len(groups),
+                "all_groups_comparable": False,
+            },
+            "groups": groups,
+            "created_at_utc": created_at,
+        }
+        return receipt, _merge_comparability(model_metrics, groups)
+
+    group_receipts: list[dict[str, Any]] = []
+    scored = backtest_long.loc[backtest_long["scoring_status"].eq("scored")].copy()
+    for column in _COMPARABILITY_GROUPS:
+        if column not in scored.columns:
+            scored[column] = ""
+        scored[column] = scored[column].fillna("").astype(str)
+    for group_key, group in scored.groupby(_COMPARABILITY_GROUPS, dropna=False, sort=True):
+        identity = dict(zip(_COMPARABILITY_GROUPS, group_key, strict=True))
+        expected = contract.loc[contract["unique_id"].eq(str(identity["unique_id"]))].copy()
+        observed = group[_COMPARABILITY_KEYS + ["y_actual"]].copy()
+        duplicate_rows = int(observed.duplicated(_COMPARABILITY_KEYS, keep=False).sum())
+        observed = observed.drop_duplicates(_COMPARABILITY_KEYS, keep="first")
+
+        joined = expected.merge(
+            observed,
+            on=_COMPARABILITY_KEYS,
+            how="outer",
+            suffixes=("_contract", "_observed"),
+            indicator=True,
+        )
+        both = joined["_merge"].eq("both")
+        actual_match = pd.Series(False, index=joined.index)
+        if both.any():
+            contract_actual = pd.to_numeric(joined.loc[both, "y_actual_contract"], errors="coerce")
+            observed_actual = pd.to_numeric(joined.loc[both, "y_actual_observed"], errors="coerce")
+            actual_match.loc[both] = np.isclose(
+                contract_actual,
+                observed_actual,
+                rtol=1e-9,
+                atol=1e-9,
+                equal_nan=False,
+            )
+        matched_rows = int((both & actual_match).sum())
+        missing_rows = int(joined["_merge"].eq("left_only").sum())
+        extra_rows = int(joined["_merge"].eq("right_only").sum())
+        actual_mismatches = int((both & ~actual_match).sum())
+        horizon_mismatches = _count_horizon_mismatches(expected, observed)
+        expected_rows = int(len(expected))
+        observed_rows = int(len(observed))
+        coverage = matched_rows / expected_rows if expected_rows else 0.0
+
+        contract_horizons = (
+            sorted(
+                int(value)
+                for value in pd.to_numeric(expected["requested_horizon"], errors="coerce").dropna().unique()
+            )
+            if "requested_horizon" in expected.columns
+            else []
+        )
+        requested_horizon_mismatch = bool(
+            requested_horizon is not None
+            and contract_horizons
+            and requested_horizon not in contract_horizons
+        )
+        comparable = bool(
+            expected_rows > 0
+            and matched_rows == expected_rows
+            and missing_rows == 0
+            and extra_rows == 0
+            and duplicate_rows == 0
+            and horizon_mismatches == 0
+            and actual_mismatches == 0
+            and not requested_horizon_mismatch
+        )
+        group_receipts.append(
+            {
+                **identity,
+                "comparability_status": "exact_cutoff_contract_match" if comparable else "cutoff_contract_mismatch",
+                "comparable": comparable,
+                "expected_cutoff_rows": expected_rows,
+                "observed_cutoff_rows": observed_rows,
+                "matched_cutoff_rows": matched_rows,
+                "cutoff_coverage": coverage,
+                "missing_contract_rows": missing_rows,
+                "extra_contract_rows": extra_rows,
+                "duplicate_contract_rows": duplicate_rows,
+                "horizon_mismatch_rows": horizon_mismatches,
+                "actual_mismatch_rows": actual_mismatches,
+                "contract_requested_horizons": contract_horizons,
+                "scored_requested_horizon": requested_horizon,
+                "requested_horizon_mismatch": requested_horizon_mismatch,
+            }
+        )
+
+    comparable_groups = sum(1 for group in group_receipts if group["comparable"])
+    receipt = {
+        "schema_version": COMPARABILITY_SCHEMA_VERSION,
+        "status": "evaluated",
+        "contract_source": contract_source,
+        "contract_rows": int(len(contract)),
+        "summary": {
+            "comparable_groups": comparable_groups,
+            "directional_groups": len(group_receipts) - comparable_groups,
+            "all_groups_comparable": bool(group_receipts) and comparable_groups == len(group_receipts),
+        },
+        "groups": group_receipts,
+        "created_at_utc": created_at,
+    }
+    return receipt, _merge_comparability(model_metrics, group_receipts)
+
+
+def _load_cutoff_contract(
+    source: str | Path | pd.DataFrame | None,
+) -> tuple[pd.DataFrame, str | None]:
+    if source is None:
+        return pd.DataFrame(), None
+    if isinstance(source, pd.DataFrame):
+        contract = source.copy()
+        source_label = "dataframe"
+    else:
+        path = Path(source)
+        if not path.exists():
+            return pd.DataFrame(), str(path)
+        contract = pd.read_csv(path)
+        source_label = str(path)
+    rename = {}
+    if "forecast_timestamp" in contract.columns and "ds" not in contract.columns:
+        rename["forecast_timestamp"] = "ds"
+    if "actual" in contract.columns and "y_actual" not in contract.columns:
+        rename["actual"] = "y_actual"
+    contract = contract.rename(columns=rename)
+    required = {*_COMPARABILITY_KEYS, "y_actual"}
+    missing = sorted(required - set(contract.columns))
+    if missing:
+        raise ValueError(f"cutoff contract is missing required columns: {missing}")
+    contract = contract.copy()
+    contract["unique_id"] = contract["unique_id"].astype(str)
+    contract["cutoff"] = pd.to_datetime(contract["cutoff"], errors="raise")
+    contract["ds"] = pd.to_datetime(contract["ds"], errors="raise")
+    contract["horizon_step"] = pd.to_numeric(contract["horizon_step"], errors="raise").astype(int)
+    contract["y_actual"] = pd.to_numeric(contract["y_actual"], errors="coerce")
+    return contract.sort_values(_COMPARABILITY_KEYS).reset_index(drop=True), source_label
+
+
+def _count_horizon_mismatches(expected: pd.DataFrame, observed: pd.DataFrame) -> int:
+    if expected.empty or observed.empty:
+        return 0
+    base_keys = ["unique_id", "cutoff", "ds"]
+    paired = expected[base_keys + ["horizon_step"]].merge(
+        observed[base_keys + ["horizon_step"]],
+        on=base_keys,
+        how="inner",
+        suffixes=("_contract", "_observed"),
+    )
+    return int(
+        (
+            pd.to_numeric(paired["horizon_step_contract"], errors="coerce")
+            != pd.to_numeric(paired["horizon_step_observed"], errors="coerce")
+        ).sum()
+    )
+
+
+def _merge_comparability(model_metrics: pd.DataFrame, groups: list[dict[str, Any]]) -> pd.DataFrame:
+    columns = [
+        "comparability_status",
+        "comparable",
+        "expected_cutoff_rows",
+        "observed_cutoff_rows",
+        "matched_cutoff_rows",
+        "cutoff_coverage",
+        "missing_contract_rows",
+        "extra_contract_rows",
+        "duplicate_contract_rows",
+        "horizon_mismatch_rows",
+        "actual_mismatch_rows",
+        "requested_horizon_mismatch",
+    ]
+    if model_metrics.empty:
+        return model_metrics.assign(**{column: pd.Series(dtype="object") for column in columns})
+    if not groups:
+        out = model_metrics.copy()
+        out["comparability_status"] = "no_scored_rows"
+        out["comparable"] = False
+        for column in columns[2:-1]:
+            out[column] = 0
+        out["requested_horizon_mismatch"] = False
+        return out
+
+    out = model_metrics.copy()
+    evidence = pd.DataFrame(groups)
+    for column in _COMPARABILITY_GROUPS:
+        out[column] = out[column].fillna("").astype(str)
+        evidence[column] = evidence[column].fillna("").astype(str)
+    evidence_columns = [*_COMPARABILITY_GROUPS, *[column for column in columns if column in evidence.columns]]
+    return out.merge(evidence[evidence_columns], on=_COMPARABILITY_GROUPS, how="left", validate="one_to_one")
+
+
+def _int_or_zero(value: Any) -> int:
+    number = pd.to_numeric(pd.Series([value]), errors="coerce").fillna(0).iloc[0]
+    return int(number)
 
 
 def build_external_scoring_manifest(
