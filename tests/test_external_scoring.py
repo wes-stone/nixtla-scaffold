@@ -158,8 +158,54 @@ def test_write_external_forecast_scores_outputs_artifacts(tmp_path) -> None:
     assert result.manifest["output_dir"] == str(tmp_path / "scores")
     assert (tmp_path / "scores" / "external_backtest_long.csv").exists()
     assert (tmp_path / "scores" / "external_model_metrics.csv").exists()
+    assert (tmp_path / "scores" / "comparability_receipt.json").exists()
     manifest = json.loads((tmp_path / "scores" / "external_scoring_manifest.json").read_text(encoding="utf-8"))
     assert manifest["outputs"]["model_metrics"] == "external_model_metrics.csv"
+
+
+def test_cutoff_contract_requires_exact_rows_for_comparability() -> None:
+    external = pd.DataFrame(
+        {
+            "unique_id": ["Revenue", "Revenue"],
+            "cutoff": ["2026-03-31", "2026-03-31"],
+            "ds": ["2026-04-30", "2026-05-31"],
+            "yhat": [128.0, 145.0],
+            "model": ["Finance plan", "Finance plan"],
+            "source_id": ["fpna_workbook", "fpna_workbook"],
+        }
+    )
+    contract = pd.DataFrame(
+        {
+            "unique_id": ["Revenue", "Revenue"],
+            "cutoff": ["2026-03-31", "2026-03-31"],
+            "ds": ["2026-04-30", "2026-05-31"],
+            "horizon_step": [1, 2],
+            "y_actual": [130.0, 140.0],
+            "requested_horizon": [2, 2],
+        }
+    )
+
+    exact = score_external_forecasts(
+        external,
+        _actuals_frame(),
+        requested_horizon=2,
+        cutoff_contract=contract,
+    )
+    assert bool(exact.model_metrics.loc[0, "comparable"]) is True
+    assert exact.model_metrics.loc[0, "cutoff_coverage"] == 1.0
+    assert exact.comparability_receipt["summary"]["all_groups_comparable"] is True
+
+    mismatched = contract.copy()
+    mismatched.loc[1, "horizon_step"] = 3
+    directional = score_external_forecasts(
+        external,
+        _actuals_frame(),
+        requested_horizon=2,
+        cutoff_contract=mismatched,
+    )
+    assert bool(directional.model_metrics.loc[0, "comparable"]) is False
+    assert directional.model_metrics.loc[0, "horizon_mismatch_rows"] == 1
+    assert directional.comparability_receipt["summary"]["comparable_groups"] == 0
 
 
 def test_score_external_cli_writes_artifacts(tmp_path, capsys) -> None:

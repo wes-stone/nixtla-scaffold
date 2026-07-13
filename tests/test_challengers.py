@@ -38,12 +38,30 @@ def _fake_run_dir(tmp_path: Path) -> Path:
                 "rmsse": 0.8,
                 "bias": 0.1,
                 "abs_bias": 0.1,
-                "observations": 12,
+                "observations": 9,
                 "cv_windows": 4,
                 "cv_horizon_matches_requested": True,
             }
         ]
     ).to_csv(run_dir / "audit" / "backtest_metrics.csv", index=False)
+    contract_rows = []
+    for window_id, cutoff in enumerate(pd.to_datetime(history["ds"]).iloc[-7:-4], start=1):
+        for step in (1, 2, 3):
+            ds = cutoff + pd.offsets.MonthEnd(step)
+            actual = history.loc[pd.to_datetime(history["ds"]).eq(ds), "y"].iloc[0]
+            contract_rows.append(
+                {
+                    "unique_id": "series_a",
+                    "window_id": window_id,
+                    "cutoff": cutoff,
+                    "ds": ds,
+                    "horizon_step": step,
+                    "y_actual": actual,
+                    "requested_horizon": 3,
+                    "selection_horizon": 3,
+                }
+            )
+    pd.DataFrame(contract_rows).to_csv(run_dir / "appendix" / "cutoff_contract.csv", index=False)
     spec = {"horizon": 3, "freq": "ME", "season_length": 12}
     (run_dir / "manifest.json").write_text(json.dumps({"spec": spec, "outputs": {}}), encoding="utf-8")
     (run_dir / "llm_context.json").write_text(json.dumps({"artifact_index": {}}), encoding="utf-8")
@@ -103,13 +121,17 @@ def test_run_challengers_stub_engine_scores_and_builds_leaderboard(tmp_path) -> 
     assert status["advisory_only"] is True
     brief = json.loads((run_dir / "stub" / "agent_brief.json").read_text(encoding="utf-8"))
     assert brief["comparable_evidence"] == "stub/external_model_metrics.csv"
+    assert brief["leaderboard"] == "appendix/challenger_leaderboard.csv"
     assert (run_dir / "stub" / "external_model_metrics.csv").exists()
 
     leaderboard = pd.read_csv(run_dir / "appendix" / "challenger_leaderboard.csv")
     assert set(leaderboard["lane"]) == {"native", "challenger"}
     native = leaderboard[leaderboard["lane"] == "native"].iloc[0]
+    challenger = leaderboard[leaderboard["lane"] == "challenger"].iloc[0]
     assert native["source_id"] == "scaffold"
     assert bool(native["comparable"]) is True
+    assert bool(challenger["comparable"]) is True
+    assert pd.notna(challenger["overall_rank"])
 
     manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["outputs"]["challenger_leaderboard"] == "appendix/challenger_leaderboard.csv"
@@ -162,6 +184,36 @@ def test_leaderboard_empty_when_no_metrics(tmp_path) -> None:
     run_dir = tmp_path / "empty_run"
     run_dir.mkdir()
     assert build_challenger_leaderboard(run_dir).empty
+
+
+def test_noncomparable_challenger_has_directional_rank_only(tmp_path) -> None:
+    run_dir = _fake_run_dir(tmp_path)
+    challenger_dir = run_dir / "mismatch"
+    challenger_dir.mkdir()
+    pd.DataFrame(
+        [
+            {
+                "unique_id": "series_a",
+                "model": "Mismatched",
+                "source_id": "mismatch",
+                "scenario_name": "Base",
+                "rmse": 1.0,
+                "mae": 1.0,
+                "observations": 2,
+                "comparable": "FALSE ",
+                "comparability_status": "cutoff_contract_mismatch",
+                "cutoff_coverage": 0.5,
+            }
+        ]
+    ).to_csv(challenger_dir / "external_model_metrics.csv", index=False)
+
+    leaderboard = build_challenger_leaderboard(run_dir)
+    row = leaderboard.loc[leaderboard["lane"].eq("challenger")].iloc[0]
+
+    assert bool(row["comparable"]) is False
+    assert pd.isna(row["overall_rank"])
+    assert row["directional_rank"] == 1
+    assert row["scenario_name"] == "Base"
 
 
 def test_cli_forecast_finn_soft_fails_without_rscript(tmp_path) -> None:

@@ -1,14 +1,13 @@
 ---
-
 name: nixtla-forecast
-description: "End-to-end FPPy-aligned time series forecasting using the nixtla-scaffold package. Covers data ingestion from any MCP/query source, intake, profiling, model selection, rolling-origin backtesting, prediction intervals, event/driver overlays, MCP feature/regressor discovery, hierarchy, interpretation, and report generation. WHEN: forecast, time series, predict, project, trend, seasonal, ARIMA, ETS, backtest, prediction interval, scenario, nixtla, statsforecast, hierarchy forecast, intermittent demand, revenue forecast, ARR forecast, finance forecast, forecast this data, forecast from Kusto, forecast from Excel, forecast from DAX, find forecast drivers, forecast regressors."
-
+description: "End-to-end FPPy-aligned time series forecasting using the nixtla-scaffold package. Covers data ingestion from any MCP/query source, intake, profiling, model selection, rolling-origin backtesting, prediction intervals, event/driver overlays, MCP feature/regressor discovery, bounded experiment loops, untouched-cutoff promotion, hierarchy, FINN/finnts challenger experiments, exact cutoff comparability, interpretation, and report generation. WHEN: forecast, time series, predict, project, trend, seasonal, ARIMA, ETS, backtest, prediction interval, scenario, nixtla, statsforecast, hierarchy forecast, intermittent demand, revenue forecast, ARR forecast, finance forecast, forecast this data, forecast from Kusto, forecast from Excel, forecast from DAX, find forecast drivers, forecast regressors, FINN, finnts, challenger model, forecast experiment, optimize forecast."
 ---
 
 # nixtla-forecast — AI-Driven Time Series Forecasting Skill
 
 > One-stop-shop for finance-grade forecasting using the open-source Nixtla stack.
 > Built for AI agents that need to go from raw data to explained, auditable forecasts.
+> Skill version: `1.3.1` | Compatible package: `nixtla-scaffold>=0.2.3,<0.3.0`
 
 ## ⚠️ CRITICAL: Agent Behavior Rules
 
@@ -28,6 +27,55 @@ description: "End-to-end FPPy-aligned time series forecasting using the nixtla-s
 7. **ALWAYS separate baseline, scenario, and plan.** FPPy is explicit that a
    forecast is not a goal. Keep statistical yhat, event-adjusted scenario yhat,
    and business target/plan as distinct artifacts.
+8. **DO NOT stop at the first valid baseline.** Unless the user explicitly requests
+   a quick directional read or evidence is blocked, run at least one bounded,
+   falsifiable improvement experiment driven by diagnostics, context, or a challenger.
+9. **SEARCH BROADLY, ADMIT NARROWLY.** Inventory relevant connected sources with
+   bounded read-only queries, but train only future-available, latency-safe,
+   leakage-safe drivers with a plausible business mechanism.
+10. **DECLARE THE RESEARCH BUDGET.** Before experiments, agree on a time-boxed,
+    balanced, deep, or custom bound. Report what was tried, what remains, and why
+    the loop stopped; artifact production alone is not a valid stop reason.
+11. **PROMOTE ONLY ON EXACT EVIDENCE.** Cross-lane accuracy claims require
+    `comparability_receipt.json`, full cutoff-contract coverage, non-worse
+    secondary metrics, and later untouched-cutoff confirmation. Directional
+    evidence can inform the next experiment but cannot receive a promotion rank.
+12. **KEEP CLI/API COMPATIBILITY EXPLICIT.** The skill must choose
+    `accuracy-first` by default. Bare package and Python API defaults remain
+    intentionally lighter and backward-compatible.
+13. **READ THE CLAIM GATE BEFORE NARRATING.** `appendix\accuracy_gate.json` is
+    authoritative for `planning_ready`, `directional_only`, or `blocked`. Never
+    strengthen a directional baseline because the chart looks plausible.
+14. **MAKE REVIEWERS PART OF THE LOOP.** Read each iteration's data, forecast,
+    business-context, and claim reviews. A feasible reviewer blocker must seed the
+    next experiment or remain explicit in `stop_receipt.json`.
+15. **RESOLVE SIGNAL NEEDS BEFORE MODEL SEARCH.** Work `signal_needs.json` through
+    bounded capability-first probes. Generic optimizer variants must wait until each
+    need is satisfied, exhausted, unavailable, opted out, or the source-query budget
+    is exhausted.
+16. **REQUIRE A MATCHED CONTROL.** Standalone treatments automatically run a baseline
+    control. Never rank baseline and treatment when `resolved_candidate_fingerprint`
+    differs unexpectedly; rerun the control after optional-package/runtime changes.
+    `all_models` may differ only because candidate-set breadth is the named treatment.
+17. **LAUNCH THE CANONICAL WORKBENCH FIRST.** Every completed `forecast` run writes
+    `streamlit_app.py` and `run_streamlit.ps1`. Treat that generated app as the primary
+    interactive deliverable and launch it before creating any custom UI. Never replace,
+    hide, or rename it. A custom dashboard requires an explicit user request, lives in a
+    separate folder, is labeled supplemental, and links back to the canonical run.
+18. **DO NOT STITCH CROSS-RUN WINNERS.** Never cherry-pick different series from
+    separate transform, driver, hierarchy, or model-policy runs into an unofficial
+    hybrid forecast. The official output must come from one frozen `ForecastSpec` and
+    its within-run model selection. A hybrid is a new candidate and requires its own
+    pre-registered, exact rolling-origin and untouched-confirmation evidence.
+19. **DO NOT FORCE EXCEL AUTOMATION.** `forecast.xlsx` and
+    `output\forecast_review.xlsx` are standard package artifacts. Do not invoke the
+    xlsx skill, Excel COM, LibreOffice, or build a second workbook unless the user
+    explicitly requests a custom workbook. "All outputs" means the package-generated
+    artifacts, not custom Office work.
+20. **STOP ON SKILL/PACKAGE DRIFT.** If `skill check` reports drift or a skill-referenced
+    CLI capability is missing, do not recreate that capability with ad hoc scripts.
+    Use one coherent source: `uv run` from the current worktree during development, or
+    `uvx` pinned to a Git ref containing the same skill and package code.
 
 ## FPPy Forecaster Standard
 
@@ -73,7 +121,8 @@ Use the same prefix for normal commands:
 
 ```powershell
 uvx --from "nixtla-scaffold @ git+https://github.com/wes-stone/nixtla-scaffold" nixtla-scaffold profile --input data.csv
-uvx --from "nixtla-scaffold @ git+https://github.com/wes-stone/nixtla-scaffold" nixtla-scaffold forecast --input data.csv --preset finance --horizon 6 --output runs\forecast
+uvx --from "nixtla-scaffold @ git+https://github.com/wes-stone/nixtla-scaffold" nixtla-scaffold forecast --input data.csv --preset accuracy-first --context-file forecast_context.json --horizon 6 --output runs\forecast
+uvx --from "nixtla-scaffold @ git+https://github.com/wes-stone/nixtla-scaffold" nixtla-scaffold optimize --input data.csv --preset accuracy-first --context-file forecast_context.json --horizon 6 --output runs\research
 uvx --from "nixtla-scaffold @ git+https://github.com/wes-stone/nixtla-scaffold" nixtla-scaffold report --run runs\forecast
 ```
 
@@ -81,7 +130,7 @@ Optional extras can be requested from the same GitHub package spec:
 
 ```powershell
 # MLForecast / LightGBM candidates
-uvx --from "nixtla-scaffold[ml] @ git+https://github.com/wes-stone/nixtla-scaffold" nixtla-scaffold forecast --input data.csv --preset finance --model-policy auto --output runs\ml_forecast
+uvx --from "nixtla-scaffold[ml] @ git+https://github.com/wes-stone/nixtla-scaffold" nixtla-scaffold forecast --input data.csv --preset standard --model-policy standard --output runs\ml_forecast
 
 # HierarchicalForecast reconciliation
 uvx --from "nixtla-scaffold[hierarchy] @ git+https://github.com/wes-stone/nixtla-scaffold" nixtla-scaffold forecast --input data.csv --preset hierarchy --hierarchy-reconciliation mint_ols --output runs\hierarchy
@@ -98,6 +147,22 @@ uv run nixtla-scaffold --help
 ```
 
 Never switch branches, reset, or discard local changes automatically.
+
+The repository/package skill is the source of truth. Detect drift before a
+high-stakes run and synchronize only with explicit confirmation:
+
+```powershell
+uv run nixtla-scaffold skill check
+uv run nixtla-scaffold skill sync --yes
+```
+
+`skill sync` preserves a timestamped backup whenever the installed `SKILL.md`
+differs. Do not hand-copy partial sections between skill installations.
+
+For a high-stakes run, `skill check` is a stop gate, not an informational warning.
+If an installed development skill is ahead of public `main`, use the matching local
+worktree or pin the matching Git ref. Do not continue with missing commands and then
+hand-build substitutes.
 
 ## Environment Setup — Package vs Local Dev
 
@@ -132,7 +197,7 @@ uv run --with-requirements streamlit_requirements.txt streamlit run .\streamlit_
 
 ---
 
-## Quick Reference — The 17 Commands You Need
+## Quick Reference — Core Commands
 
 | Command | What it does | When to use |
 | --- | --- | --- |
@@ -140,7 +205,8 @@ uv run --with-requirements streamlit_requirements.txt streamlit run .\streamlit_
 | `profile` | Analyzes data quality: frequency, gaps, zeros, negatives, readiness | Before forecasting — check the data |
 | `forecast` | Runs the full pipeline: profile → repair → model → backtest → select → output | The main event |
 | `compare-models` | Writes a clean advisory leaderboard over the existing model tournament without changing champion selection | When an agent or analyst wants a compact compare\\_models-style table |
-| `experiment` | Runs bounded named variants and writes an advisory recommendation with an autoresearch next-iteration block | When improving a forecast one hypothesis at a time |
+| `experiment` | Executes one named, falsifiable hypothesis with a bounded variant set and durable hypothesis receipt | When testing one diagnostic, transform, driver, hierarchy, or FINN idea |
+| `optimize` | Runs repeated evidence-led experiments within the context budget, reviewer-gates every iteration, and confirms one candidate on untouched later data | Default accuracy-improvement loop after intake and source discovery |
 | `refresh` | Reuses a previous run manifest with new actuals, reruns model selection under the same policy, and writes compact refresh deltas | Monthly/weekly operational forecast updates |
 | `explain` | Generates model card from an existing run | After forecast — understand the results |
 | `report` | Regenerates HTML/Streamlit report artifacts | When you need to share results |
@@ -153,12 +219,16 @@ uv run --with-requirements streamlit_requirements.txt streamlit run .\streamlit_
 | `operate` | Runs a hard-capped linear local checklist from YAML and writes `operate_manifest.json` | When an agent needs a repeatable local runbook; no DAGs, retries, parallelism, or scheduler |
 | `workbench-qa` | Runs golden forecast/workbench scenarios and validates generated artifacts + Streamlit apps | Before declaring dashboard/report changes production-ready |
 | `release-gates` | Runs local package release checks: build/install smoke, numeric goldens, workbench QA, optional extras, artifact hygiene, and live Streamlit smoke | Before treating the package/workbench as release-ready |
+| `finn pipeline` | Runs the FINN/finnts challenger lane on an existing forecast run | When testing bounded FINN settings against native evidence |
+| `finn check/ingest/compare/score` | Probes or processes pre-produced FINN artifacts | When FINN runs outside the scaffold |
+| `skill check/sync` | Detects skill drift and installs the canonical version with backup | Before high-stakes agent runs or after package updates |
 
 Preset shortcut:
 
 | Preset | Use when |
 | --- | --- |
-| `quick` | Fast first read / smoke run with baseline ladder |
+| `quick` | Fast exploratory read / smoke run; explicitly non-promotable |
+| `accuracy-first` | Skill default: serious native tournament, bounded context research, strict claim gates, and directional fallback |
 | `standard` | Standard serious finance forecast with full audit/trust artifacts |
 | `strict` | High-stakes run requiring backtests and full-horizon CV champion selection |
 | `hierarchy` | Parent/child planning totals need coherent reconciliation |
@@ -166,12 +236,77 @@ Preset shortcut:
 Flags override presets:
 
 ```powershell
-uv run nixtla-scaffold forecast --input data.csv --preset standard --horizon 6 --unit-label "$" --output runs\standard
+uv run nixtla-scaffold forecast --input data.csv --preset accuracy-first --context-file forecast_context.json --horizon 6 --unit-label "$" --output runs\accuracy_first
 uv run nixtla-scaffold forecast --input data.csv --preset hierarchy --hierarchy-reconciliation mint_ols --output runs\hierarchy_mint
 uv run nixtla-scaffold guide presets
 ```
 
 `finance` remains accepted as a legacy alias for `standard`, but new commands and generated configs should use `standard`.
+
+---
+
+## ACCURACY-FIRST RESEARCH AND PROMOTION
+
+Use `optimize` after intake, bounded source discovery, and an initial data-quality
+review. Do not include `baseline` merely to force a comparison: the optimizer runs
+one reusable baseline outside the research-iteration budget.
+
+```powershell
+# Let evidence and available context generate the bounded hypothesis queue.
+uv run nixtla-scaffold optimize --input data.csv --preset accuracy-first `
+  --context-file forecast_context.json --horizon 6 --output runs\accuracy_research
+
+# Test one explicit falsifiable hypothesis.
+uv run nixtla-scaffold experiment --input data.csv --preset accuracy-first `
+  --context-file forecast_context.json --variants log1p_transform `
+  --hypothesis "If growth is multiplicative, log1p should lower paired full-horizon error without adding bias." `
+  --max-variants 1 --output runs\log1p_experiment
+```
+
+The optimizer must:
+
+1. Reserve the latest eligible horizon block(s) before generating or ranking
+   hypotheses. `chronological_split.csv` is the proof that confirmation rows were
+   not used for tuning.
+2. Select the primary metric from equal-weight per-series scale-free evidence
+   (`RMSSE`, then `MASE`; raw `RMSE` is fallback only).
+3. Change one meaningful dimension per iteration: serious model breadth, log1p
+   transform, safe rolling features, one audited known-future driver family,
+   event/scenario overlay, hierarchy method, or FINN settings.
+4. Reserve compute for the baseline plus every required challenger before running
+   anything. Enabled FINN is a required hypothesis: prioritize it within the
+   iteration cap and do not let patience or optional work silently skip it. Fail
+   before baseline execution when the declared compute budget cannot fund both.
+5. Require exact paired tuning-cutoff coverage, practical primary improvement,
+   secondary evidence within tolerance, stable cutoff behavior, and no new claim
+   gate failure before choosing a confirmation candidate.
+6. Expose only the best native tuning candidate to the untouched later cutoff(s).
+   A tie retains the simpler baseline.
+7. Keep every recommendation advisory. `promotion_decision.json` can recommend a
+   candidate for human approval, but the optimizer never mutates the official
+   forecast.
+8. Gate generic hypotheses on signal discovery. An admitted signal must create an
+   attributable scenario/regressor hypothesis with a matching executable declaration
+   or receive a machine-readable blocker in `signal_experiment_dispositions.json`.
+9. Carry already-consumed source queries into every optimizer budget receipt. Do not
+   reset the source budget when modeling starts.
+
+Read research artifacts in this order:
+
+1. `research_plan.json`, `signal_experiment_dispositions.json`, and `chronological_split.csv`
+2. `baseline\appendix\accuracy_gate.json`
+3. `hypotheses.jsonl`
+4. each `iteration_NNN\hypothesis.json`, `reviews.json`,
+   `tuning_cutoff_comparison.csv`, and `iteration_decision.json`
+5. `iteration_ledger.csv` and `knowledge_ledger.jsonl`
+6. `promotion_decision.json`
+7. `stop_receipt.json`
+
+Valid stop reasons include source discovery incomplete, target achieved, budget exhausted, patience exhausted,
+no comparable evidence, insufficient data, hypothesis queue exhausted, and repeated
+deterministic failure. Do not report "optimization complete" without naming the stop
+reason, remaining budget, largest unknown, and whether promotion was actually
+recommended.
 
 ---
 
@@ -267,9 +402,21 @@ Use `ask_user` to collect structured answers. Group into one form when possible.
 - Who is the audience? (CFO, board, planning team, operational)
 - What decisions depend on this? (Budget setting, hiring, capacity planning)
 - How often will this be refreshed? (One-time, monthly, weekly)
-- What outputs do you need? (CSV, Excel, HTML report, Streamlit dashboard, all)
+- Which standard review surface should we open first? Default to the canonical
+  Streamlit workbench. Forecast runs already generate CSV, HTML, and Excel artifacts;
+  ask separately only if a custom workbook or supplemental dashboard is explicitly needed.
 - What threshold changes the decision? (e.g., if forecast is ±5% of plan, no action; if >10% miss, escalate)
 - Do parent and child series need to sum exactly for planning?
+
+**7. Research budget and source discovery**
+
+- Choose exactly one budget: `time-boxed`, `balanced`, `deep`, or `custom`.
+- A custom budget must set at least one hard limit: iterations, variants per
+  iteration, wall-clock minutes, connected-source queries, or compute units.
+- Connected-source discovery is on by default. Ask only whether the user wants
+  to opt out; record the opt-out rather than silently skipping discovery.
+- For each relevant source, record `available`, `unavailable`, `irrelevant`, or
+  `opted_out`, plus query/provenance references and bounded query counts.
 
 ### Step 1.5: Summarize & Confirm Before Proceeding
 
@@ -287,6 +434,8 @@ Events:     None specified
 Drivers:    None specified
 Feature data to search: Kusto usage, DAX bookings, Excel plan, pricing calendar
 Hierarchy:  Product x Region available, reconciliation needed? yes/no
+Research:   balanced (5 iterations, 4 variants/iteration, 60 minutes, 12 source queries)
+Discovery:  enabled; every relevant source needs a final disposition and provenance
 
 ⚠️  Limitations for this forecast:
 • 10 months of daily data — trend is captured but annual seasonality cannot be validated
@@ -309,19 +458,34 @@ Only proceed after the user confirms or adjusts.
 
 ### Step 2: Get the Data into Canonical Format
 
+Start with setup so the selected budget and intake are persisted. Complete
+bounded source discovery by updating `forecast_context.json`, then run the
+generated forecast command:
+
+```powershell
+uv run nixtla-scaffold setup --workspace runs\my_workspace --preset accuracy-first `
+  --research-budget balanced --decision "capacity planning" --audience "finance leadership" `
+  --target-semantics "Monthly hosted compute cost" --units USD --grain "monthly by product" `
+  --refresh-cadence monthly
+```
+
+Do not mark a source `available` without `provenance` or `query_ref`. A source
+left `planned` makes the context gate incomplete. Candidate drivers in this
+file are discovery evidence only; they never enter model training automatically.
+
 The scaffold expects: `unique_id`, `ds`, `y` columns.
 
 **From CSV/Excel (direct):**
 
 ```powershell
 uv run nixtla-scaffold profile --input data.csv
-uv run nixtla-scaffold forecast --input data.csv --preset standard --horizon 6 --output runs\my_forecast
+uv run nixtla-scaffold forecast --input data.csv --preset accuracy-first --context-file runs\my_workspace\forecast_context.json --horizon 6 --output runs\my_forecast
 ```
 
 **From CSV/Excel with custom column names:**
 
 ```powershell
-uv run nixtla-scaffold forecast --input plan.xlsx --sheet Data --id-col Product --time-col Month --target-col Revenue --preset standard --horizon 6 --output runs\plan
+uv run nixtla-scaffold forecast --input plan.xlsx --sheet Data --id-col Product --time-col Month --target-col Revenue --preset accuracy-first --context-file runs\my_workspace\forecast_context.json --horizon 6 --output runs\plan
 ```
 
 **Runnable onboarding examples:**
@@ -354,7 +518,7 @@ uv run nixtla-scaffold forecast --input data.csv --horizon 6 --normalization-fac
 ```powershell
 # First, run your query via the appropriate MCP and save results to a file
 # Then ingest it:
-uv run nixtla-scaffold ingest --input query_result.json --source kusto --query-file my_query.kql --id-value "My Metric" --time-col day_dt --target-col revenue --output runs\input.csv --forecast-output runs\forecast_demo --preset standard --freq ME --horizon 6
+uv run nixtla-scaffold ingest --input query_result.json --source kusto --query-file my_query.kql --id-value "My Metric" --time-col day_dt --target-col revenue --output runs\input.csv --forecast-output runs\forecast_demo --preset accuracy-first --context-file forecast_context.json --freq ME --horizon 6
 
 # If one forecast needs multiple query extracts, use a source pipeline:
 uv run nixtla-scaffold pipeline run --config examples\contoso_dax_pipeline\pipeline.yaml --output runs\contoso_dax_pipeline
@@ -389,14 +553,44 @@ deterministic ContosoSales-shaped data. Set `KUSTO_MODE=live` after installing
 ```python
 from nixtla_scaffold import forecast_spec_preset, run_forecast
 
-run = run_forecast(df, forecast_spec_preset("standard", horizon=6))
+run = run_forecast(df, forecast_spec_preset("accuracy-first", horizon=6))
 run.to_directory("runs/my_forecast")
+
+# With no completed ForecastContext, this intentionally remains directional-only.
+# For planning-ready claims, load/update the setup-generated context file first.
 ```
 
 ### Step 2.5: MCP Feature / Regressor Discovery Loop
 
 This is mandatory for frontier forecasting enablement. A univariate model is the
 baseline, not the ceiling.
+
+#### Bounded discovery protocol
+
+The package cannot invoke live MCP/Kusto/DAX/SQL sources itself. The agent owns
+read-only discovery; the package validates and serializes the resulting
+`ForecastContext`.
+
+1. Inventory only sources plausibly relevant to the decision, target, hierarchy,
+   benchmarks, events, normalization, or future drivers.
+2. Respect `research_budget.max_source_queries`. Start with schema, row counts,
+   tiny samples, and bounded aggregates before joins or detailed extracts.
+3. Bound every query by time, grain, account/product scope, and top-N where
+   applicable. Never use a heroic raw-to-raw join when two aggregates answer the
+   question.
+4. Choose a route from the need's generic capabilities, not a hard-coded MCP name.
+   Update `forecast_context.json` after each source and append one `SignalProbe`:
+   final status, provenance or query file, query count, row count when known,
+   as-of timing, result summary, and next blocked probe.
+5. Record inaccessible and irrelevant sources. They are valid evidence outcomes;
+   silently skipping them is not.
+6. Give each discovered signal a `context`, `scenario`, `regressor_candidate`, or
+   `reject` contract. A regressor candidate requires a business mechanism, entity/time
+   keys, aligned grain/value field, known-as-of field, refresh latency, usable future
+   path, provenance, and passing leakage plus target-proxy verdicts. Only a matching
+   `KnownFutureRegressor` declaration can request training.
+7. Report remaining source-query and experiment bounds from
+   `appendix\research_budget.json` after each iteration.
 
 **Current package reality:** MLForecast uses safe lag/calendar features by
 default. It can train explicitly declared `model_candidate` regressors only when
@@ -515,10 +709,11 @@ Run feature work in this order:
 5. **Scenario/event overlay**: Add known future events first because assumptions are auditable.
 6. **Lag-transform experiment**: Add rolling/expanding/EWM target features only if CV improves.
 7. **External-regressor experiment**: Add known-future drivers one family at a time; compare by rolling-origin CV.
-8. **Stress test**: Compare selected model vs naive, seasonal naive, plan, prior-year, and business judgment.
-9. **Operationalize**: Save feature source query, refresh timing, future-value assumption, and leakage verdict.
+8. **FINN settings challenger**: Test a bounded model/settings hypothesis through `forecast --finn` or `finn pipeline`; require the exact cutoff contract before cross-lane ranking.
+9. **Stress test**: Compare selected model vs naive, seasonal naive, plan, prior-year, and business judgment.
+10. **Operationalize**: Save feature source query, refresh timing, future-value assumption, leakage verdict, rejected hypotheses, and stop reason.
 
-`experiment_recommendation.md` and `experiment_llm_context.json` include an `autoresearch_next_iteration` block. Treat it as the next agent-friendly loop seed: one hypothesis, one metric family (`avg_rmse` primary with `avg_mae` and RMSE/MAE Pareto status as secondary review), one executor, and one fixed budget. WAPE is diagnostic/business-readable context only; do not use it to rank experiments. MCPs make it easy to run many targeted experiments that used to be manual, but do not overdo it: change one driver family or assumption at a time, keep variant caps low, and stop when metric/trust improvement stalls. Also review the generated human-context questions and candidate-driver hypotheses before blindly iterating; a detected driver like `rolling_minutes` should prompt a leakage/future-availability conversation and then a one-driver experiment, not automatic feature stuffing. Candidate-driver records include same-period correlation plus a within-series lag screen; positive `best_lag` means the driver leads the target by that many periods, and lag evidence must never be inferred by shifting across `unique_id` boundaries. The keep rule is explicit: keep a variant only if RMSE improves or ties with no worse MAE/Pareto review and no new trust/horizon caveats.
+`experiment_recommendation.md` and `experiment_llm_context.json` include an `autoresearch_next_iteration` block. Treat it as the next agent-friendly loop seed: one hypothesis, one metric family (`avg_rmse` primary with `avg_mae` and RMSE/MAE Pareto status as secondary review), one executor, and one fixed budget. WAPE is diagnostic/business-readable context only; do not use it to rank experiments. MCPs make it easy to run many targeted experiments that used to be manual, but do not overdo it: change one driver family or assumption at a time and keep variant caps low. Stop only when the declared budget or evidence-based patience gate is reached, the feasible reviewer gaps are closed, and the stop reason is recorded; one good-looking metric is not sufficient. Also review the generated human-context questions and candidate-driver hypotheses before blindly iterating; a detected driver like `rolling_minutes` should prompt a leakage/future-availability conversation and then a one-driver experiment, not automatic feature stuffing. Candidate-driver records include same-period correlation plus a within-series lag screen; positive `best_lag` means the driver leads the target by that many periods, and lag evidence must never be inferred by shifting across `unique_id` boundaries. The keep rule is explicit: keep a variant only if RMSE improves meaningfully or ties with no worse MAE/Pareto review and no new trust, horizon, leakage, interval, or hierarchy caveats.
 
 #### E. How to communicate current limitations
 
@@ -534,6 +729,21 @@ Say this plainly:
 
 Every forecast run produces these artifacts:
 
+**Open the canonical workbench first.** Verify that `streamlit_app.py` and
+`run_streamlit.ps1` exist in the selected official run, then launch that generated
+app. If they are missing, rerun `nixtla-scaffold report --run <official-run>` and
+treat continued absence as a failed run. Do not mask the failure by building a
+replacement dashboard.
+
+```powershell
+Test-Path .\streamlit_app.py
+Test-Path .\run_streamlit.ps1
+.\run_streamlit.ps1
+```
+
+The Excel files below are already generated by the package and do not require Excel,
+COM automation, LibreOffice, or a separate workbook-building workflow.
+
 | File | Purpose |
 | --- | --- |
 | `OPEN_ME_FIRST.html` | Curated landing page with the executive headline, clean file map, and links to the compact workbook/report; open this first when the run folder feels noisy |
@@ -547,6 +757,7 @@ Every forecast run produces these artifacts:
 | `diagnostics.json` | Machine-readable run context with `executive_headline.paragraph`, trust/horizon distributions, warnings, next steps, unit labels, absolute deltas, YoY deltas when history supports them, and reproducibility metadata |
 | `forecast_long.csv` | Primary model-feed output: one future row per series/model/date with yhat, intervals, weight, selected-model flag, interval status, and row-level horizon validation |
 | `backtest_long.csv` | Primary validation-feed output: one row per cutoff/series/model/date with actuals, forecasts, errors, interval bounds, and coverage flags |
+| `cutoff_contract.csv` | Deduplicated native validation schedule keyed by series, cutoff, forecast date, and horizon step; required for promotion-grade external comparability |
 | `series_summary.csv` | One-row-per-series decision table with selected model, RMSE/MAE/MASE/RMSSE/WAPE, CV horizon contract, seasonality, and top alternatives |
 | `series_features.csv` | Cheap deterministic forecastability features and `recommended_experiment_next_step` for agent review; advisory only, never model-selection input |
 | `borrowed_strength_advisor.csv` | Advisory sparse-series guidance for independent, parent-anchored, reference-class, or panel-pool review; never changes champion selection or `forecast.csv` |
@@ -559,6 +770,9 @@ Every forecast run produces these artifacts:
 | `residual_tests.csv` | Heuristic residual bias, one-step autocorrelation, outlier, and early/late structural-break checks over rolling-origin residuals; diagnostic screening only, not formal model adequacy certification; small samples are directional |
 | `interval_diagnostics.csv` | Empirical prediction-interval coverage, width, method label, and pass/warn/fail calibration status when CV intervals are available |
 | `trust_summary.csv` | First-stop decision artifact with per-series High/Medium/Low trust, score drivers, horizon trust, full-horizon claim gate, caveats, and recommended next actions |
+| `context_receipt.json` / `.md` | Decision framing, target semantics, final connected-source dispositions, provenance, and candidate-driver discovery evidence |
+| `research_budget.json` | Selected hard bounds plus known consumption and remaining source-query/iteration capacity |
+| `accuracy_gate.json` / `.md` | Authoritative run classification: `planning_ready`, `directional_only`, or `blocked`, with per-series failed gates and exact remediation |
 | `model_explainability.csv` | MLForecast lag/date feature importance or coefficient magnitudes when ML models run; use it first before any optional offline `models_`/`preprocess`/`SaveFeatures`/SHAP investigation |
 | `feature_selection_receipts.csv` | Descriptive MLForecast feature evidence for lag/date/rolling/driver features; it does not auto-prune or override champion selection |
 | `forecast.csv` | Selected point forecasts + intervals (if supported), plus `row_horizon_status`, `horizon_trust_state`, `validated_through_horizon`, `planning_eligible`, and `planning_eligibility_scope`; `planning_eligible` is horizon-validation only, not a global planning approval |
@@ -671,16 +885,18 @@ Explain this clearly: these are local receipts, health checks, drift rollups, an
 
 #### A. Sanity Checks (do all of these)
 
-1. **Trust/action summary**: Open `trust_summary.csv` first. Use it to tell the user the per-series High/Medium/Low readiness, score drivers, `horizon_trust_state`, `full_horizon_claim_allowed`, caveats, and next actions. Do not present Low-trust or no-full-horizon-claim forecasts as planning-ready for the full requested horizon.
-2. **Backtest accuracy**: Open `model_audit.csv` or `audit\backtest_metrics.csv`. RMSE is the default selection metric because it penalizes large misses more strongly than MAE/WAPE. Use MAE as the key secondary error lens and review `model_pareto_frontier.csv` for RMSE/MAE non-dominated alternatives. Use MASE/RMSSE for scale-free cross-series comparisons and WAPE as business-readable diagnostic context only, not an experiment selector. When metrics disagree, still lead with the official selected model and trust artifacts.
-3. **CV horizon contract**: Check `selection_horizon` vs `requested_horizon`, `cv_windows`, `full_horizon_claim_allowed`, `unvalidated_steps`, and `horizon_trust_score_cap`, then inspect `forecast.csv` row-level `row_horizon_status`, `planning_eligible`, and `planning_eligibility_scope`. If selection used a shorter horizon, disclose that steps after `validated_through_horizon` are directional, not validated planning rows. If full horizon was evaluated with only one CV window, disclose that it is still not a planning-ready champion claim. `planning_eligible=True` is horizon-validation only; still review trust, intervals, residuals, hierarchy, and data-quality caveats. Rerun with `--strict-cv-horizon` and/or add history when the decision requires full-horizon evidence.
-4. **Naive comparison**: Check `interpretation.md` and `model_win_rates.csv` — does the selected model beat Naive/SeasonalNaive? If not, the data may be too noisy or have structural breaks. Be honest.
-5. **Trend extrapolation**: Does the forecast trajectory make business sense? A model that extrapolates 40% monthly growth for 12 months may be mathematically correct but operationally useless.
-6. **Interval width and validity**: Are the 95% intervals so wide they're uninformative? Does `lo <= yhat <= hi` hold? If not, fix before stakeholder use.
-7. **Target transform / normalization audit**: If `audit\target_transform_audit.csv` has rows, explain the output scale before showing the forecast. Log/log1p outputs are inverse-transformed for reporting; factor-normalized forecasts are normalized units unless future factors are supplied externally.
-8. **Seasonality credibility**: Check `audit\seasonality_diagnostics.csv` before trusting a seasonal story. If the credibility label is `low`, or complete cycles are fewer than 2, say the model cannot validate annual/weekly seasonality yet. Use `audit\seasonality_decomposition.csv` to inspect observed, trend, seasonal, and remainder components when available.
-9. **Hierarchy coherence**: If the data has parent/child nodes, decide whether independent node forecasts are acceptable or whether planning requires `--hierarchy-reconciliation bottom_up`, `top_down`, `both`, `mint_ols`, or `mint_wls_struct`. Review `appendix\hierarchy_rollup.csv`, `appendix\hierarchy_contribution.csv`, `audit\hierarchy_backtest_comparison.csv`, `appendix\hierarchy_reconciliation.csv`, and the pre/post coherence artifacts when reconciliation is enabled; reconciliation enforces planning coherence and can improve or worsen node-level accuracy.
-10. **Driver opportunity**: Ask whether MCP sources can provide leading indicators, known future events, or normalization factors that should become features/scenarios.
+1. **Accuracy claim gate**: Open `appendix\accuracy_gate.json` first. Quote its `status` and never call `directional_only` planning-ready. Use its failed gates and remediation verbatim before suggesting stronger claims.
+2. **Context and budget receipts**: Open `appendix\context_receipt.json` and `appendix\research_budget.json`. Confirm intake completeness, source dispositions/provenance, explicit opt-outs, hard bounds, and remaining budget.
+3. **Trust/action summary**: Open `trust_summary.csv`. Use it to tell the user the per-series High/Medium/Low readiness, score drivers, `horizon_trust_state`, `full_horizon_claim_allowed`, caveats, and next actions. Do not present Low-trust or no-full-horizon-claim forecasts as planning-ready for the full requested horizon.
+4. **Backtest accuracy**: Open `model_audit.csv` or `audit\backtest_metrics.csv`. RMSE is the default selection metric because it penalizes large misses more strongly than MAE/WAPE. Use MAE as the key secondary error lens and review `model_pareto_frontier.csv` for RMSE/MAE non-dominated alternatives. Use MASE/RMSSE for scale-free cross-series comparisons and WAPE as business-readable diagnostic context only, not an experiment selector. When metrics disagree, still lead with the official selected model and trust artifacts.
+5. **CV horizon contract**: Check `selection_horizon` vs `requested_horizon`, `cv_windows`, `full_horizon_claim_allowed`, `unvalidated_steps`, and `horizon_trust_score_cap`, then inspect `forecast.csv` row-level `row_horizon_status`, `planning_eligible`, and `planning_eligibility_scope`. If selection used a shorter horizon, disclose that steps after `validated_through_horizon` are directional, not validated planning rows. If full horizon was evaluated with only one CV window, disclose that it is still not a planning-ready champion claim. `planning_eligible=True` is horizon-validation only; still review trust, intervals, residuals, hierarchy, and data-quality caveats. Rerun with `--strict-cv-horizon` and/or add history when the decision requires full-horizon evidence.
+6. **Naive comparison**: Check `interpretation.md` and `model_win_rates.csv` — does the selected model beat Naive/SeasonalNaive? If not, the data may be too noisy or have structural breaks. Be honest.
+7. **Trend extrapolation**: Does the forecast trajectory make business sense? A model that extrapolates 40% monthly growth for 12 months may be mathematically correct but operationally useless.
+8. **Interval width and validity**: Are the 95% intervals so wide they're uninformative? Does `lo <= yhat <= hi` hold? If not, fix before stakeholder use.
+9. **Target transform / normalization audit**: If `audit\target_transform_audit.csv` has rows, explain the output scale before showing the forecast. Log/log1p outputs are inverse-transformed for reporting; factor-normalized forecasts are normalized units unless future factors are supplied externally.
+10. **Seasonality credibility**: Check `audit\seasonality_diagnostics.csv` before trusting a seasonal story. If the credibility label is `low`, or complete cycles are fewer than 2, say the model cannot validate annual/weekly seasonality yet. Use `audit\seasonality_decomposition.csv` to inspect observed, trend, seasonal, and remainder components when available.
+11. **Hierarchy coherence**: If the data has parent/child nodes, decide whether independent node forecasts are acceptable or whether planning requires `--hierarchy-reconciliation bottom_up`, `top_down`, `both`, `mint_ols`, or `mint_wls_struct`. Review `appendix\hierarchy_rollup.csv`, `appendix\hierarchy_contribution.csv`, `audit\hierarchy_backtest_comparison.csv`, `appendix\hierarchy_reconciliation.csv`, and the pre/post coherence artifacts when reconciliation is enabled; reconciliation enforces planning coherence and can improve or worsen node-level accuracy.
+12. **Driver opportunity**: Ask whether MCP sources can provide leading indicators, known future events, or normalization factors that should become features/scenarios.
 
 #### B. Limitations Disclosure (present to user)
 
@@ -980,12 +1196,80 @@ Review rule: reconciliation improves planning coherence, not necessarily indepen
 
 ---
 
+## FINN / EXTERNAL CHALLENGER LANE
+
+FINN ([finnts](https://microsoft.github.io/finnts/), Microsoft's R forecasting
+package) is a **spec-driven challenger**, not a default dependency. The
+Python/Nixtla run remains canonical; FINN runs beside it and never mutates
+`forecast.csv`.
+
+### One-command flow
+
+```powershell
+# Native tournament plus bounded FINN challenger
+uv run nixtla-scaffold forecast --input data.csv --preset accuracy-first --context-file forecast_context.json --horizon 6 --freq ME --season-length 12 `
+  --finn --finn-models ets snaive --finn-back-test-scenarios 4 --output runs\demo
+
+# Retrofit FINN onto a completed run
+uv run nixtla-scaffold finn pipeline --run runs\demo --models ets snaive --back-test-scenarios 4
+```
+
+Useful bounds: `--finn-models`, `--finn-back-test-scenarios`,
+`--finn-back-test-spacing`, `--finn-timeout`, and `--finn-on-error`.
+Missing R/finnts soft-fails by default and writes remediation instead of
+breaking the native forecast.
+
+### Evidence semantics agents must enforce
+
+1. `future_forecasts.csv` plus `forecast_comparison.csv` are directional. Future
+   forecasts cannot prove accuracy.
+2. `cutoff_forecasts.csv` becomes cross-lane comparable only when
+   `comparability_receipt.json` reports an exact match on series, cutoff,
+   forecast date, horizon step, and actual for every row in
+   `appendix\cutoff_contract.csv`.
+3. `appendix\challenger_leaderboard.csv` gives `overall_rank` only to exact
+   matches. Non-comparable evidence receives `directional_rank` within its lane.
+4. External challenger promotion remains advisory. A human must approve any
+   change to the official forecast, and later untouched cutoffs should confirm it.
+5. `experiment` and `optimize` execute FINN only through the explicit `finn`
+   hypothesis/variant. If enabled FINN settings are supplied while `finn` is
+   excluded, the command rejects them rather than silently persisting them.
+   `compare-models` remains native-only and rejects enabled FINN settings.
+6. Evaluate one panel-wide `(source_id, scenario_name, model)` configuration at a
+   time. Never synthesize an external candidate by selecting a different winning
+   configuration for each series.
+
+### Artifact reading order
+
+1. `finn\challenger_status.json` / `finn\challenger_run_manifest.json`
+2. `finn\agent_brief.json`
+3. `finn\comparability_receipt.json`
+4. `appendix\challenger_leaderboard.csv`
+5. `finn\external_model_metrics.csv`
+6. `finn\comparison_manifest.json` and `finn\scoring_manifest.json`
+7. `finn\raw\` for parameters, generated runner, source outputs, and logs
+
+### Manual bridge
+
+```powershell
+uv run nixtla-scaffold finn check
+uv run nixtla-scaffold finn ingest --input finn_forecast.csv --output runs\finn_ingest
+uv run nixtla-scaffold finn compare --run runs\demo --input finn_forecast.csv
+uv run nixtla-scaffold finn score --run runs\demo --actuals actuals.csv --input finn_backtest.csv --season-length 12 --horizon 6
+```
+
+R requirement: local `Rscript` plus the `finnts` package. FINN cost grows
+quickly with models, series, and backtest scenarios, so keep every run bounded
+and make each settings change a named hypothesis rather than a broad sweep.
+
+---
+
 ## SETUP WIZARD (Agent-First)
 
 When a user says "forecast this" without clear specs:
 
 ```powershell
-uv run nixtla-scaffold setup --workspace runs\my_workspace --data-source kusto --preset standard --series-count single --target-name revenue --time-col date --horizon 6 --freq ME --model-families statsforecast --exploration-mode
+uv run nixtla-scaffold setup --workspace runs\my_workspace --data-source csv --input "data\revenue.csv" --preset accuracy-first --research-budget balanced --series-count single --target-name revenue --time-col date --horizon 6 --freq ME --model-families standard --exploration-mode --source-discovery
 ```
 
 This creates:
@@ -993,6 +1277,8 @@ This creates:
 - `forecast_setup.yaml`: reusable config
 - `agent_brief.md`: checklist with exact next commands
 - `questions.json`: structured intake for programmatic use
+- `forecast_context.json`, `signal_needs.json`, `signal_probe_ledger.jsonl`, and
+  `signal_contracts.json`: typed discovery and experiment-routing contracts
 - Query templates and folder structure
 
 ---

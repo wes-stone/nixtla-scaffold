@@ -16,17 +16,26 @@ from nixtla_scaffold.outputs import build_model_audit, build_model_pareto_fronti
 from nixtla_scaffold.schema import ForecastRun, ForecastSpec
 
 
-EXPERIMENT_SCHEMA_VERSION = "nixtla_scaffold.experiment.v1"
+EXPERIMENT_SCHEMA_VERSION = "nixtla_scaffold.experiment.v2"
 COMPARE_MODELS_SCHEMA_VERSION = "nixtla_scaffold.compare_models.v1"
-OPTIMIZER_SCHEMA_VERSION = "nixtla_scaffold.optimizer.v1"
-DEFAULT_EXPERIMENT_VARIANTS = ("baseline", "all_models", "events", "known_future_regressors", "hierarchy_methods")
+OPTIMIZER_SCHEMA_VERSION = "nixtla_scaffold.optimizer.v2"
+DEFAULT_EXPERIMENT_VARIANTS = (
+    "baseline",
+    "all_models",
+    "events",
+    "known_future_regressors",
+    "hierarchy_methods",
+    "finn",
+)
 EXPERIMENT_VARIANTS = (
     "baseline",
     "events",
     "known_future_regressors",
+    "log1p_transform",
     "rolling_features",
     "all_models",
     "hierarchy_methods",
+    "finn",
 )
 _HIERARCHY_COLUMNS = {"hierarchy_level", "hierarchy_depth", "parent_id", "bottom_level"}
 _DRIVER_NAME_TERMS = {
@@ -98,10 +107,50 @@ class ExperimentVariant:
 
 
 @dataclass(frozen=True)
+class ExperimentHypothesis:
+    hypothesis_id: str
+    statement: str
+    changed_dimension: str
+    expected_mechanism: str
+    predicted_effect: str
+    required_data: tuple[str, ...]
+    falsifying_outcome: str
+    leakage_risk: str
+    horizon_risk: str
+    estimated_cost: dict[str, int | float | str]
+    variant: str
+    evidence_refs: tuple[str, ...] = ()
+    seeded_by: str = "initial_evidence"
+    signal_id: str = ""
+    probe_id: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "hypothesis_id": self.hypothesis_id,
+            "statement": self.statement,
+            "changed_dimension": self.changed_dimension,
+            "expected_mechanism": self.expected_mechanism,
+            "predicted_effect": self.predicted_effect,
+            "required_data": list(self.required_data),
+            "falsifying_outcome": self.falsifying_outcome,
+            "leakage_risk": self.leakage_risk,
+            "horizon_risk": self.horizon_risk,
+            "estimated_cost": dict(self.estimated_cost),
+            "variant": self.variant,
+            "evidence_refs": list(self.evidence_refs),
+            "seeded_by": self.seeded_by,
+            "signal_id": self.signal_id,
+            "probe_id": self.probe_id,
+        }
+
+
+@dataclass(frozen=True)
 class ExperimentContext:
     has_events: bool
     has_regressors: bool
     has_hierarchy: bool
+    has_challengers: bool
+    target_nonnegative: bool
     row_count: int
     series_count: int
     source_hash_sha256: str | None
@@ -114,6 +163,8 @@ class ExperimentContext:
             "has_events": self.has_events,
             "has_regressors": self.has_regressors,
             "has_hierarchy": self.has_hierarchy,
+            "has_challengers": self.has_challengers,
+            "target_nonnegative": self.target_nonnegative,
             "row_count": self.row_count,
             "series_count": self.series_count,
             "source_hash_sha256": self.source_hash_sha256,
@@ -150,7 +201,9 @@ def compare_models(
 ) -> pd.DataFrame:
     """Run the standard scaffold tournament and return an advisory model leaderboard."""
 
-    run = run_forecast(data, spec or ForecastSpec(), sheet=sheet)
+    run_spec = spec or ForecastSpec()
+    _reject_unexecuted_challengers(run_spec, "compare-models")
+    run = run_forecast(data, run_spec, sheet=sheet)
     leaderboard = build_model_leaderboard(run)
     if output_dir is not None:
         out = run.to_directory(output_dir)
@@ -183,21 +236,46 @@ def run_experiment(
     output_dir: str | Path = "runs/experiment_latest",
     variants: Sequence[str] | None = None,
     max_variants: int = 4,
+    hypothesis: ExperimentHypothesis | str | None = None,
+    matched_control: bool = True,
 ) -> ExperimentResult:
-    """Run a bounded set of advisory forecast variants and write experiment artifacts."""
+    """Run one bounded, falsifiable hypothesis without mutating the official forecast."""
 
     base_spec = spec or ForecastSpec()
+    if max_variants < 1:
+        raise ValueError("max_variants must be >= 1")
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     (out / "variants").mkdir(parents=True, exist_ok=True)
     context = _experiment_context(data, base_spec, sheet=sheet)
     catalog = _variant_catalog()
     requested = _resolve_variants(variants, context)
+    enabled_challengers = tuple(challenger for challenger in base_spec.challengers if challenger.enabled)
+    if enabled_challengers and "finn" not in requested:
+        engines = ", ".join(sorted({challenger.engine for challenger in enabled_challengers}))
+        raise ValueError(
+            f"experiment received enabled external challengers ({engines}) but no `finn` experiment variant; "
+            "include `finn` so the settings are executed rather than silently persisted"
+        )
+    if (
+        enabled_challengers
+        and requested.index("finn") >= max_variants
+    ):
+        requested.remove("finn")
+        requested.insert(max_variants - 1, "finn")
     selected, capped = requested[:max_variants], requested[max_variants:]
+    control_auto_added = bool(
+        matched_control
+        and variants is not None
+        and "baseline" not in selected
+        and any(name != "baseline" for name in selected)
+    )
+    run_variants = [*selected, "baseline"] if control_auto_added else selected
+    effective_hypothesis = _coerce_experiment_hypothesis(hypothesis, selected)
 
     summary_rows: list[dict[str, Any]] = []
     child_runs: list[dict[str, Any]] = []
-    for name in selected:
+    for name in run_variants:
         variant = catalog.get(name)
         if variant is None:
             summary_rows.append(_skipped_row(name, "unknown_variant", f"unknown variant; choose from {list(EXPERIMENT_VARIANTS)}"))
@@ -206,15 +284,24 @@ def run_experiment(
         if not ok:
             summary_rows.append(_skipped_row(name, "not_applicable", reason, description=variant.description))
             continue
-        variant_spec = variant.build_spec(base_spec)
+        variant_spec = replace(variant.build_spec(base_spec), challengers=())
         variant_dir = out / "variants" / name
         try:
             run = run_forecast(data, variant_spec, sheet=sheet)
             run.to_directory(variant_dir)
+            challenger_result = None
+            if name == "finn":
+                from nixtla_scaffold.challengers import run_challengers
+
+                challenger_result = run_challengers(variant_dir, enabled_challengers)
         except Exception as exc:
             summary_rows.append(_skipped_row(name, "failed", str(exc), description=variant.description, run_path=variant_dir))
             continue
-        row = _successful_row(name, variant.description, variant_dir, run)
+        row = (
+            _challenger_successful_row(name, variant.description, variant_dir, run, challenger_result)
+            if name == "finn"
+            else _successful_row(name, variant.description, variant_dir, run)
+        )
         summary_rows.append(row)
         child_runs.append(
             {
@@ -223,6 +310,10 @@ def run_experiment(
                 "path": str(variant_dir),
                 "spec": variant_spec.to_dict(),
                 "selected_models": _selected_model_counts(run),
+                "resolved_candidate_fingerprint": run.model_policy_resolution.get(
+                    "resolved_candidate_fingerprint", ""
+                ),
+                "challenger_result": challenger_result,
             }
         )
 
@@ -237,23 +328,41 @@ def run_experiment(
 
     summary = pd.DataFrame(summary_rows)
     if not summary.empty:
+        summary = _apply_candidate_set_compatibility(summary)
         summary = _assign_advisory_ranks(summary)
         summary["_status_order"] = summary["status"].map({"success": 0}).fillna(1)
-        summary = summary.sort_values(["_status_order", "advisory_rank", "variant"], na_position="last").drop(columns=["_status_order"]).reset_index(drop=True)
+        summary["_auto_control_order"] = (
+            summary["variant"].eq("baseline") & control_auto_added
+        ).astype(int)
+        summary = (
+            summary.sort_values(
+                ["_status_order", "_auto_control_order", "advisory_rank", "variant"],
+                na_position="last",
+            )
+            .drop(columns=["_status_order", "_auto_control_order"])
+            .reset_index(drop=True)
+        )
     recommendation = build_experiment_recommendation(summary, context)
     manifest = {
         "schema_version": EXPERIMENT_SCHEMA_VERSION,
         "purpose": "Bounded advisory forecast experiment; child runs are normal scaffold outputs and no recommendation mutates forecast.csv.",
+        "hypothesis": effective_hypothesis.to_dict(),
         "context": context.to_dict(),
         "base_spec": base_spec.to_dict(),
         "requested_variants": list(requested),
         "max_variants": max_variants,
+        "matched_control": {
+            "enabled": matched_control,
+            "auto_added": control_auto_added,
+            "variant": "baseline" if ("baseline" in run_variants) else None,
+        },
         "child_runs": child_runs,
         "outputs": {
             "summary": "experiment_summary.csv",
             "recommendation": "experiment_recommendation.md",
             "llm_context": "experiment_llm_context.json",
             "manifest": "experiment_manifest.json",
+            "hypothesis": "hypothesis.json",
         },
     }
     llm_context = {
@@ -275,6 +384,10 @@ def run_experiment(
     (out / "experiment_recommendation.md").write_text(recommendation, encoding="utf-8")
     (out / "experiment_manifest.json").write_text(json.dumps(manifest, indent=2, default=str) + "\n", encoding="utf-8")
     (out / "experiment_llm_context.json").write_text(json.dumps(llm_context, indent=2, default=str) + "\n", encoding="utf-8")
+    (out / "hypothesis.json").write_text(
+        json.dumps(effective_hypothesis.to_dict(), indent=2, default=str) + "\n",
+        encoding="utf-8",
+    )
     return ExperimentResult(
         output_dir=out,
         manifest=manifest,
@@ -291,58 +404,41 @@ def run_optimizer(
     sheet: str | int | None = None,
     output_dir: str | Path = "runs/optimizer_latest",
     variants: Sequence[str] | None = None,
-    max_iterations: int = 1,
+    max_iterations: int | None = None,
     max_variants: int = 4,
+    patience: int = 2,
 ) -> OptimizerResult:
-    """Run one bounded deterministic optimizer pass using existing experiment infrastructure."""
+    """Run bounded evidence-led experiments and confirm promotion on untouched later data."""
 
-    if max_iterations < 1:
-        raise ValueError("max_iterations must be >= 1")
-    out = Path(output_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    experiment_dir = out / "iteration_001"
-    experiment = run_experiment(
+    from nixtla_scaffold.research import run_research_optimizer
+
+    result = run_research_optimizer(
         data,
         spec or ForecastSpec(),
         sheet=sheet,
-        output_dir=experiment_dir,
+        output_dir=output_dir,
         variants=variants,
+        max_iterations=max_iterations,
         max_variants=max_variants,
+        patience=patience,
     )
-    iteration_summary = experiment.summary.copy()
-    if not iteration_summary.empty:
-        iteration_summary.insert(0, "iteration", 1)
-    decisions = tuple(_optimizer_decisions(iteration_summary))
-    next_questions = _optimizer_next_questions_markdown(experiment.llm_context)
-    manifest = {
-        "schema_version": OPTIMIZER_SCHEMA_VERSION,
-        "purpose": "Bounded deterministic optimizer loop over scaffold experiment variants; advisory only and does not mutate forecast.csv.",
-        "max_iterations": max_iterations,
-        "executed_iterations": 1,
-        "stopped_reason": "single deterministic pass complete; rerun with the next_iteration_questions guidance after adding human/business context",
-        "experiment_manifest": str(experiment_dir / "experiment_manifest.json"),
-        "experiment_llm_context": str(experiment_dir / "experiment_llm_context.json"),
-        "best_variant": experiment.llm_context.get("recommendation", {}).get("best_variant", "unknown"),
-        "base_spec": (spec or ForecastSpec()).to_dict(),
-        "outputs": {
-            "iteration_summary": "iteration_summary.csv",
-            "iteration_decisions": "iteration_decisions.jsonl",
-            "next_iteration_questions": "next_iteration_questions.md",
-            "manifest": "iteration_manifest.json",
-        },
-    }
-    iteration_summary.to_csv(out / "iteration_summary.csv", index=False)
-    with (out / "iteration_decisions.jsonl").open("w", encoding="utf-8") as handle:
-        for decision in decisions:
-            handle.write(json.dumps(decision, default=str) + "\n")
-    (out / "next_iteration_questions.md").write_text(next_questions, encoding="utf-8")
-    (out / "iteration_manifest.json").write_text(json.dumps(manifest, indent=2, default=str) + "\n", encoding="utf-8")
     return OptimizerResult(
-        output_dir=out,
-        manifest=manifest,
-        iteration_summary=iteration_summary,
-        decisions=decisions,
-        next_iteration_questions_markdown=next_questions,
+        output_dir=result.output_dir,
+        manifest=result.manifest,
+        iteration_summary=result.iteration_summary,
+        decisions=result.decisions,
+        next_iteration_questions_markdown=result.next_iteration_questions_markdown,
+    )
+
+
+def _reject_unexecuted_challengers(spec: ForecastSpec, operation: str) -> None:
+    enabled = [challenger.engine for challenger in spec.challengers if challenger.enabled]
+    if not enabled:
+        return
+    engines = ", ".join(sorted(set(enabled)))
+    raise ValueError(
+        f"{operation} does not execute external challengers ({engines}); refusing to persist inactive challenger settings. "
+        "Run `forecast --finn` for a native run plus FINN, or run `finn pipeline --run <completed-run>`."
     )
 
 
@@ -586,6 +682,47 @@ def _optimizer_next_questions_markdown(llm_context: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _default_experiment_hypothesis(variants: Sequence[str]) -> ExperimentHypothesis:
+    named = tuple(str(variant) for variant in variants)
+    variant = named[0] if len(named) == 1 else "bounded_variant_set"
+    label = ", ".join(named) if named else "baseline"
+    return ExperimentHypothesis(
+        hypothesis_id=f"manual-{_slug(label)}",
+        statement=f"If the {label} configuration captures signal missed by the current baseline, its chronological error should improve.",
+        changed_dimension=label,
+        expected_mechanism="The declared configuration changes one bounded modeling assumption while retaining the same target history and horizon.",
+        predicted_effect="Lower scale-free and absolute error without weaker trust or horizon evidence.",
+        required_data=("target history", "chronological backtest cutoffs"),
+        falsifying_outcome="The candidate does not improve the primary metric or introduces a trust, leakage, horizon, or comparability failure.",
+        leakage_risk="Candidate inputs must be available at each simulated forecast origin.",
+        horizon_risk="Evidence must cover the requested horizon rather than only the first forecast step.",
+        estimated_cost={"iterations": 1, "variants": max(1, len(named)), "compute_units": max(1, len(named))},
+        variant=variant,
+        evidence_refs=("experiment context receipt",),
+        seeded_by="manual_experiment_request",
+    )
+
+
+def _coerce_experiment_hypothesis(
+    hypothesis: ExperimentHypothesis | str | None,
+    variants: Sequence[str],
+) -> ExperimentHypothesis:
+    default = _default_experiment_hypothesis(variants)
+    if hypothesis is None:
+        return default
+    if isinstance(hypothesis, ExperimentHypothesis):
+        return hypothesis
+    statement = str(hypothesis).strip()
+    if not statement:
+        raise ValueError("experiment hypothesis must not be empty")
+    return replace(
+        default,
+        hypothesis_id=f"manual-{sha256(statement.encode('utf-8')).hexdigest()[:12]}",
+        statement=statement,
+        seeded_by="manual_hypothesis",
+    )
+
+
 def _successful_row(name: str, description: str, path: Path, run: ForecastRun) -> dict[str, Any]:
     selection = run.model_selection.copy()
     trust = build_trust_summary(run)
@@ -606,6 +743,17 @@ def _successful_row(name: str, description: str, path: Path, run: ForecastRun) -
         else None
     )
     rank_score = _rank_score(avg_rmse, avg_mae, avg_trust)
+    resolution = (
+        run.model_policy_resolution
+        if isinstance(run.model_policy_resolution, dict)
+        else {}
+    )
+    identity = resolution.get("resolved_candidate_identity", {})
+    resolved_candidates = (
+        identity.get("resolved_candidates", [])
+        if isinstance(identity, dict)
+        else []
+    )
     return {
         "variant": name,
         "description": description,
@@ -623,9 +771,226 @@ def _successful_row(name: str, description: str, path: Path, run: ForecastRun) -
         "full_horizon_claim_allowed_series": full_horizon_count,
         "pareto_selected_fraction": pareto_fraction,
         "warning_count": len(run.warnings),
+        "resolved_candidate_fingerprint": str(
+            resolution.get("resolved_candidate_fingerprint", "")
+        ),
+        "resolved_candidate_set": json.dumps(
+            sorted(str(candidate) for candidate in resolved_candidates),
+            separators=(",", ":"),
+        ),
+        "control_resolved_candidate_fingerprint": "",
+        "candidate_set_changed": False,
+        "candidate_set_compatible": None,
+        "candidate_set_comparison_status": "not_assessed",
+        "evidence_class": "native_chronological_backtest",
+        "exact_comparability_coverage": 1.0,
+        "promotion_evidence_eligible": True,
+        "advisory_only": True,
         "advisory_rank_score": rank_score,
         "advisory_rank": None,
     }
+
+
+def _challenger_successful_row(
+    name: str,
+    description: str,
+    path: Path,
+    run: ForecastRun,
+    challenger_result: dict[str, Any] | None,
+) -> dict[str, Any]:
+    statuses = challenger_result.get("challengers", []) if isinstance(challenger_result, dict) else []
+    completed = [status for status in statuses if status.get("status") == "completed"]
+    if not completed:
+        first = statuses[0] if statuses else {}
+        status = str(first.get("status", "failed"))
+        reason = str(first.get("reason", "external challenger did not produce scored evidence"))
+        return _skipped_row(name, status, reason, description=description, run_path=path)
+
+    leaderboard_path = path / "appendix" / "challenger_leaderboard.csv"
+    if not leaderboard_path.exists():
+        return _skipped_row(
+            name,
+            "failed",
+            "challenger completed but appendix/challenger_leaderboard.csv was not produced",
+            description=description,
+            run_path=path,
+        )
+    leaderboard = pd.read_csv(leaderboard_path)
+    external = leaderboard[leaderboard.get("lane", pd.Series(index=leaderboard.index, dtype="object")).eq("challenger")].copy()
+    if external.empty:
+        return _skipped_row(
+            name,
+            "failed",
+            "challenger completed but no challenger metric rows were available",
+            description=description,
+            run_path=path,
+        )
+    external["rmse"] = pd.to_numeric(external.get("rmse"), errors="coerce")
+    expected_series = set(run.model_selection["unique_id"].astype(str))
+    external, selected_config = _select_challenger_configuration(
+        external,
+        expected_series=expected_series,
+    )
+    comparable = external.get("comparable", pd.Series(False, index=external.index)).map(_as_bool)
+    coverage = pd.to_numeric(external.get("cutoff_coverage"), errors="coerce")
+    exact = bool(
+        selected_config["full_series_coverage"]
+        and comparable.all()
+        and coverage.notna().all()
+        and coverage.eq(1.0).all()
+    )
+    selected_backtest_path = _write_selected_challenger_backtest(path, external, completed)
+    exact = exact and selected_backtest_path is not None
+    avg_rmse = _mean(external, "rmse")
+    avg_mae = _mean(external, "mae")
+    row = _successful_row(name, description, path, run)
+    row.update(
+        {
+            "selected_models": ", ".join(
+                f"{model}:{count}" for model, count in external["model"].astype(str).value_counts().sort_index().items()
+            ),
+            "avg_rmse": avg_rmse,
+            "avg_mae": avg_mae,
+            "avg_wape": _mean(external, "wape"),
+            "avg_mase": _mean(external, "mase"),
+            "avg_rmsse": _mean(external, "rmsse"),
+            "avg_bias": _mean(external, "bias"),
+            "evidence_class": "exact_external_cutoff_backtest" if exact else "directional_external_evidence",
+            "exact_comparability_coverage": float(coverage.mean()) if coverage.notna().any() else 0.0,
+            "promotion_evidence_eligible": exact,
+            "backtest_path": str(selected_backtest_path) if selected_backtest_path is not None else "",
+            "paired_backtest_status": "available" if selected_backtest_path is not None else "missing",
+            "selected_source_id": selected_config["source_id"],
+            "selected_scenario_name": selected_config["scenario_name"],
+            "selected_external_model": selected_config["model"],
+            "external_series_coverage": selected_config["series_coverage"],
+            "advisory_only": True,
+            "advisory_rank_score": _rank_score(avg_rmse, avg_mae, row.get("avg_trust_score_0_100")),
+        }
+    )
+    return row
+
+
+def _select_challenger_configuration(
+    external: pd.DataFrame,
+    *,
+    expected_series: set[str],
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    frame = external.copy()
+    config_columns = ["source_id", "scenario_name", "model"]
+    for column in config_columns:
+        if column not in frame.columns:
+            frame[column] = ""
+        frame[column] = frame[column].fillna("").astype(str)
+    frame["unique_id"] = frame["unique_id"].astype(str)
+    metric = next(
+        (
+            column
+            for column in ("rmsse", "mase", "rmse")
+            if column in frame.columns
+            and pd.to_numeric(frame[column], errors="coerce").notna().any()
+        ),
+        "rmse",
+    )
+
+    configurations: list[dict[str, Any]] = []
+    for keys, group in frame.groupby(config_columns, dropna=False, sort=True):
+        source_id, scenario_name, model = keys
+        observed_series = set(group["unique_id"])
+        series_coverage = (
+            len(observed_series.intersection(expected_series)) / len(expected_series)
+            if expected_series
+            else 0.0
+        )
+        comparable = group.get(
+            "comparable",
+            pd.Series(False, index=group.index),
+        ).map(_as_bool)
+        cutoff_coverage = pd.to_numeric(
+            group.get("cutoff_coverage"),
+            errors="coerce",
+        )
+        configurations.append(
+            {
+                "source_id": source_id,
+                "scenario_name": scenario_name,
+                "model": model,
+                "series_coverage": series_coverage,
+                "full_series_coverage": bool(observed_series == expected_series),
+                "exact": bool(
+                    observed_series == expected_series
+                    and comparable.all()
+                    and cutoff_coverage.notna().all()
+                    and cutoff_coverage.eq(1.0).all()
+                ),
+                "selection_metric": metric,
+                "selection_error": _mean(group, metric),
+            }
+        )
+    ranked = sorted(
+        configurations,
+        key=lambda row: (
+            not row["exact"],
+            -row["series_coverage"],
+            (
+                row["selection_error"]
+                if row["selection_error"] is not None
+                else float("inf")
+            ),
+            row["source_id"],
+            row["scenario_name"],
+            row["model"],
+        ),
+    )
+    selected = ranked[0]
+    mask = pd.Series(True, index=frame.index)
+    for column in config_columns:
+        mask &= frame[column].eq(selected[column])
+    return frame[mask].copy(), selected
+
+
+def _write_selected_challenger_backtest(
+    run_path: Path,
+    selected_metrics: pd.DataFrame,
+    completed_statuses: list[dict[str, Any]],
+) -> Path | None:
+    frames: list[pd.DataFrame] = []
+    for status in completed_statuses:
+        outputs = status.get("outputs", {})
+        artifact = outputs.get("external_backtest_long") if isinstance(outputs, dict) else None
+        if not artifact:
+            continue
+        artifact_path = Path(str(artifact))
+        if artifact_path.exists():
+            frames.append(pd.read_csv(artifact_path))
+    if not frames:
+        return None
+
+    backtest = pd.concat(frames, ignore_index=True, sort=False)
+    selector_columns = [
+        column
+        for column in ("unique_id", "model", "source_id", "scenario_name")
+        if column in selected_metrics.columns and column in backtest.columns
+    ]
+    if not {"unique_id", "model", "source_id"}.issubset(selector_columns):
+        return None
+    selectors = selected_metrics[selector_columns].copy()
+    for column in selector_columns:
+        selectors[column] = selectors[column].fillna("").astype(str)
+        backtest[column] = backtest[column].fillna("").astype(str)
+    selected = backtest.merge(
+        selectors.drop_duplicates(),
+        on=selector_columns,
+        how="inner",
+    )
+    if "scoring_status" in selected.columns:
+        selected = selected[selected["scoring_status"].eq("scored")]
+    if selected.empty:
+        return None
+
+    output = run_path / "external_selected_backtest_long.csv"
+    selected.to_csv(output, index=False)
+    return output
 
 
 def _skipped_row(
@@ -649,10 +1014,21 @@ def _skipped_row(
         "avg_mase": None,
         "avg_rmsse": None,
         "avg_bias": None,
+        "backtest_path": "",
         "avg_trust_score_0_100": None,
         "full_horizon_claim_allowed_series": None,
         "pareto_selected_fraction": None,
         "warning_count": None,
+        "resolved_candidate_fingerprint": "",
+        "resolved_candidate_set": "[]",
+        "control_resolved_candidate_fingerprint": "",
+        "candidate_set_changed": False,
+        "candidate_set_compatible": None,
+        "candidate_set_comparison_status": "not_assessed",
+        "evidence_class": "none",
+        "exact_comparability_coverage": None,
+        "promotion_evidence_eligible": False,
+        "advisory_only": True,
         "advisory_rank_score": None,
         "advisory_rank": None,
     }
@@ -667,6 +1043,14 @@ def _rank_score(avg_rmse: float | None, avg_mae: float | None, avg_trust: float 
     if avg_trust is not None:
         score -= float(avg_trust) * 0.000000001
     return score
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None or pd.isna(value):
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "y"}
 
 
 def _candidate_driver_markdown(candidates: Sequence[dict[str, Any]]) -> str:
@@ -1055,6 +1439,18 @@ def _variant_catalog() -> dict[str, ExperimentVariant]:
                 "no known-future regressors were declared; add --regressor or --regressor-file with future values/scenarios",
             ),
         ),
+        "log1p_transform": ExperimentVariant(
+            name="log1p_transform",
+            description="Log1p target transformation for non-negative, multiplicative-growth series.",
+            build_spec=lambda spec: replace(
+                spec,
+                transform=replace(spec.transform, target="log1p"),
+            ),
+            applicable=lambda context, spec: (
+                context.target_nonnegative and spec.transform.target == "none",
+                "log1p requires a non-negative target and an untransformed baseline",
+            ),
+        ),
         "rolling_features": ExperimentVariant(
             name="rolling_features",
             description="Curated MLForecast rolling target feature policy.",
@@ -1063,8 +1459,11 @@ def _variant_catalog() -> dict[str, ExperimentVariant]:
         ),
         "all_models": ExperimentVariant(
             name="all_models",
-            description="Broader explicit model policy; still uses the existing scaffold tournament and selection gates.",
-            build_spec=lambda spec: replace(spec, model_policy="all"),
+            description="Broader failure-isolated standard model policy; still uses the existing scaffold tournament and selection gates.",
+            build_spec=lambda spec: replace(
+                spec,
+                model_policy="all" if spec.model_policy == "all" else "standard",
+            ),
             applicable=always,
         ),
         "hierarchy_methods": ExperimentVariant(
@@ -1074,6 +1473,15 @@ def _variant_catalog() -> dict[str, ExperimentVariant]:
             applicable=lambda context, spec: (
                 context.has_hierarchy,
                 "no hierarchy metadata was found; build hierarchy nodes first or include hierarchy columns",
+            ),
+        ),
+        "finn": ExperimentVariant(
+            name="finn",
+            description="Execute enabled FINN/finnts challengers beside an unchanged native run and retain exact-comparability receipts.",
+            build_spec=lambda spec: spec,
+            applicable=lambda context, spec: (
+                context.has_challengers,
+                "no enabled external challenger was declared; add --finn or an enabled ChallengerSpec",
             ),
         ),
     }
@@ -1094,6 +1502,8 @@ def _resolve_variants(variants: Sequence[str] | None, context: ExperimentContext
         names.append("known_future_regressors")
     if context.has_hierarchy:
         names.append("hierarchy_methods")
+    if context.has_challengers:
+        names.append("finn")
     return list(dict.fromkeys(names))
 
 
@@ -1105,6 +1515,10 @@ def _experiment_context(data: str | Path | pd.DataFrame, spec: ForecastSpec, *, 
         has_events=bool(spec.events),
         has_regressors=bool(spec.regressors),
         has_hierarchy=has_hierarchy,
+        has_challengers=any(challenger.enabled for challenger in spec.challengers),
+        target_nonnegative=bool(
+            pd.to_numeric(frame["y"], errors="coerce").dropna().ge(0).all()
+        ),
         row_count=int(len(frame)),
         series_count=int(frame["unique_id"].nunique()) if "unique_id" in frame.columns else 0,
         source_hash_sha256=_source_hash(data, frame),
@@ -1164,11 +1578,51 @@ def _fmt(value: Any) -> str:
 def _assign_advisory_ranks(summary: pd.DataFrame) -> pd.DataFrame:
     if summary.empty or "advisory_rank_score" not in summary.columns:
         return summary
-    success_mask = summary["status"].eq("success")
+    eligible = summary.get("promotion_evidence_eligible", pd.Series(True, index=summary.index)).fillna(False).astype(bool)
+    success_mask = summary["status"].eq("success") & eligible
     sort_cols = [col for col in ["avg_rmse", "avg_mae", "advisory_rank_score"] if col in summary.columns]
     ranked = summary.loc[success_mask].sort_values(sort_cols, na_position="last")
     summary.loc[ranked.index, "advisory_rank"] = range(1, len(ranked) + 1)
     return summary
+
+
+def _apply_candidate_set_compatibility(summary: pd.DataFrame) -> pd.DataFrame:
+    out = summary.copy()
+    baseline = out[
+        out["variant"].eq("baseline")
+        & out["status"].eq("success")
+        & out["resolved_candidate_fingerprint"].fillna("").astype(str).ne("")
+    ]
+    if baseline.empty:
+        out["candidate_set_comparison_status"] = "no_matched_control"
+        return out
+
+    control_fingerprint = str(baseline.iloc[0]["resolved_candidate_fingerprint"])
+    out["control_resolved_candidate_fingerprint"] = control_fingerprint
+    for index, row in out.iterrows():
+        if row.get("status") != "success":
+            continue
+        fingerprint = str(row.get("resolved_candidate_fingerprint") or "")
+        changed = bool(fingerprint and fingerprint != control_fingerprint)
+        expected_change = str(row.get("variant")) == "all_models"
+        compatible = bool(fingerprint and (not changed or expected_change))
+        if str(row.get("variant")) == "baseline":
+            status = "matched_control"
+        elif not fingerprint:
+            status = "candidate_fingerprint_missing"
+        elif not changed:
+            status = "matched_control"
+        elif expected_change:
+            status = "candidate_set_change_is_treatment"
+        else:
+            status = "candidate_set_changed"
+        out.at[index, "candidate_set_changed"] = changed
+        out.at[index, "candidate_set_compatible"] = compatible
+        out.at[index, "candidate_set_comparison_status"] = status
+        if not compatible:
+            out.at[index, "promotion_evidence_eligible"] = False
+            out.at[index, "evidence_class"] = "candidate_set_incompatible"
+    return out
 
 
 def _frame_to_markdown(frame: pd.DataFrame) -> str:

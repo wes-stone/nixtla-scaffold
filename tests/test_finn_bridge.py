@@ -81,6 +81,7 @@ def test_canonicalize_finn_forecasts_marks_advisory_external_contract(tmp_path) 
     assert result.manifest["operation"] == "canonicalize"
     assert set(result.forecasts["source_system"]) == {"FINN"}
     assert result.forecasts["advisory_only"].eq(True).all()
+    assert (tmp_path / "out" / "future_forecasts.csv").exists()
     assert (tmp_path / "out" / "finn_forecasts.csv").exists()
     assert (tmp_path / "out" / "finn_manifest.json").exists()
 
@@ -133,6 +134,8 @@ def test_score_finn_forecasts_manifest_points_to_scoring_outputs(tmp_path) -> No
     assert result.manifest["outputs"]["external_scoring_manifest"] == "external_scoring_manifest.json"
     assert (output / "external_backtest_long.csv").exists()
     assert (output / "external_model_metrics.csv").exists()
+    assert (output / "cutoff_forecasts.csv").exists()
+    assert (output / "scoring_manifest.json").exists()
 
 
 def test_finn_compare_defaults_to_run_finn_and_registers_agent_artifacts(tmp_path) -> None:
@@ -143,6 +146,7 @@ def test_finn_compare_defaults_to_run_finn_and_registers_agent_artifacts(tmp_pat
     result = compare_finn_forecasts(run_dir, source)
 
     assert result.manifest["operation"] == "compare"
+    assert (run_dir / "finn" / "future_forecasts.csv").exists()
     assert (run_dir / "finn" / "finn_forecasts.csv").exists()
     assert (run_dir / "finn" / "forecast_comparison.csv").exists()
     run_manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
@@ -165,11 +169,32 @@ def test_finn_score_can_attach_to_run_finn_for_reporting(tmp_path) -> None:
     result = score_finn_forecasts(forecasts, actuals, run_dir=run_dir, requested_horizon=1)
 
     assert result.manifest["operation"] == "score"
+    assert (run_dir / "finn" / "cutoff_forecasts.csv").exists()
     assert (run_dir / "finn" / "external_backtest_long.csv").exists()
     assert (run_dir / "finn" / "external_model_metrics.csv").exists()
     run_manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     assert run_manifest["outputs"]["finn_external_model_metrics"] == "finn/external_model_metrics.csv"
     assert run_manifest["outputs"]["finn_external_scoring_manifest"] == "finn/external_scoring_manifest.json"
+
+
+def test_finn_compare_then_score_preserves_future_and_cutoff_artifacts(tmp_path) -> None:
+    run_dir = _run_dir(tmp_path)
+    future = tmp_path / "finn_future.csv"
+    backtest = tmp_path / "finn_backtest.csv"
+    actuals = tmp_path / "history.csv"
+    _finn_forecast_frame().to_csv(future, index=False)
+    _finn_backtest_frame().to_csv(backtest, index=False)
+    _history_frame().to_csv(actuals, index=False)
+
+    compare_finn_forecasts(run_dir, future)
+    future_before = (run_dir / "finn" / "future_forecasts.csv").read_bytes()
+    score_finn_forecasts(backtest, actuals, run_dir=run_dir, requested_horizon=1)
+
+    assert (run_dir / "finn" / "future_forecasts.csv").read_bytes() == future_before
+    assert (run_dir / "finn" / "cutoff_forecasts.csv").exists()
+    assert (run_dir / "finn" / "comparison_manifest.json").exists()
+    assert (run_dir / "finn" / "scoring_manifest.json").exists()
+    assert (run_dir / "finn" / "comparability_receipt.json").exists()
 
 
 def test_streamlit_app_includes_finn_advisory_section() -> None:
@@ -178,8 +203,8 @@ def test_streamlit_app_includes_finn_advisory_section() -> None:
     assert '"FINN advisory"' in app
     assert '"Pipeline map"' in app
     assert "FINN now sits beside native Nixtla" in app
-    assert "external challenger lane and shared cutoff/actual scoring spine" in app
+    assert "exact cutoff-contract matches are ranked and mismatches stay directional" in app
     assert "Historical actuals" in app
     assert "Scaffold vs FINN with recent actuals" in app
     assert 'read_scoped_csv("finn", "external_model_metrics.csv")' in app
-    assert "finn/finn_manifest.json / finn/external_model_metrics.csv" in app
+    assert "finn/challenger_run_manifest.json / finn/comparability_receipt.json" in app

@@ -10,6 +10,13 @@ from typing import Any, Sequence
 import numpy as np
 import pandas as pd
 
+from nixtla_scaffold.accuracy import (
+    build_accuracy_gate,
+    build_context_receipt,
+    build_research_budget_receipt,
+    format_accuracy_gate_markdown,
+    format_context_receipt_markdown,
+)
 from nixtla_scaffold.best_practices import best_practice_receipts_frame
 from nixtla_scaffold.diagnostics import build_llm_context, format_run_diagnostics_markdown
 from nixtla_scaffold.drivers import (
@@ -32,6 +39,7 @@ from nixtla_scaffold.model_families import model_family
 from nixtla_scaffold.ops import write_operational_receipts
 from nixtla_scaffold.reports import write_report_artifacts
 from nixtla_scaffold.schema import ForecastRun
+from nixtla_scaffold.signals import write_signal_artifacts
 
 
 APPENDIX_DIR = "appendix"
@@ -133,7 +141,9 @@ def write_run(run: ForecastRun, output_dir: str | Path) -> Path:
     run.history.to_csv(appendix / "history.csv", index=False)
     selected_forecast.to_csv(out / "forecast.csv", index=False)
     forecast_long.to_csv(appendix / "forecast_long.csv", index=False)
-    build_backtest_long(run).to_csv(appendix / "backtest_long.csv", index=False)
+    backtest_long = build_backtest_long(run)
+    backtest_long.to_csv(appendix / "backtest_long.csv", index=False)
+    build_cutoff_contract(run, backtest_long).to_csv(appendix / "cutoff_contract.csv", index=False)
     build_series_summary(run).to_csv(appendix / "series_summary.csv", index=False)
     build_series_features(run).to_csv(appendix / "series_features.csv", index=False)
     build_borrowed_strength_advisor(run).to_csv(appendix / "borrowed_strength_advisor.csv", index=False)
@@ -152,7 +162,22 @@ def write_run(run: ForecastRun, output_dir: str | Path) -> Path:
     build_residual_diagnostics(run).to_csv(appendix / "residual_diagnostics.csv", index=False)
     build_residual_test_summary(run).to_csv(appendix / "residual_tests.csv", index=False)
     build_interval_diagnostics(run).to_csv(appendix / "interval_diagnostics.csv", index=False)
-    build_trust_summary(run).to_csv(appendix / "trust_summary.csv", index=False)
+    trust_summary = build_trust_summary(run)
+    trust_summary.to_csv(appendix / "trust_summary.csv", index=False)
+    if run.spec.context is not None:
+        context_receipt = build_context_receipt(run)
+        accuracy_gate = build_accuracy_gate(run, trust_summary)
+        (appendix / "context_receipt.json").write_text(_json(context_receipt), encoding="utf-8")
+        (appendix / "context_receipt.md").write_text(format_context_receipt_markdown(context_receipt), encoding="utf-8")
+        (appendix / "research_budget.json").write_text(_json(build_research_budget_receipt(run)), encoding="utf-8")
+        (appendix / "accuracy_gate.json").write_text(_json(accuracy_gate), encoding="utf-8")
+        (appendix / "accuracy_gate.md").write_text(format_accuracy_gate_markdown(accuracy_gate), encoding="utf-8")
+        if (
+            run.spec.context.signal_needs
+            or run.spec.context.signal_probes
+            or run.spec.context.signal_contracts
+        ):
+            write_signal_artifacts(run.spec.context, appendix)
     run.model_explainability.to_csv(appendix / "model_explainability.csv", index=False)
     run.all_models.to_csv(audit / "all_models.csv", index=False)
     run.model_selection.to_csv(audit / "model_selection.csv", index=False)
@@ -262,7 +287,7 @@ def build_control_pane_state(
         {
             "mechanism": "FINN advisory bridge",
             "status": "not present",
-            "artifact": "finn/finn_manifest.json / finn/external_model_metrics.csv",
+            "artifact": "finn/challenger_run_manifest.json / finn/comparability_receipt.json",
         },
         {
             "mechanism": "Hierarchy coherence",
@@ -583,8 +608,8 @@ def write_review_outputs_from_directory(run_dir: str | Path) -> dict[str, Path]:
     appendix_dir.mkdir(parents=True, exist_ok=True)
 
     selected = _read_review_frame(out / "forecast.csv")
-    trust_summary = _read_review_frame(out / "trust_summary.csv")
-    model_audit = _read_review_frame(out / "model_audit.csv")
+    trust_summary = _read_review_frame(out / APPENDIX_DIR / "trust_summary.csv")
+    model_audit = _read_review_frame(out / APPENDIX_DIR / "model_audit.csv")
     borrowed_strength = _read_review_frame(out / APPENDIX_DIR / "borrowed_strength_advisor.csv")
     manifest = _read_review_json(out / "manifest.json")
     diagnostics = _read_review_json(out / "diagnostics.json")
@@ -1577,6 +1602,59 @@ def build_backtest_long(run: ForecastRun) -> pd.DataFrame:
                     out
                 )
     return _order_model_feed_columns(_sort_for_feeder(pd.DataFrame(rows), ["unique_id", "cutoff", "ds", "is_selected_model", "weight"]))
+
+
+def build_cutoff_contract(run: ForecastRun, backtest_long: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Exact rolling-origin rows required for promotion-grade external comparisons."""
+
+    columns = [
+        "unique_id",
+        "window_id",
+        "cutoff",
+        "ds",
+        "horizon_step",
+        "y_actual",
+        "requested_horizon",
+        "selection_horizon",
+    ]
+    frame = build_backtest_long(run) if backtest_long is None else backtest_long.copy()
+    required = ["unique_id", "cutoff", "ds", "horizon_step", "y_actual"]
+    if frame.empty or not set(required).issubset(frame.columns):
+        return pd.DataFrame(columns=columns)
+
+    contract = frame[required].copy()
+    contract["unique_id"] = contract["unique_id"].astype(str)
+    contract["cutoff"] = pd.to_datetime(contract["cutoff"])
+    contract["ds"] = pd.to_datetime(contract["ds"])
+    contract["horizon_step"] = pd.to_numeric(contract["horizon_step"], errors="coerce").astype("Int64")
+    contract["y_actual"] = pd.to_numeric(contract["y_actual"], errors="coerce")
+    key_columns = ["unique_id", "cutoff", "ds", "horizon_step"]
+    contract = contract.sort_values(key_columns).drop_duplicates(key_columns, keep="first")
+
+    cutoff_order = (
+        contract[["unique_id", "cutoff"]]
+        .drop_duplicates()
+        .sort_values(["unique_id", "cutoff"])
+    )
+    cutoff_order["window_id"] = cutoff_order.groupby("unique_id").cumcount() + 1
+    contract = contract.merge(cutoff_order, on=["unique_id", "cutoff"], how="left", validate="many_to_one")
+
+    horizon_columns = ["unique_id", "requested_horizon", "selection_horizon"]
+    if not run.model_selection.empty and "unique_id" in run.model_selection.columns:
+        available = [column for column in horizon_columns if column in run.model_selection.columns]
+        horizons = run.model_selection[available].copy()
+        for column in set(horizon_columns) - set(available):
+            horizons[column] = pd.NA
+        horizons["unique_id"] = horizons["unique_id"].astype(str)
+        horizons = horizons[horizon_columns].drop_duplicates("unique_id", keep="first")
+        contract = contract.merge(horizons, on="unique_id", how="left", validate="many_to_one")
+    else:
+        contract["requested_horizon"] = run.spec.horizon
+        contract["selection_horizon"] = pd.NA
+
+    contract["requested_horizon"] = contract["requested_horizon"].fillna(run.spec.horizon).astype("Int64")
+    contract["selection_horizon"] = pd.to_numeric(contract["selection_horizon"], errors="coerce").astype("Int64")
+    return contract[columns].sort_values(["unique_id", "window_id", "horizon_step", "ds"]).reset_index(drop=True)
 
 
 def build_series_summary(run: ForecastRun) -> pd.DataFrame:

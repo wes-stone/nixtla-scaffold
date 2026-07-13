@@ -4,7 +4,7 @@ import json
 
 import pandas as pd
 
-from nixtla_scaffold import ForecastSpec, run_forecast
+from nixtla_scaffold import ContextSource, ForecastContext, ForecastSpec, run_forecast
 from nixtla_scaffold.ops import (
     CommandResult,
     build_doctor_payload,
@@ -57,6 +57,27 @@ def test_status_and_doctor_summarize_local_runs(tmp_path) -> None:
     checks = {row["check_id"]: row["status"] for row in doctor["checks"]}
     assert checks["manifest_exists"] == "pass"
     assert checks["run_receipt_exists"] == "pass"
+
+
+def test_doctor_surfaces_authoritative_accuracy_gate(tmp_path) -> None:
+    context = ForecastContext(
+        source_discovery_enabled=False,
+        sources=(ContextSource(source_id="target", kind="csv", status="opted_out"),),
+    )
+    output_dir = run_forecast(
+        _demo_frame(),
+        ForecastSpec(horizon=2, model_policy="baseline", context=context),
+    ).to_directory(tmp_path / "accuracy_run")
+    expected_gate = json.loads(
+        (output_dir / "appendix" / "accuracy_gate.json").read_text(encoding="utf-8")
+    )
+
+    doctor = build_doctor_payload(output_dir)
+
+    assert doctor["accuracy_gate"]["available"] is True
+    assert doctor["accuracy_gate"]["status"] == expected_gate["status"]
+    assert doctor["checks"][1]["check_id"] == "accuracy_gate_review"
+    assert doctor["overall_status"] in {"pass", "warn"}
 
 
 def test_drift_rollup_reads_refresh_delta(tmp_path) -> None:

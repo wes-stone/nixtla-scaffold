@@ -455,10 +455,12 @@ def build_html_report(payload: dict[str, Any]) -> str:
           {_output_item("byo_model/byo_model_comparison_summary.csv", "BYO comparison rollup by scenario, source/sheet, hierarchy level, and product grouping columns.")}
           {_output_item("byo_model/byo_model_score_summary.csv", "Optional cutoff-labeled BYO actual-vs-forecast score rollup when historical snapshots are supplied.")}
           {_output_item("byo_model/byo_model_automation.md", "Recommended automation loop for finance-owned BYO models, including cutoff snapshots, known-as-of lineage, and customer/SKU/PxQ detail ownership.")}
-          {_output_item("finn/finn_forecasts.csv", "Canonical FINN/finnts advisory forecasts imported through the optional R bridge; never changes forecast.csv by itself.")}
+          {_output_item("finn/future_forecasts.csv", "Role-specific future FINN/finnts advisory forecasts; never changes forecast.csv by itself.")}
+          {_output_item("finn/cutoff_forecasts.csv", "Role-specific historical FINN forecasts labeled by cutoff for external scoring.")}
           {_output_item("finn/forecast_comparison.csv", "Directional scaffold-vs-FINN alignment; deltas only unless paired with cutoff scoring.")}
-          {_output_item("finn/external_model_metrics.csv", "Cutoff-labeled FINN score rollup using the scaffold metric contract: same actuals, cutoffs, horizons, and metrics.")}
-          {_output_item("finn/finn_manifest.json", "FINN bridge reproducibility receipt with source, R runner/check context, advisory status, and output map.")}
+          {_output_item("finn/external_model_metrics.csv", "FINN score rollup; check comparable and cutoff_coverage before any cross-lane claim.")}
+          {_output_item("finn/comparability_receipt.json", "Exact row-level cutoff contract coverage, mismatches, and promotion-comparability verdict.")}
+          {_output_item("finn/challenger_run_manifest.json", "FINN challenger reproducibility receipt with environment, parameters, duration, status, and artifact hashes.")}
           {_output_item("appendix/known_future_regressors.csv", "Declared known-future regressor contracts for leakage and future-availability audit.")}
           {_output_item("appendix/driver_availability_audit.csv", "Known-future regressor audit status, leakage risk, required future rows, and modeling decision.")}
           {_output_item("appendix/driver_model_features.csv", "Opt-in MLForecast driver feature gate showing which audited regressors were included or excluded.")}
@@ -1182,7 +1184,7 @@ def build_streamlit_app() -> str:
             rows.append(
                 {
                     "lane": "FINN / finnts challenger",
-                    "integration_role": "external model lane scored on shared cutoff/actual spine",
+                    "integration_role": "external model lane gated by an exact cutoff contract",
                     "status": finn_status,
                     "model_count": count_unique(finn_model_metrics if not finn_model_metrics.empty else finn_forecasts, "model"),
                     "rows": len(finn_model_metrics) if not finn_model_metrics.empty else len(finn_forecasts),
@@ -1352,7 +1354,7 @@ def build_streamlit_app() -> str:
                 '<div class="pipeline-map-header">'
                 '<div>'
                 '<div class="pipeline-map-title">Integrated forecast pipeline map</div>'
-                '<div class="pipeline-map-subtitle">Green means an artifact-backed lane is active. Amber means advisory or partial evidence. Muted means not enabled for this run. FINN is integrated through the external challenger lane and shared cutoff/actual scoring spine, not by silently mutating forecast.csv.</div>'
+                '<div class="pipeline-map-subtitle">Green means an artifact-backed lane is active. Amber means advisory or partial evidence. Muted means not enabled for this run. FINN uses an external challenger lane where exact cutoff-contract matches are ranked and mismatches stay directional; it never silently mutates forecast.csv.</div>'
                 '</div>'
                 '<div class="pipeline-legend">'
                 '<span class="control-status-pill status-ok">active</span>'
@@ -5395,13 +5397,20 @@ def build_streamlit_app() -> str:
         byo_external_backtest = prep_dates(read_csv("external_backtest_long.csv"))
         byo_model_scores = read_csv("byo_model_score_summary.csv")
         byo_model_manifest = read_json("byo_model_manifest.json")
-        finn_forecasts = prep_dates(read_scoped_csv("finn", "finn_forecasts.csv"))
+        finn_forecasts = prep_dates(read_scoped_csv("finn", "future_forecasts.csv"))
+        if finn_forecasts.empty:
+            finn_forecasts = prep_dates(read_scoped_csv("finn", "finn_forecasts.csv"))
         finn_forecast_comparison = prep_dates(read_scoped_csv("finn", "forecast_comparison.csv"))
         finn_comparison_summary = read_scoped_csv("finn", "forecast_comparison_summary.csv")
         finn_external_backtest = prep_dates(read_scoped_csv("finn", "external_backtest_long.csv"))
         finn_model_metrics = read_scoped_csv("finn", "external_model_metrics.csv")
-        finn_manifest = read_scoped_json("finn", "finn_manifest.json")
-        finn_scoring_manifest = read_scoped_json("finn", "external_scoring_manifest.json")
+        finn_manifest = read_scoped_json("finn", "challenger_run_manifest.json")
+        if not finn_manifest:
+            finn_manifest = read_scoped_json("finn", "finn_manifest.json")
+        finn_scoring_manifest = read_scoped_json("finn", "scoring_manifest.json")
+        if not finn_scoring_manifest:
+            finn_scoring_manifest = read_scoped_json("finn", "external_scoring_manifest.json")
+        finn_comparability_receipt = read_scoped_json("finn", "comparability_receipt.json")
         finn_challenger_status = read_scoped_json("finn", "challenger_status.json")
         finn_agent_brief = read_scoped_json("finn", "agent_brief.json")
         challenger_leaderboard = read_csv("challenger_leaderboard.csv")
@@ -5696,7 +5705,7 @@ def build_streamlit_app() -> str:
                     {
                         "mechanism": "FINN advisory bridge",
                         "status": "available" if any(not frame.empty for frame in [finn_forecasts, finn_forecast_comparison, finn_comparison_summary, finn_external_backtest, finn_model_metrics]) else "not present",
-                        "agent-readable artifact": "finn/finn_manifest.json / finn/external_model_metrics.csv",
+                        "agent-readable artifact": "finn/challenger_run_manifest.json / finn/comparability_receipt.json",
                     },
                     {
                         "mechanism": "Hierarchy coherence",
@@ -7136,6 +7145,11 @@ def build_streamlit_app() -> str:
                         "source_id",
                         "observations",
                         "cutoff_count",
+                        "comparability_status",
+                        "comparable",
+                        "cutoff_coverage",
+                        "matched_cutoff_rows",
+                        "expected_cutoff_rows",
                         "min_horizon_step",
                         "max_horizon_step",
                         "rmse",
@@ -7146,6 +7160,8 @@ def build_streamlit_app() -> str:
                         "end",
                     ]
                     render_dataframe(score_view[[column for column in score_cols if column in score_view.columns]].head(500), width="stretch", hide_index=True)
+                    if "comparable" in score_view.columns and not score_view["comparable"].astype("string").str.strip().str.lower().isin(["1", "true", "t", "yes", "y"]).any():
+                        st.warning("These FINN scores are directional: no model matched the full native cutoff contract.")
                 elif not finn_external_backtest.empty:
                     st.info("FINN row-level cutoff scoring exists, but no grouped model metrics were found. Open `finn/external_backtest_long.csv` for diagnostics.")
                 else:
@@ -7154,13 +7170,16 @@ def build_streamlit_app() -> str:
                 with st.expander("FINN manifests and agent handoff", expanded=False):
                     st.caption(
                         "Agents should read these receipts first, then quote the scaffold headline separately. "
-                        "FINN score evidence is only apples-to-apples when cutoff-labeled rows join to the same actuals and metric contract."
+                        "FINN score evidence is cross-lane comparable only when comparability_receipt.json confirms exact series, cutoff, date, horizon-step, and actual coverage."
                     )
                     if finn_manifest:
                         st.json(finn_manifest)
                     if scoring_manifest:
-                        st.markdown("##### External scoring manifest")
+                        st.markdown("##### FINN scoring manifest")
                         st.json(scoring_manifest)
+                    if finn_comparability_receipt:
+                        st.markdown("##### Exact cutoff comparability")
+                        st.json(finn_comparability_receipt)
 
         if active_section == "BYO / Finance model":
             st.subheader("BYO / Finance model")
@@ -7359,7 +7378,7 @@ def build_streamlit_app() -> str:
                 - `appendix/trust_summary.csv`: High/Medium/Low per-series readiness with caveats and next actions.
                 - `scenario_assumptions.csv`, `scenario_forecast.csv`: event/scenario overlay assumptions and baseline-versus-scenario forecast rows.
                 - `known_future_regressors.csv`, `driver_availability_audit.csv`, `driver_model_features.csv`, `driver_model_cv_delta.csv`, `driver_experiment_summary.csv`: declared known-future driver contracts, leakage/future-availability audit, opt-in MLForecast feature gate, CV evidence, and next-step summary.
-                - `finn/finn_manifest.json`, `finn/finn_forecasts.csv`, `finn/forecast_comparison.csv`, `finn/external_model_metrics.csv`: optional FINN/finnts advisory bridge outputs. FINN is review/scoring evidence only unless a human explicitly promotes or locks a version.
+                - `finn/challenger_run_manifest.json`, `finn/future_forecasts.csv`, `finn/cutoff_forecasts.csv`, `finn/comparability_receipt.json`, `finn/external_model_metrics.csv`: optional FINN/finnts advisory bridge outputs. Only exact contract matches receive cross-lane ranks, and FINN remains advisory until a human explicitly promotes or locks a version.
                 - `audit/target_transform_audit.csv`: raw, adjusted, transformed, and modeled target trail for finance normalization/log transforms.
                 - `audit/seasonality_diagnostics.csv`, `audit/seasonality_decomposition.csv`: cycle counts, credibility labels, and additive decomposition evidence.
                 - `appendix/model_explainability.csv`: MLForecast/sklearn/LightGBM lag and date feature importance or coefficient magnitude when ML models run.

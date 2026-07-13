@@ -4,7 +4,22 @@ import json
 
 import pandas as pd
 
-from nixtla_scaffold import ChallengerSpec, CleaningSpec, EnsembleSpec, FeatureRecipeSpec, ForecastSpec, ParallelSpec, forecast_spec_preset, preset_catalog
+from nixtla_scaffold import (
+    AccuracyPolicy,
+    CandidateDriver,
+    ChallengerSpec,
+    CleaningSpec,
+    ContextSource,
+    EnsembleSpec,
+    FeatureRecipeSpec,
+    ForecastContext,
+    ForecastSpec,
+    ParallelSpec,
+    PromotionPolicy,
+    ResearchBudget,
+    forecast_spec_preset,
+    preset_catalog,
+)
 from nixtla_scaffold.cli import main
 from nixtla_scaffold.schema import forecast_spec_from_dict
 
@@ -23,6 +38,7 @@ def test_forecast_spec_presets_are_named_and_overridable() -> None:
     quick = forecast_spec_preset("quick", horizon=3, freq="ME")
     strict = forecast_spec_preset("strict")
     hierarchy = forecast_spec_preset("hierarchy", model_policy="baseline")
+    accuracy_first = forecast_spec_preset("accuracy-first")
 
     assert isinstance(quick, ForecastSpec)
     assert quick.horizon == 3
@@ -32,10 +48,17 @@ def test_forecast_spec_presets_are_named_and_overridable() -> None:
     assert strict.strict_cv_horizon is True
     assert hierarchy.hierarchy_reconciliation == "bottom_up"
     assert hierarchy.model_policy == "baseline"
+    assert accuracy_first.model_policy == "standard"
+    assert accuracy_first.strict_cv_horizon is True
+    assert accuracy_first.require_backtest is False
+    assert accuracy_first.context is not None
+    assert ForecastSpec().context is None
     catalog = {row["name"]: row for row in preset_catalog()}
     assert catalog["standard"]["model_policy"] == "standard"
     assert catalog["standard"]["aliases"] == ["finance"]
     assert catalog["quick"]["verbose"] is False
+    assert catalog["quick"]["accuracy_first"] is False
+    assert catalog["accuracy-first"]["accuracy_first"] is True
 
 
 def test_legacy_finance_and_auto_aliases_canonicalize_to_standard_light() -> None:
@@ -71,6 +94,57 @@ def test_nested_finn_inspired_specs_round_trip() -> None:
     assert restored.cleaning == spec.cleaning
     assert restored.ensemble == spec.ensemble
     assert restored.parallel == spec.parallel
+
+
+def test_accuracy_context_round_trips_and_custom_budget_requires_a_bound() -> None:
+    context = ForecastContext(
+        decision="Set capacity plan",
+        audience="Finance",
+        target_semantics="Monthly hosted compute cost",
+        units="USD",
+        grain="monthly by product",
+        requested_horizon=4,
+        refresh_cadence="monthly",
+        source_discovery_enabled=True,
+        sources=(
+            ContextSource(
+                source_id="usage",
+                kind="kusto",
+                status="available",
+                query_ref="queries/usage.kql",
+                query_count=2,
+                row_count=48,
+            ),
+        ),
+        candidate_drivers=(
+            CandidateDriver(
+                name="Hosted minutes",
+                source_id="usage",
+                status="eligible_for_experiment",
+                future_availability="planned",
+                leakage_verdict="pass",
+                business_rationale="Compute minutes drive cost.",
+            ),
+        ),
+        research_budget=ResearchBudget(profile="custom", max_iterations=3, max_source_queries=6),
+        accuracy_policy=AccuracyPolicy(minimum_trust_score=75),
+        promotion_policy=PromotionPolicy(minimum_primary_metric_improvement=0.03),
+    )
+    spec = ForecastSpec(horizon=4, context=context)
+
+    restored = forecast_spec_from_dict(spec.to_dict())
+
+    assert restored.context == context
+    assert restored.context is not None
+    assert restored.context.sources[0].query_count == 2
+    assert restored.context.candidate_drivers[0].status == "eligible_for_experiment"
+
+    try:
+        ResearchBudget(profile="custom")
+    except ValueError as error:
+        assert "hard bound" in str(error)
+    else:
+        raise AssertionError("expected an unbounded custom research budget to fail")
 
 
 def test_challenger_spec_round_trips_and_validates() -> None:
@@ -139,6 +213,64 @@ def test_forecast_cli_preset_applies_defaults_and_allows_overrides(tmp_path) -> 
     assert diagnostics["spec"]["horizon"] == 2
     assert diagnostics["spec"]["model_policy"] == "baseline"
     assert diagnostics["spec"]["verbose"] is False
+    assert "context" not in diagnostics["spec"]
+    assert not (output_dir / "appendix" / "accuracy_gate.json").exists()
+
+
+def test_accuracy_first_short_history_writes_directional_claim_receipts(tmp_path, capsys) -> None:
+    input_path = tmp_path / "short.csv"
+    output_dir = tmp_path / "accuracy_first"
+    context_path = tmp_path / "forecast_context.json"
+    _small_monthly_frame().head(6).to_csv(input_path, index=False)
+    context = ForecastContext(
+        decision="Set the next-quarter plan",
+        audience="Finance",
+        target_semantics="Monthly revenue",
+        units="USD",
+        grain="monthly",
+        requested_horizon=3,
+        refresh_cadence="monthly",
+        source_discovery_enabled=False,
+        sources=(ContextSource(source_id="target_csv", kind="csv", status="opted_out"),),
+        research_budget=ResearchBudget(profile="time-boxed"),
+    )
+    context_path.write_text(json.dumps(context.to_dict(), indent=2), encoding="utf-8")
+
+    exit_code = main(
+        [
+            "forecast",
+            "--input",
+            str(input_path),
+            "--preset",
+            "accuracy-first",
+            "--context-file",
+            str(context_path),
+            "--model-policy",
+            "baseline",
+            "--horizon",
+            "3",
+            "--freq",
+            "ME",
+            "--output",
+            str(output_dir),
+        ]
+    )
+
+    assert exit_code == 0
+    appendix = output_dir / "appendix"
+    gate = json.loads((appendix / "accuracy_gate.json").read_text(encoding="utf-8"))
+    receipt = json.loads((appendix / "context_receipt.json").read_text(encoding="utf-8"))
+    budget = json.loads((appendix / "research_budget.json").read_text(encoding="utf-8"))
+    manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert gate["status"] == "directional_only"
+    assert gate["forecast_produced"] is True
+    assert gate["planning_ready_claim_allowed"] is False
+    assert receipt["context_complete"] is True
+    assert receipt["source_discovery"]["status"] == "opted_out"
+    assert budget["profile"] == "time-boxed"
+    assert budget["remaining"]["iterations"] == 2
+    assert manifest["outputs"]["accuracy_gate"] == "appendix/accuracy_gate.json"
+    assert "Accuracy claim status: directional_only" in capsys.readouterr().out
 
 
 def test_forecast_cli_preset_can_be_overridden_explicitly(tmp_path) -> None:
@@ -225,6 +357,6 @@ def test_guide_presets_prints_catalog(capsys) -> None:
 
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
-    assert {row["name"] for row in payload} == {"quick", "standard", "strict", "hierarchy"}
+    assert {row["name"] for row in payload} == {"quick", "accuracy-first", "standard", "strict", "hierarchy"}
     standard = next(row for row in payload if row["name"] == "standard")
     assert standard["aliases"] == ["finance"]

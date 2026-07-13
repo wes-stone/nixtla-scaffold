@@ -22,6 +22,51 @@ OPTIONAL_COLUMNS = {
     "anomaly_label": "Boolean marker for one-time shocks or outliers.",
 }
 
+SIGNAL_CAPABILITY_ROUTES = (
+    {
+        "route_id": "target-history",
+        "signal_families": ("target_integrity", "structural_break"),
+        "source_families": ("target_extract", "operational_history", "finance_actuals"),
+        "capabilities": ("schema_discovery", "bounded_profile", "time_series_aggregate"),
+        "probe_sequence": ("schema", "count", "sample", "aggregate"),
+    },
+    {
+        "route_id": "calendar-exposure",
+        "signal_families": ("calendar_exposure", "seasonality"),
+        "source_families": ("calendar_reference", "operating_calendar"),
+        "capabilities": ("calendar_lookup", "bounded_time_alignment"),
+        "probe_sequence": ("schema", "sample", "aggregate"),
+    },
+    {
+        "route_id": "plan-and-benchmark",
+        "signal_families": ("plan_benchmark", "financial_driver"),
+        "source_families": ("semantic_model", "planning_workbook", "finance_table"),
+        "capabilities": ("measure_discovery", "bounded_period_aggregate", "plan_actual_alignment"),
+        "probe_sequence": ("schema", "count", "sample", "aggregate"),
+    },
+    {
+        "route_id": "operational-driver",
+        "signal_families": ("operational_driver", "demand_driver", "capacity_driver"),
+        "source_families": ("telemetry_store", "operational_table", "product_metrics"),
+        "capabilities": ("schema_discovery", "bounded_time_series_aggregate", "entity_time_alignment"),
+        "probe_sequence": ("schema", "count", "sample", "aggregate"),
+    },
+    {
+        "route_id": "commercial-commitment",
+        "signal_families": ("pipeline_driver", "renewal_driver", "contract_driver"),
+        "source_families": ("commercial_system", "contract_store", "renewal_schedule"),
+        "capabilities": ("entity_discovery", "bounded_stage_aggregate", "known_date_extract"),
+        "probe_sequence": ("schema", "count", "sample", "aggregate"),
+    },
+    {
+        "route_id": "known-change",
+        "signal_families": ("known_change", "event_scenario", "pricing_driver"),
+        "source_families": ("launch_calendar", "pricing_schedule", "capacity_plan", "headcount_plan"),
+        "capabilities": ("known_date_lookup", "bounded_scenario_extract", "owner_validation"),
+        "probe_sequence": ("schema", "sample", "aggregate"),
+    },
+)
+
 MCP_RECIPES = [
     {
         "name": "Excel workbook to forecast",
@@ -61,5 +106,25 @@ def describe_contract() -> dict[str, object]:
         "required_columns": CANONICAL_COLUMNS,
         "optional_columns": OPTIONAL_COLUMNS,
         "recipes": MCP_RECIPES,
+        "signal_capability_routes": list(SIGNAL_CAPABILITY_ROUTES),
     }
 
+
+def signal_routes_for_family(signal_family: str) -> tuple[dict[str, object], ...]:
+    """Return generic capability routes without choosing a concrete MCP or tool."""
+
+    family = str(signal_family).strip().lower()
+    return tuple(
+        route
+        for route in SIGNAL_CAPABILITY_ROUTES
+        if family in route["signal_families"]
+    )
+
+
+def signal_capabilities_for_family(signal_family: str) -> tuple[str, ...]:
+    capabilities = {
+        str(capability)
+        for route in signal_routes_for_family(signal_family)
+        for capability in route["capabilities"]
+    }
+    return tuple(sorted(capabilities))

@@ -1865,6 +1865,7 @@ def test_forecast_outputs_include_llm_diagnostics_and_model_weights(tmp_path) ->
     assert (output_dir / "audit" / "backtest_windows.csv").exists()
     assert (appendix / "forecast_long.csv").exists()
     assert (appendix / "backtest_long.csv").exists()
+    assert (appendix / "cutoff_contract.csv").exists()
     assert (appendix / "series_summary.csv").exists()
     assert (appendix / "model_audit.csv").exists()
     assert (appendix / "model_win_rates.csv").exists()
@@ -2513,6 +2514,10 @@ def test_report_regeneration_handles_missing_executive_headline_for_old_runs(tmp
     )
     run = run_forecast(df, ForecastSpec(horizon=2, model_policy="baseline"))
     output_dir = run.to_directory(tmp_path / "old_run")
+    expected_decision_summary = pd.read_csv(output_dir / "output" / "decision_summary.csv")
+    expected_model_leaderboard = pd.read_csv(
+        output_dir / "output" / "appendix" / "model_leaderboard.csv"
+    )
     for path in [
         output_dir / "OPEN_ME_FIRST.html",
         output_dir / "output" / "index.html",
@@ -2553,6 +2558,16 @@ def test_report_regeneration_handles_missing_executive_headline_for_old_runs(tmp
     assert refreshed_manifest["outputs"]["streamlit_launcher_ps1"] == "run_streamlit.ps1"
     assert refreshed_manifest["outputs"]["output_workbook"] == "output/forecast_review.xlsx"
     assert not any(key.startswith("human_") for key in refreshed_manifest["outputs"])
+    pd.testing.assert_frame_equal(
+        pd.read_csv(output_dir / "output" / "decision_summary.csv"),
+        expected_decision_summary,
+        check_dtype=False,
+    )
+    pd.testing.assert_frame_equal(
+        pd.read_csv(output_dir / "output" / "appendix" / "model_leaderboard.csv"),
+        expected_model_leaderboard,
+        check_dtype=False,
+    )
 
 
 def test_seasonality_diagnostics_warn_when_cycles_are_insufficient() -> None:

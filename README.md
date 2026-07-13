@@ -16,7 +16,7 @@ Simple, explainable Nixtla forecasting scaffolding for finance users and AI agen
 | **Model tournament** | Runs simple baselines plus StatsForecast candidates by default, with optional MLForecast, smooth ADAM, hierarchy, custom challengers, BYO finance models, and advisory ensemble labs. |
 | **Trust-first outputs** | Shows model evidence, interval status, horizon validation, caveats, and next actions instead of pretending every forecast is planning-ready. |
 | **Finance-friendly review** | Writes a clean HTML landing page, Excel workbook, selected forecast CSV, model card, diagnostics, and Streamlit app. |
-| **Exploration and experiments** | Use MCP/query sources to find candidate drivers, then test events, known-future regressors, target transforms, scenarios, and normalization factors. |
+| **Accuracy research** | Use bounded source discovery to generate falsifiable hypotheses, reviewer-gate each experiment, and confirm only the best candidate on untouched later data. |
 | **Hierarchy and reconciliation** | Forecast parent/child rollups, reconcile coherent totals, and surface gaps before planning use. |
 | **Forecast operating loop** | Track versions, landed actuals, drift, and forecast trends over time in the ledger view. |
 | **Optional FINN bridge** | Canonicalize, compare, and score FINN/finnts R outputs as advisory external forecasts without making R a default dependency. |
@@ -95,7 +95,8 @@ nixtla-scaffold forecast --input plan.xlsx --sheet Data --id-col Product --time-
 
 | Preset | Use when |
 | --- | --- |
-| `quick` | You need a fast first read or smoke run. |
+| `quick` | You need a fast exploratory read or smoke run; it is non-promotable. |
+| `accuracy-first` | You want bounded context discovery, serious native candidates, full-horizon validation when feasible, explicit planning-readiness gates, and chronological promotion evidence. |
 | `standard` | You need the normal serious finance forecast. |
 | `strict` | The forecast feeds a high-stakes decision and should require stronger validation. |
 | `hierarchy` | Parent and child planning totals need to tie. |
@@ -110,9 +111,61 @@ nixtla-scaffold forecast --input plan.xlsx --sheet Data --id-col Product --time-
 | `report.html` | Static review report with evidence and caveats. |
 | `streamlit_app.py` | Interactive local dashboard. |
 | `llm_context.json` | Single-file handoff packet for an LLM or agent. |
+| `appendix\context_receipt.json` | Accuracy-first intake, source-discovery provenance, and candidate-driver dispositions. |
+| `appendix\research_budget.json` | Selected hard research bounds plus known consumption and remaining budget. |
+| `appendix\accuracy_gate.json` | Authoritative `planning_ready`, `directional_only`, or `blocked` claim decision with remediation. |
+| `appendix\signal_needs.json` | Diagnosis-led information needs and whether source discovery is complete. |
+| `appendix\signal_probe_ledger.jsonl` | Append-only bounded source probes with capability, query count, provenance, and result. |
+| `appendix\signal_contracts.json` | Validated context/scenario/regressor/reject dispositions with grain, vintage, leakage, and future-value contracts. |
 | `appendix\hierarchy_rollup.csv` | Parent/child rollup coverage and reconciliation gaps when hierarchy is enabled. |
 | `appendix\ensemble_policy_receipts.csv` | Advisory ensemble policy receipts; extra ensemble artifacts are written when `--ensemble-policy` is requested. |
+| `research_plan.json` | Optimizer budget, tuning/confirmation policy, hypothesis queue, and baseline contract. |
+| `iteration_ledger.csv` | One row per attempted hypothesis with cost, evidence, reviewer status, and disposition. |
+| `promotion_decision.json` | Advisory decision from exact tuning evidence and untouched confirmation; never mutates the official forecast. |
+| `stop_receipt.json` | Why research stopped, budget consumed/remaining, best candidate, and unresolved evidence gaps. |
+| `signal_experiment_dispositions.json` | Whether each admitted signal was queued, tested, blocked, or not applicable, with an explicit reason. |
 | `.github\agents\finn-forecast-analyst.agent.md` | Repo-level Copilot custom-agent profile for FINN/scaffold review workflows. |
+
+For an accuracy-first run, start with `setup`, complete the generated
+`forecast_context.json` using bounded read-only source discovery, then run the
+generated command. If context or validation evidence is incomplete, the package
+still produces a directional baseline when technically possible but prevents a
+planning-ready claim.
+
+## Accuracy-first experiments
+
+`experiment` tests one named hypothesis. `optimize` runs a bounded sequence of
+evidence-led hypotheses and reserves the latest eligible horizon block(s) for
+confirmation before any candidate is ranked.
+
+```powershell
+# Generate the queue from forecast evidence and the declared context budget.
+nixtla-scaffold optimize --input data.csv --preset accuracy-first --context-file forecast_context.json --horizon 6 --output runs\accuracy_research
+
+# Run one attributable transform hypothesis.
+nixtla-scaffold experiment --input data.csv --preset accuracy-first --context-file forecast_context.json --horizon 6 --variants log1p_transform --hypothesis "Multiplicative growth should improve scale-free error without adding bias." --max-variants 1 --output runs\log1p_test
+```
+
+The baseline runs outside the research-iteration count. Each completed iteration
+writes hypothesis, prediction, metric, decision, and four reviewer receipts. Tuning
+uses exact paired cutoffs and equal-weight scale-free metrics across series. Only
+the best native candidate reaches untouched confirmation; ties keep the simpler
+baseline. FINN can run as an explicit bounded hypothesis, but external promotion
+remains advisory and requires human approval. When FINN is enabled, the optimizer
+reserves compute for the baseline plus the required FINN attempt before optional
+hypotheses; an undersized compute budget fails before research starts. External
+results are evaluated as one panel-wide source/scenario/model configuration rather
+than a synthetic mix of different per-series winners.
+
+Typed `signal_needs` must be complete, source-query-budget exhausted, unavailable,
+or explicitly opted out before the optimizer starts generic catalog experiments.
+Validated signal contracts seed attributable driver or scenario hypotheses only
+when a matching executable declaration exists; otherwise the disposition artifact
+records why the signal was not tested. Standalone explicit experiments automatically
+run a matched baseline control. Baseline and treatment rankings require the same
+`resolved_candidate_fingerprint`; optional-package or runtime drift suppresses
+ranking until a new matched control is run. `all_models` is the explicit exception
+where changing the candidate set is itself the named treatment.
 
 ## FINN-inspired options
 
@@ -168,7 +221,6 @@ Native ensemble labs are also opt-in and do not change champion selection:
 
 ```powershell
 nixtla-scaffold forecast --input data.csv --horizon 6 --ensemble-policy top_k_average --ensemble-policy family_diverse_average --output runs\ensemble_lab
-nixtla-scaffold optimize --input data.csv --horizon 6 --variants baseline all_models --output runs\optimizer
 ```
 
 The manifest also records FINN-inspired recipe metadata such as `--fiscal-year-start`, `--lag-period`, `--rolling-window-period`, cleaning policies, and parallel execution intent for auditable experiments.

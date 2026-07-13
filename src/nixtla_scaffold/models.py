@@ -4,7 +4,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
+import hashlib
 import importlib.metadata as metadata
+import json
 import warnings
 
 import numpy as np
@@ -548,6 +550,7 @@ def rebuild_result_metrics_on_output_scale(
         return result
 
     base_cv = result.backtest_predictions.drop(columns=["WeightedEnsemble"], errors="ignore")
+    base_cv = _restore_cv_actuals(base_cv, history)
     base_forecast = result.forecast.drop(columns=["WeightedEnsemble"], errors="ignore")
     scales = _error_scale_map(history, profile.season_length)
     base_metrics = _restore_cv_metadata(
@@ -584,6 +587,22 @@ def rebuild_result_metrics_on_output_scale(
         warnings=tuple(dict.fromkeys(combined_warnings)),
         model_policy_resolution=result.model_policy_resolution,
     )
+
+
+def _restore_cv_actuals(
+    predictions: pd.DataFrame,
+    history: pd.DataFrame,
+) -> pd.DataFrame:
+    if predictions.empty or not {"unique_id", "ds", "y"}.issubset(predictions.columns):
+        return predictions
+    actuals = history[["unique_id", "ds", "y"]].copy()
+    actuals["unique_id"] = actuals["unique_id"].astype(str)
+    actuals["ds"] = pd.to_datetime(actuals["ds"])
+    actuals = actuals.drop_duplicates(["unique_id", "ds"], keep="last")
+    out = predictions.drop(columns=["y"]).copy()
+    out["unique_id"] = out["unique_id"].astype(str)
+    out["ds"] = pd.to_datetime(out["ds"])
+    return out.merge(actuals, on=["unique_id", "ds"], how="left", validate="many_to_one")
 
 
 def _restore_cv_metadata(metrics: pd.DataFrame, previous_metrics: pd.DataFrame) -> pd.DataFrame:
@@ -686,7 +705,66 @@ def _build_model_policy_resolution(
                 "contributed_models": models,
             }
         )
-    return {"model_policy": policy, "model_allowlist": list(spec.model_allowlist), "families": families}
+    resolved_candidates = sorted(
+        str(model)
+        for model in model_columns(result.forecast)
+        if model not in {"cutoff", "y"}
+    )
+    return _with_resolved_candidate_identity(
+        {
+            "model_policy": policy,
+            "model_allowlist": list(spec.model_allowlist),
+            "families": families,
+        },
+        resolved_candidates=resolved_candidates,
+    )
+
+
+def _with_resolved_candidate_identity(
+    resolution: dict[str, Any],
+    *,
+    resolved_candidates: list[str],
+) -> dict[str, Any]:
+    out = dict(resolution)
+    families = [
+        {
+            "family": str(family.get("family", "")),
+            "contributed_models": sorted(
+                str(model) for model in family.get("contributed_models", ())
+            ),
+        }
+        for family in out.get("families", ())
+        if family.get("contributed_models")
+    ]
+    identity_payload = {
+        "schema_version": "nixtla_scaffold.resolved_candidates.v1",
+        "resolved_candidates": sorted(
+            dict.fromkeys(str(model) for model in resolved_candidates)
+        ),
+        "runtime_versions": {
+            package: _installed_package_version(package)
+            for package in (
+                "statsforecast",
+                "mlforecast",
+                "lightgbm",
+                "scikit-learn",
+                "smooth",
+            )
+        },
+        "family_contributions": families,
+    }
+    out["resolved_candidate_identity"] = identity_payload
+    out["resolved_candidate_fingerprint"] = hashlib.sha256(
+        json.dumps(identity_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return out
+
+
+def _installed_package_version(package: str) -> str | None:
+    try:
+        return metadata.version(package)
+    except metadata.PackageNotFoundError:
+        return None
 
 
 def _contributed_models_by_family(forecast: pd.DataFrame) -> dict[str, list[str]]:
@@ -3684,5 +3762,3 @@ def _add_zero_forecast_to_cv(cv: pd.DataFrame, grp: pd.DataFrame) -> pd.DataFram
         out["ZeroForecast"] = 0.0
         return out
     return cv
-
-

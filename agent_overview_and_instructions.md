@@ -8,10 +8,14 @@ When asked to forecast a metric, keep the run explainable and conservative:
 
 1. Confirm the target, grain, time column, forecast horizon, and whether the output is exploratory or planning-facing.
 2. Normalize the input to `unique_id`, `ds`, and `y`.
-3. Start with `profile`, then run `forecast` with an explicit preset and output folder.
-4. Open or cite the curated artifacts first: `OPEN_ME_FIRST.html`, `output\forecast_review.xlsx`, `appendix\trust_summary.csv`, `forecast.csv`, `report.html`, and `llm_context.json`.
+3. Start with `setup --preset accuracy-first --research-budget ... --input <real path>`, then work `signal_needs.json` through bounded capability-first probes before generic optimization.
+4. Open `appendix\accuracy_gate.json` first, then cite the curated artifacts: `OPEN_ME_FIRST.html`, `output\forecast_review.xlsx`, `appendix\trust_summary.csv`, `forecast.csv`, `report.html`, and `llm_context.json`.
 5. Treat `planning_eligible=True` as a horizon-validation flag only. It does not override Low trust, interval failures, residual warnings, hierarchy gaps, data-quality caveats, or business review.
 6. Quote the deterministic executive headline from `diagnostics.json.executive_headline.paragraph` or `llm_context.json`; do not paraphrase it into a stronger claim.
+7. Launch the official run's generated `run_streamlit.ps1` / `streamlit_app.py` before creating any custom UI. A custom dashboard is supplemental only when explicitly requested.
+8. Do not stitch per-series winners from different experiment runs into an unofficial hybrid. One official forecast comes from one frozen spec and its within-run selection.
+9. Treat `forecast.xlsx` and `output\forecast_review.xlsx` as automatic package artifacts. Do not invoke Excel COM, LibreOffice, or custom workbook automation unless the user explicitly requests a custom workbook.
+10. Stop when the installed skill and executable package disagree. Use the matching worktree or Git ref instead of hand-building missing capabilities.
 
 The bundled skill at `skills\nixtla-forecast\SKILL.md` is the most complete agent playbook. From an installed wheel, run:
 
@@ -79,10 +83,14 @@ Useful flags:
 Use `setup` when the request is broad, the source is query-backed, or the agent needs a reusable workspace:
 
 ```powershell
-nixtla-scaffold setup --workspace runs\usage_overage_setup --data-source kusto --preset standard --series-count single --target-name ARR_30day_avg --time-col day_dt --id-value "Usage Overage ARR" --freq ME --horizon 6 --intervals auto --model-families statsforecast mlforecast --exploration-mode --mcp-regressor-search --outputs all
+nixtla-scaffold setup --workspace runs\usage_overage_setup --data-source kusto --input exports\usage.json --preset accuracy-first --research-budget balanced --series-count single --target-name ARR_30day_avg --time-col day_dt --id-value "Usage Overage ARR" --freq ME --horizon 6 --intervals auto --model-families standard --exploration-mode --mcp-regressor-search --outputs all
 ```
 
-The setup workspace includes `forecast_setup.yaml`, `questions.json`, `agent_brief.md`, source-query templates, and folders for raw data, canonical data, outputs, reports, and notes.
+The setup workspace includes `forecast_setup.yaml`, `questions.json`, `agent_brief.md`,
+`forecast_context.json`, `signal_needs.json`, `signal_probe_ledger.jsonl`,
+`signal_contracts.json`, source-query templates, and folders for raw data, canonical
+data, outputs, reports, and notes. Existing single-series inputs receive a quoted,
+runnable ingest command with an injected series ID.
 
 Ask these before modeling:
 
@@ -93,7 +101,7 @@ Ask these before modeling:
 5. Which model families are allowed: baseline, StatsForecast, MLForecast, HierarchicalForecast, or research-only NeuralForecast?
 6. Should exploration run before forecasting?
 7. Can the agent use MCPs to find candidate drivers or regressors?
-8. Which outputs are needed: clean review pack, CSV, Excel, HTML, Streamlit, diagnostics, model card, or all?
+8. Which standard review surface should open first? Default to the canonical Streamlit workbench; the package already generates the standard CSV, Excel, HTML, diagnostics, and model-card artifacts.
 
 ## Data contract
 
@@ -275,12 +283,18 @@ nixtla-scaffold forecast --input examples\monthly_finance_csv\input.csv --horizo
 nixtla-scaffold forecast --input examples\monthly_finance_csv\input.csv --horizon 6 --model-policy mlforecast --train-known-future-regressors --regressor-file known_future_regressors.yaml --output runs\driver_model
 ```
 
-Run bounded experiments when an agent needs iteration without turning the project into an open-ended AutoML search:
+Use `experiment` for one falsifiable change and `optimize` for a budgeted,
+reviewer-gated sequence with the latest eligible rows reserved for confirmation:
 
 ```powershell
 nixtla-scaffold compare-models --input examples\monthly_finance_csv\input.csv --preset standard --horizon 6 --output runs\compare_models_demo
-nixtla-scaffold experiment --input examples\monthly_finance_csv\input.csv --preset standard --horizon 6 --variants baseline all_models rolling_features --max-variants 3 --output runs\experiment_rolling
+nixtla-scaffold experiment --input examples\monthly_finance_csv\input.csv --preset accuracy-first --context-file forecast_context.json --horizon 6 --variants rolling_features --hypothesis "Stable lag structure should improve full-horizon scale-free error." --max-variants 1 --output runs\experiment_rolling
+nixtla-scaffold optimize --input examples\monthly_finance_csv\input.csv --preset accuracy-first --context-file forecast_context.json --horizon 6 --output runs\optimizer
 ```
+
+The optimizer writes a chronological split, per-iteration reviewer receipts, a
+durable knowledge ledger, an advisory promotion decision, and an explicit stop
+receipt. It never replaces the official forecast automatically.
 
 ## Refresh, ledger, and local operations
 
