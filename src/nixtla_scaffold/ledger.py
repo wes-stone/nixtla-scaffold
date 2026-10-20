@@ -605,7 +605,7 @@ def _forecast_snapshot_frame(run_path: Path, version: dict[str, Any]) -> pd.Data
         source_path = run_path / "forecast.csv"
     if not source_path.exists():
         raise FileNotFoundError(f"forecast.csv or appendix/forecast_long.csv is required to register a run: {run_path}")
-    frame = pd.read_csv(source_path)
+    frame = _read_csv_if_exists(source_path)
     out = pd.DataFrame(index=frame.index)
     out["forecast_version_id"] = version["forecast_version_id"]
     out["forecast_key"] = version["forecast_key"]
@@ -1054,7 +1054,8 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def _read_csv_if_exists(path: Path) -> pd.DataFrame:
-    return pd.read_csv(path) if path.exists() else pd.DataFrame()
+    return pd.read_csv(path, dtype={"unique_id": str}, keep_default_na=False,
+                       na_values=[""], float_precision="round_trip") if path.exists() else pd.DataFrame()
 
 
 def _run_artifact_path(run_path: Path, name: str) -> Path:

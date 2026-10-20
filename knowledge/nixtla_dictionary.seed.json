@@ -44,15 +44,6 @@
       "source_docs": ["https://nixtlaverse.nixtla.io/mlforecast/", "https://nixtlaverse.nixtla.io/mlforecast/docs/getting-started/end_to_end_walkthrough.html", "https://nixtlaverse.nixtla.io/mlforecast/docs/how-to-guides/cross_validation.html", "https://nixtlaverse.nixtla.io/mlforecast/docs/tutorials/prediction_intervals_in_forecasting_models.html"],
       "source_code": ["https://github.com/Nixtla/mlforecast", "mlforecast/core.py", "mlforecast/forecast.py", "mlforecast/feature_engineering.py", "mlforecast/lag_transforms.py", "mlforecast/target_transforms.py", "mlforecast/utils.py", "mlforecast/auto.py"],
       "sources": ["https://nixtlaverse.nixtla.io/mlforecast/", "https://otexts.com/fpppy/13-practical.html"]
-    },
-    {
-      "library": "NeuralForecast",
-      "default_role": "Research-only optional future extension for heavier neural models.",
-      "canonical_contract": "Long DataFrame with unique_id, ds, y.",
-      "implemented_now": "Not in the core package; retained as optional research because finance explainability and dependency weight are concerns.",
-      "implemented_in": [],
-      "source_code": ["https://github.com/Nixtla/neuralforecast", "neuralforecast/core.py", "neuralforecast/auto.py", "neuralforecast/models/"],
-      "sources": ["https://nixtlaverse.nixtla.io/neuralforecast/"]
     }
   ],
   "modeling_policy_summary": [

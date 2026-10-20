@@ -49,17 +49,20 @@ def infer_frequency(df: pd.DataFrame) -> str:
 
 
 def season_length_for_freq(freq: str, min_obs: int) -> int:
-    normalized = freq.upper()
-    if normalized.startswith("W"):
-        return 52
-    if normalized.startswith("Q"):
-        return 4
-    if normalized in {"ME", "M", "MS"}:
-        return 12
-    if normalized.startswith("B"):
-        return 5
-    if normalized.startswith("D"):
-        return 7
+    offset = pd.tseries.frequencies.to_offset(freq)
+    code = offset.rule_code.upper().split("-")[0]
+    cycle = (
+        52 if code == "W" else
+        4 if code in {"QE", "Q", "QS", "BQE", "BQS"} else
+        12 if code in {"ME", "M", "MS", "BME", "BM", "BMS", "CBME", "CBMS"} else
+        5 if code == "B" else
+        7 if code == "D" else
+        24 if code == "H" else
+        1440 if code in {"MIN", "T"} else
+        86400 if code == "S" else 1
+    )
+    if offset.n > 0 and cycle % offset.n == 0:
+        return max(1, cycle // offset.n)
     return 1
 
 
@@ -71,6 +74,8 @@ def profile_dataset(df: pd.DataFrame, spec: ForecastSpec | None = None) -> DataP
     if df.empty:
         raise ValueError("forecast input is empty; at least one row is required")
 
+    from nixtla_scaffold.exposure import record_exposure
+    record_exposure(df, spec)
     frame = df.copy()
     frame["ds"] = pd.to_datetime(frame["ds"])
     freq = spec.freq or infer_frequency(frame)
@@ -120,6 +125,10 @@ def profile_dataset(df: pd.DataFrame, spec: ForecastSpec | None = None) -> DataP
     if min_obs and min_obs < max(4, spec.horizon):
         warnings.append("one or more series has limited history relative to the forecast horizon")
 
+    from nixtla_scaffold.configuration import configuration_diagnostics
+    diagnostics = configuration_diagnostics(frame, spec, freq=freq, season=season_length)
+    if any(row["shape_changed"] for row in diagnostics):
+        warnings.append("Seasonal shape differs between disjoint early and recent cycles; compare a frozen configuration treatment before relying on extrapolated growth.")
     return DataProfile(
         rows=int(len(frame)),
         series_count=int(frame["unique_id"].nunique()),
@@ -137,6 +146,7 @@ def profile_dataset(df: pd.DataFrame, spec: ForecastSpec | None = None) -> DataP
         data_freshness=_date_str(frame["ds"].max()) if len(frame) else None,
         warnings=tuple(warnings),
         series=tuple(series_profiles),
+        configuration_diagnostics=tuple(diagnostics),
     )
 
 
@@ -269,4 +279,3 @@ def _date_str(value: pd.Timestamp | float | None) -> str | None:
     if value is None or (isinstance(value, float) and np.isnan(value)):
         return None
     return pd.Timestamp(value).date().isoformat()
-

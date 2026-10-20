@@ -1,20 +1,27 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import Any
 import hashlib
 import importlib.metadata as metadata
 import json
+import platform
+import sys
+from time import perf_counter
 import warnings
 
 import numpy as np
 import pandas as pd
 
+from nixtla_scaffold.candidates import (
+    CandidateRecipe, baseline_evidence, complete_evidence, contextualize_evidence, estimator_definition,
+    merge_evidence, ml_fit_evidence, native_fit_evidence,
+)
 from nixtla_scaffold.drivers import DriverFeatureBundle, prepare_mlforecast_regressor_features
-from nixtla_scaffold.model_families import SMOOTH_MODELS, STATS_SKLEARN_MODELS, model_family
-from nixtla_scaffold.schema import DataProfile, ForecastSpec
+from nixtla_scaffold.model_families import EXTENDED_STATSFORECAST_MODELS, SMOOTH_MODELS, STATS_SKLEARN_MODELS, model_family
+from nixtla_scaffold.schema import DataProfile, EvaluationPolicy, FeatureRecipeSpec, ForecastSpec, SelectionPolicy, _runtime_source_identity
 
 
 MLFORECAST_MIN_OBS = 30
@@ -205,6 +212,7 @@ def _try_statsforecast(history: pd.DataFrame, profile: DataProfile, spec: Foreca
             model_weights=result.model_weights,
             model_explainability=result.model_explainability,
             warnings=result.warnings + (f"StatsForecast unavailable; used baseline engine ({exc})",),
+            model_policy_resolution=result.model_policy_resolution,
         )
     except Exception as exc:
         if spec.model_policy == "statsforecast":
@@ -223,6 +231,7 @@ def _try_statsforecast(history: pd.DataFrame, profile: DataProfile, spec: Foreca
             model_weights=result.model_weights,
             model_explainability=result.model_explainability,
             warnings=result.warnings + (f"StatsForecast failed; used baseline engine ({exc})",),
+            model_policy_resolution=result.model_policy_resolution,
         )
 
 
@@ -268,7 +277,7 @@ def _merge_model_results(
         ignore_index=True,
     ) if not primary.backtest_metrics.empty or not secondary.backtest_metrics.empty else _empty_backtest_metrics()
 
-    scales = _error_scale_map(history, profile.season_length)
+    scales = _error_scale_map(history, profile.season_length, merged_bt)
     merged_metrics = _restore_cv_metadata(
         _metrics_from_cv(merged_bt, scales_by_series=scales),
         prior_metrics,
@@ -304,6 +313,10 @@ def _merge_model_results(
         custom_model_contracts=custom_contracts,
         custom_model_invocations=custom_invocations,
         warnings=tuple(dict.fromkeys(combined_warnings)),
+        model_policy_resolution={"candidate_evidence": merge_evidence(
+            primary.model_policy_resolution.get("candidate_evidence", {}),
+            secondary.model_policy_resolution.get("candidate_evidence", {}),
+        )},
     )
 
 
@@ -447,12 +460,15 @@ def _mlforecast_light_feasibility(profile: DataProfile, spec: ForecastSpec) -> M
             False,
             f"min_history_below_light_threshold: min observations {min_obs} < {MLFORECAST_LIGHT_MIN_OBS}",
         )
+    if spec.evaluation.strategy == "none":
+        return MLForecastFeasibility(True)
 
     h, n_windows, step_size = _adaptive_cv_params(
         min_obs,
         spec.horizon,
         profile.season_length,
         strict=spec.strict_cv_horizon,
+        policy=spec.evaluation,
     )
     if h < 1 or n_windows < 1:
         strict_note = " under strict full-horizon CV" if spec.strict_cv_horizon else ""
@@ -544,7 +560,7 @@ def rebuild_result_metrics_on_output_scale(
     profile: DataProfile,
     spec: ForecastSpec,
 ) -> ModelResult:
-    """Recalculate metrics and weights after forecast columns move to a new scale."""
+    """Score canonical actuals on the reporting scale, including untransformed runs."""
 
     if result.backtest_predictions.empty:
         return result
@@ -552,21 +568,27 @@ def rebuild_result_metrics_on_output_scale(
     base_cv = result.backtest_predictions.drop(columns=["WeightedEnsemble"], errors="ignore")
     base_cv = _restore_cv_actuals(base_cv, history)
     base_forecast = result.forecast.drop(columns=["WeightedEnsemble"], errors="ignore")
-    scales = _error_scale_map(history, profile.season_length)
+    scales = _error_scale_map(history, profile.season_length, base_cv)
     base_metrics = _restore_cv_metadata(
         _metrics_from_cv(base_cv, scales_by_series=scales),
         result.backtest_metrics,
     )
-    common_support = spec.weighted_ensemble and _has_classical_and_ml_models(_non_ensemble_model_columns(base_cv))
+    ensemble_cv = base_cv.drop(columns=[name for name in base_cv if model_family(name) == "custom"])
+    ensemble_metrics = base_metrics.loc[base_metrics["model"].map(model_family) != "custom"]
+    common_support = spec.weighted_ensemble and _has_classical_and_ml_models(_non_ensemble_model_columns(ensemble_cv))
     weight_warnings: list[str] = []
     if spec.weighted_ensemble and common_support:
-        model_weights, weight_warnings = _model_weights_from_common_support(base_cv)
+        model_weights, weight_warnings = _model_weights_from_common_support(ensemble_cv)
     elif spec.weighted_ensemble:
-        model_weights = _model_weights_from_metrics(base_metrics)
+        model_weights = _model_weights_from_metrics(ensemble_metrics)
     else:
         model_weights = _empty_model_weights()
     forecast = _add_weighted_ensemble_forecast(base_forecast, model_weights) if spec.weighted_ensemble else base_forecast
-    backtest_predictions = _add_weighted_ensemble_to_cv(base_cv, common_support=common_support) if spec.weighted_ensemble else base_cv
+    backtest_predictions = base_cv
+    if spec.weighted_ensemble:
+        ensemble_cv = _add_weighted_ensemble_to_cv(ensemble_cv, common_support=common_support)
+        if "WeightedEnsemble" in ensemble_cv:
+            backtest_predictions = base_cv.assign(WeightedEnsemble=ensemble_cv["WeightedEnsemble"])
     metrics = _restore_cv_metadata(
         _metrics_from_cv(backtest_predictions, scales_by_series=scales),
         result.backtest_metrics,
@@ -610,6 +632,8 @@ def _restore_cv_metadata(metrics: pd.DataFrame, previous_metrics: pd.DataFrame) 
         "requested_horizon",
         "selection_horizon",
         "cv_windows",
+        "cv_disjoint_windows",
+        "expected_observations",
         "cv_step_size",
         "cv_horizon_matches_requested",
     ]
@@ -712,6 +736,7 @@ def _build_model_policy_resolution(
     )
     return _with_resolved_candidate_identity(
         {
+            **result.model_policy_resolution,
             "model_policy": policy,
             "model_allowlist": list(spec.model_allowlist),
             "families": families,
@@ -738,6 +763,11 @@ def _with_resolved_candidate_identity(
     ]
     identity_payload = {
         "schema_version": "nixtla_scaffold.resolved_candidates.v1",
+        "python": {
+            "executable": sys.executable,
+            "version": platform.python_version(),
+            "implementation": platform.python_implementation(),
+        },
         "resolved_candidates": sorted(
             dict.fromkeys(str(model) for model in resolved_candidates)
         ),
@@ -748,10 +778,17 @@ def _with_resolved_candidate_identity(
                 "mlforecast",
                 "lightgbm",
                 "scikit-learn",
+                "numpy",
+                "pandas",
+                "scipy",
+                "utilsforecast",
+                "coreforecast",
                 "smooth",
+                "conformalforecast",
             )
         },
         "family_contributions": families,
+        "runtime_source": _runtime_source_identity(),
     }
     out["resolved_candidate_identity"] = identity_payload
     out["resolved_candidate_fingerprint"] = hashlib.sha256(
@@ -799,6 +836,7 @@ def forecast_with_baselines(
         model_weights=model_weights,
         model_explainability=_empty_model_explainability(),
         warnings=tuple(run_warnings),
+        model_policy_resolution={"candidate_evidence": baseline_evidence(forecast, history, profile, spec)},
     )
 
 
@@ -812,12 +850,26 @@ def forecast_with_statsforecast(
     models, include_mstl_feature_arima, sklearn_aliases = _statsforecast_models_for_spec(history, profile, spec)
 
     interval_kwargs: dict[str, Any] = {}
-    interval_windows = _interval_windows(profile.min_obs_per_series, spec.horizon, profile.season_length)
+    interval_windows = _interval_windows(
+        profile.min_obs_per_series, spec.horizon, profile.season_length,
+        max_windows=spec.evaluation.max_calibration_windows if spec.accuracy_first else 3,
+        minimum_training=max(spec.evaluation.minimum_training_observations,
+                             spec.evaluation.minimum_seasonal_cycles * profile.season_length) if spec.accuracy_first else None,
+    )
     run_warnings: list[str] = []
     allowlist_warning = _model_allowlist_warning(spec)
     if allowlist_warning:
         run_warnings.append(allowlist_warning)
     ladder_aliases = [alias for alias, _ in models]
+    for alias in EXTENDED_STATSFORECAST_MODELS:
+        if (spec.accuracy_first or spec.model_policy == "all" or alias in spec.model_allowlist) and _allowlist_allows_model(spec, alias) and alias not in ladder_aliases:
+            minimum = max(12, 2 * profile.season_length)
+            reason = (
+                f"needs at least {minimum} observations per series; shortest series has {profile.min_obs_per_series}"
+                if profile.min_obs_per_series < minimum
+                else "unavailable in the installed StatsForecast version"
+            )
+            run_warnings.append(f"StatsForecast {alias} skipped: {reason}")
     if include_mstl_feature_arima:
         ladder_aliases.append(MSTL_FEATURE_ARIMA_MODEL)
         run_warnings.append("StatsForecast MSTL feature AutoARIMA enabled: MSTL trend/seasonal components are passed as exogenous features to AutoARIMA")
@@ -845,9 +897,12 @@ def forecast_with_statsforecast(
                 f"rows in at least one seasonal series; longest series has {profile.max_obs_per_series}"
             )
     run_warnings.append(f"StatsForecast ladder: {len(ladder_aliases)} models ({', '.join(ladder_aliases)})")
-    if spec.levels and interval_windows >= 2:
+    if spec.levels and (interval_windows >= 2 or spec.accuracy_first):
         interval_kwargs["level"] = list(spec.levels)
-        interval_kwargs["prediction_intervals"] = ConformalIntervals(h=spec.horizon, n_windows=interval_windows)
+        if interval_windows >= 2:
+            interval_kwargs["prediction_intervals"] = ConformalIntervals(h=spec.horizon, n_windows=interval_windows)
+        else:
+            run_warnings.append("Conformal calibration is unavailable; requesting native intervals only where supported.")
     elif spec.levels:
         run_warnings.append("prediction intervals skipped because history is too short for conformal windows")
 
@@ -890,11 +945,17 @@ def forecast_with_statsforecast(
             forecast_frames.append(forecast)
         forecast_warnings.extend(sklearn_warnings)
     if not forecast_frames:
-        raise RuntimeError("no StatsForecast candidate model able to be fitted")
+        raise RuntimeError("no StatsForecast candidate model able to be fitted: " + "; ".join(forecast_warnings))
     forecast = _merge_statsforecast_frames(forecast_frames, keys=["unique_id", "ds"])
+    candidate_evidence = forecast.attrs.get("candidate_evidence", merge_evidence())
     run_warnings.extend(forecast_warnings)
     if _allowlist_allows_model(spec, "ZeroForecast"):
         forecast = _add_zero_forecast_for_intermittent(forecast, history)
+    candidate_evidence = complete_evidence(
+        candidate_evidence, forecast, history, spec, profile,
+        [*ladder_aliases, *(name for name in spec.model_allowlist if model_family(name) in {"baseline", "statsforecast"}),
+         *_non_ensemble_model_columns(forecast)], run_warnings,
+    )
 
     metrics, backtest_warnings, backtest_predictions = _statsforecast_backtest(
         models,
@@ -916,6 +977,7 @@ def forecast_with_statsforecast(
         model_weights=model_weights,
         model_explainability=_empty_model_explainability(),
         warnings=tuple(run_warnings),
+        model_policy_resolution={"candidate_evidence": candidate_evidence},
     )
 
 
@@ -946,7 +1008,8 @@ def forecast_with_smooth(
     )
     run_warnings.extend(forecast_warnings)
     if not _non_ensemble_model_columns(forecast):
-        raise RuntimeError("no smooth candidate model able to be fitted")
+        details = "; ".join(forecast_warnings)
+        raise RuntimeError(f"no smooth candidate model able to be fitted: {details}")
 
     metrics, backtest_warnings, backtest_predictions = _smooth_backtest(
         smooth_module,
@@ -1091,7 +1154,7 @@ def _smooth_backtest(
         if n < SMOOTH_MIN_OBS:
             run_warnings.append(f"smooth backtest skipped series {uid}: needs at least {SMOOTH_MIN_OBS} rows; found {n}")
             continue
-        h, n_windows, step_size = _adaptive_cv_params(n, spec.horizon, season, strict=spec.strict_cv_horizon)
+        h, n_windows, step_size = _adaptive_cv_params(n, spec.horizon, season, strict=spec.strict_cv_horizon, policy=spec.evaluation)
         if h < 1 or n_windows < 1:
             continue
         series_rows: list[pd.DataFrame] = []
@@ -1135,7 +1198,7 @@ def _smooth_backtest(
     cv = pd.concat(rows, ignore_index=True).sort_values(["unique_id", "cutoff", "ds"]).reset_index(drop=True)
     if spec.weighted_ensemble:
         cv = _add_weighted_ensemble_to_cv(cv)
-    metrics = _metrics_from_cv(cv, scales_by_series=_error_scale_map(history, season))
+    metrics = _metrics_from_cv(cv, scales_by_series=_error_scale_map(history, season, cv))
     if metadata_rows:
         metrics = metrics.merge(pd.DataFrame(metadata_rows), on="unique_id", how="left")
     return metrics, sorted(set(run_warnings)), cv
@@ -1151,6 +1214,15 @@ def _smooth_fit_predict(
 ) -> tuple[np.ndarray, list[str]]:
     if model_name not in SMOOTH_MODELS:
         raise ValueError(f"unsupported smooth model: {model_name}")
+    if model_name == "SmoothADAM_CustomPool":
+        raise RuntimeError(
+            "SmoothADAM_CustomPool is quarantined: AutoADAM fails every reference fixture "
+            "on supported Smooth 1.1.0. No substitute recipe was fitted."
+        )
+    if len(y) < SMOOTH_MIN_OBS or not np.isfinite(y).all():
+        raise ValueError(f"smooth requires at least {SMOOTH_MIN_OBS} finite observations")
+    if np.ptp(y) == 0:
+        raise ValueError("smooth constant/all-zero input is unsupported; retain a separately scored baseline")
     kwargs: dict[str, Any] = {
         "h": horizon,
         "holdout": False,
@@ -1173,6 +1245,8 @@ def _smooth_fit_predict(
         model.fit(y)
         prediction = model.predict(horizon)
     values = _extract_smooth_mean(prediction, horizon=horizon)
+    if not np.isfinite(values).all():
+        raise ValueError(f"smooth {model_name} returned nonfinite forecasts")
     caught_messages = _format_caught_warnings(
         [item for item in caught if not issubclass(item.category, RuntimeWarning)],
         prefix=f"smooth {model_name} warning",
@@ -1322,6 +1396,21 @@ def _statsforecast_model_factories(
 
     season = profile.season_length
     min_obs = profile.min_obs_per_series
+    configuration = spec.model_configuration
+    periods = list(configuration.seasonal_periods) or ([season] if season > 1 else [])
+    multi_season = periods if configuration.seasonal_periods else season
+    multi_supported = not periods or min_obs > 2 * max(periods)
+    mfles_options = {}
+    if configuration.mfles_seasonality != "auto":
+        mfles_options["multiplicative"] = configuration.mfles_seasonality == "multiplicative"
+    if configuration.mfles_fourier_order is not None:
+        mfles_options["fourier_order"] = configuration.mfles_fourier_order
+    if mfles_options.get("multiplicative") and (history["y"] <= 0).any():
+        raise ValueError("Multiplicative MFLES requires strictly positive modeling targets at every origin")
+    if configuration.mfles_fourier_order is not None and periods and any(
+        2 * configuration.mfles_fourier_order >= period for period in periods
+    ):
+        raise ValueError("mfles_fourier_order must be below half of every seasonal period to avoid aliased columns")
     has_intermittent = _has_intermittent_demand(history)
 
     # --- Tier 1: Always-on baselines (any history length) ---
@@ -1373,6 +1462,13 @@ def _statsforecast_model_factories(
         ])
         if season > 1 and min_obs >= 2 * season:
             models.append(("HoltWinters", lambda: HoltWinters(season_length=season, alias="HoltWinters")))
+        trend_diagnosed = any(
+            len(group) >= 12 and abs(pd.Series(np.arange(len(group)), index=group.index).corr(group["y"])) >= 0.7
+            for _, group in history.sort_values("ds").groupby("unique_id", sort=False)
+        )
+        for alias, damped in (("AutoETS_Damped", True), ("AutoETS_Undamped", False)):
+            if alias in spec.model_allowlist or (spec.accuracy_first and trend_diagnosed):
+                models.append((alias, partial(AutoETS, season_length=season, model="ZAZ", damped=damped, alias=alias)))
 
     # --- Tier 5: Theta family (need ≥8 obs) ---
     if min_obs >= 8:
@@ -1384,42 +1480,109 @@ def _statsforecast_model_factories(
         ])
 
     # --- Tier 6: MSTL decomposition + complex seasonal (need ≥2 full seasons) ---
-    if min_obs >= 2 * season and season > 1:
-        models.append(("MSTL", lambda: MSTL(season_length=season, alias="MSTL")))
+    if periods and (multi_supported if configuration.seasonal_periods else min_obs >= 2 * season):
+        models.append(("MSTL", lambda: MSTL(season_length=multi_season, alias="MSTL")))
         models.append(
             (
                 "MSTL_AutoARIMA",
-                lambda: MSTL(season_length=season, trend_forecaster=AutoARIMA(season_length=1), alias="MSTL_AutoARIMA"),
+                lambda: MSTL(season_length=multi_season, trend_forecaster=AutoARIMA(season_length=1), alias="MSTL_AutoARIMA"),
             )
         )
 
+    if min_obs >= max(12, 2 * season):
+        from statsforecast import models as native_models
+
+        for alias in EXTENDED_STATSFORECAST_MODELS:
+            if spec.accuracy_first or spec.model_policy == "all" or alias in spec.model_allowlist:
+                candidate = getattr(native_models, alias, None)
+                if candidate is None and alias in spec.model_allowlist:
+                    raise ImportError(f"model_allowlist requested {alias}, but it is unavailable in the installed StatsForecast version")
+                if candidate is not None:
+                    if alias == "AutoTBATS" and configuration.seasonal_periods and not multi_supported:
+                        continue
+                    models.append((alias, partial(candidate, season_length=multi_season if alias == "AutoTBATS" else season, alias=alias)))
+
     # --- Tier 7: boosted decomposition (need enough data for internal validation) ---
-    if min_obs >= max(12, 2 * season if season > 1 else 12):
+    if min_obs >= max(12, 2 * season if season > 1 else 12) and (multi_supported or not configuration.seasonal_periods):
         if MFLES is not None:
-            models.append(("MFLES", lambda: MFLES(season_length=season if season > 1 else None, alias="MFLES")))
+            models.append(("MFLES", lambda: MFLES(season_length=multi_season if periods else None, alias="MFLES", **mfles_options)))
         if AutoMFLES is not None:
+            # Disabling the engine's outer CV must not disable the estimator's tuning.
+            tuning_policy = spec.evaluation
+            if tuning_policy.strategy == "none":
+                tuning_policy = replace(tuning_policy, strategy="legacy" if spec.run_mode == "legacy" else "rolling-origin")
+            if configuration.automfles_step_size is not None:
+                tuning_policy = replace(tuning_policy, step_size=configuration.automfles_step_size)
             test_size, n_windows, step_size = _adaptive_cv_params(
                 min_obs,
-                spec.horizon,
+                configuration.automfles_test_size or spec.horizon,
                 season,
-                strict=spec.strict_cv_horizon,
+                strict=spec.strict_cv_horizon or configuration.automfles_test_size is not None,
+                policy=tuning_policy,
             )
-            if test_size >= 1:
-                auto_windows = max(1, min(2, n_windows if n_windows >= 1 else 1))
+            if test_size >= 1 and n_windows >= 1 and min_obs >= test_size + 4:
+                auto_windows = min(configuration.automfles_windows, n_windows)
                 auto_step = step_size if step_size >= 1 else None
                 models.append(
                     (
                         "AutoMFLES",
                         lambda: AutoMFLES(
                             test_size=test_size,
-                            season_length=season if season > 1 else None,
+                            season_length=multi_season if periods else None,
                             n_windows=auto_windows,
                             step_size=auto_step,
+                            metric=configuration.automfles_metric,
+                            config=_mfles_search_grid(periods, mfles_options) if mfles_options else None,
                             alias="AutoMFLES",
                         ),
                     )
                 )
     return models
+
+
+def _mfles_search_grid(periods: list[int], options: dict) -> dict:
+    # Preserve the documented native grid when adding a fixed treatment.
+    grid = ({
+        "seasonality_weights": [True, False], "smoother": [True, False],
+        "ma": [min(periods), min(periods) // 2, None], "seasonal_period": [None, periods],
+    } if periods else {
+        "smoother": [True, False], "cov_threshold": [0.5, -1],
+        "max_rounds": [5, 20], "seasonal_period": [None],
+    })
+    return {**grid, **{key: [value] for key, value in options.items()}}
+
+
+def _native_fit_predict(models, *, history, freq, horizon, verbose, interval_kwargs, x_df=None, features=None):
+    from statsforecast import StatsForecast
+
+    native_only = [item for item in models if item[0] in {"MSTL", "MSTL_AutoARIMA", "AutoTBATS"}]
+    if interval_kwargs.get("prediction_intervals") is not None and native_only:
+        calibrated = [item for item in models if item not in native_only]
+        frames = [_native_fit_predict(
+            native_only, history=history, freq=freq, horizon=horizon, verbose=verbose,
+            interval_kwargs={key: value for key, value in interval_kwargs.items() if key != "prediction_intervals"},
+            x_df=x_df, features=features,
+        )]
+        if calibrated:
+            frames.append(_native_fit_predict(calibrated, history=history, freq=freq, horizon=horizon,
+                                              verbose=verbose, interval_kwargs=interval_kwargs, x_df=x_df, features=features))
+        return _merge_statsforecast_frames(frames, keys=["unique_id", "ds"])
+    engine = StatsForecast(models=[factory() for _, factory in models], freq=freq, n_jobs=1, verbose=verbose)
+    engine.fit(history if x_df is not None else history[["unique_id", "ds", "y"]],
+               prediction_intervals=interval_kwargs.get("prediction_intervals"))
+    forecast = _normalize_statsforecast_output(engine.predict(h=horizon, X_df=x_df, level=interval_kwargs.get("level")))
+    forecast.attrs["candidate_evidence"] = native_fit_evidence(
+        engine, [alias for alias, _ in models], forecast, history,
+        horizon=horizon, freq=freq, interval_kwargs=interval_kwargs,
+    )
+    if features:
+        forecast.attrs["candidate_evidence"] = contextualize_evidence(
+            forecast.attrs["candidate_evidence"], {"feature_recipe": features},
+        )
+        if features.get("calibration_scope") == "precomputed prefix features":
+            for row in forecast.attrs["candidate_evidence"]["fits"]:
+                row["intervals"]["calibration_feature_scope"] = "precomputed_prefix_features"
+    return forecast
 
 
 def _statsforecast_forecast_resilient(
@@ -1431,19 +1594,12 @@ def _statsforecast_forecast_resilient(
     verbose: bool,
     interval_kwargs: dict[str, Any],
 ) -> tuple[pd.DataFrame, list[str]]:
-    from statsforecast import StatsForecast
-
     warnings_out: list[str] = []
-    df = history[["unique_id", "ds", "y"]]
     try:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always", RuntimeWarning)
-            forecast = StatsForecast(
-                models=[factory() for _, factory in models],
-                freq=freq,
-                n_jobs=1,
-                verbose=verbose,
-            ).forecast(df=df, h=horizon, **interval_kwargs)
+            forecast = _native_fit_predict(models, history=history, freq=freq, horizon=horizon,
+                                           verbose=verbose, interval_kwargs=interval_kwargs)
         warnings_out.extend(_format_caught_warnings(caught))
         return _normalize_statsforecast_output(forecast), warnings_out
     except Exception as exc:
@@ -1478,19 +1634,12 @@ def _forecast_candidate_resilient(
     verbose: bool,
     interval_kwargs: dict[str, Any],
 ) -> tuple[pd.DataFrame, list[str]]:
-    from statsforecast import StatsForecast
-
     warnings_out: list[str] = []
-    df = history[["unique_id", "ds", "y"]]
     try:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always", RuntimeWarning)
-            forecast = StatsForecast(
-                models=[factory()],
-                freq=freq,
-                n_jobs=1,
-                verbose=verbose,
-            ).forecast(df=df, h=horizon, **interval_kwargs)
+            forecast = _native_fit_predict([(alias, factory)], history=history, freq=freq, horizon=horizon,
+                                           verbose=verbose, interval_kwargs=interval_kwargs)
         warnings_out.extend(_format_caught_warnings(caught))
         return _normalize_statsforecast_output(forecast), warnings_out
     except Exception as full_exc:
@@ -1529,12 +1678,8 @@ def _forecast_candidate_resilient(
         try:
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always", RuntimeWarning)
-                forecast = StatsForecast(
-                    models=[factory()],
-                    freq=freq,
-                    n_jobs=1,
-                    verbose=verbose,
-                ).forecast(df=df, h=horizon)
+                forecast = _native_fit_predict([(alias, factory)], history=history, freq=freq, horizon=horizon,
+                                               verbose=verbose, interval_kwargs={})
             warnings_out.extend(_format_caught_warnings(caught))
             warnings_out.append(
                 f"StatsForecast candidate {alias} could not produce conformal intervals; kept point forecast only ({full_exc})"
@@ -1632,7 +1777,6 @@ def _statsforecast_mstl_feature_arima_forecast_core(
     verbose: bool,
     interval_kwargs: dict[str, Any],
 ) -> pd.DataFrame:
-    from statsforecast import StatsForecast
     from statsforecast.feature_engineering import mstl_decomposition
     from statsforecast.models import AutoARIMA, MSTL
 
@@ -1649,13 +1793,12 @@ def _statsforecast_mstl_feature_arima_forecast_core(
         freq=freq,
         h=horizon,
     )
-    forecast = StatsForecast(
-        models=[AutoARIMA(season_length=season_length, alias=MSTL_FEATURE_ARIMA_MODEL)],
-        freq=freq,
-        n_jobs=1,
-        verbose=verbose,
-    ).forecast(df=transformed_df, X_df=x_df, h=horizon, **interval_kwargs)
-    return _normalize_statsforecast_output(forecast)
+    return _native_fit_predict(
+        [(MSTL_FEATURE_ARIMA_MODEL, lambda: AutoARIMA(season_length=season_length, alias=MSTL_FEATURE_ARIMA_MODEL))],
+        history=transformed_df, x_df=x_df, freq=freq, horizon=horizon, verbose=verbose, interval_kwargs=interval_kwargs,
+        features={"method": "statsforecast.feature_engineering.mstl_decomposition", "season_length": season_length,
+                  "scope": "supplied training prefix", "calibration_scope": "precomputed prefix features"},
+    )
 
 
 def _statsforecast_sklearn_forecast_resilient(
@@ -1751,21 +1894,18 @@ def _statsforecast_sklearn_forecast_core(
     verbose: bool,
     interval_kwargs: dict[str, Any],
 ) -> pd.DataFrame:
-    from statsforecast import StatsForecast
-
     transformed_df, x_df = _statsforecast_sklearn_feature_frames(
         history=history,
         freq=freq,
         season_length=season_length,
         horizon=horizon,
     )
-    forecast = StatsForecast(
-        models=[factory() for _, factory in _statsforecast_sklearn_model_factories(aliases)],
-        freq=freq,
-        n_jobs=1,
-        verbose=verbose,
-    ).forecast(df=transformed_df, X_df=x_df, h=horizon, **interval_kwargs)
-    return _normalize_statsforecast_output(forecast)
+    return _native_fit_predict(
+        _statsforecast_sklearn_model_factories(aliases), history=transformed_df, x_df=x_df, freq=freq,
+        horizon=horizon, verbose=verbose, interval_kwargs=interval_kwargs,
+        features={"method": "trend_fourier", "season_length": season_length,
+                  "fourier_k": _statsforecast_sklearn_fourier_k(season_length), "scope": "supplied training prefix"},
+    )
 
 
 def _statsforecast_sklearn_feature_frames(
@@ -1818,7 +1958,7 @@ def forecast_with_mlforecast(
     # Build lag list: recent lags + seasonal lags
     lags = list(_mlforecast_default_lags(min_obs, season))
 
-    h, n_windows, step_size = _adaptive_cv_params(min_obs, spec.horizon, season, strict=spec.strict_cv_horizon)
+    h, n_windows, step_size = _adaptive_cv_params(min_obs, spec.horizon, season, strict=spec.strict_cv_horizon, policy=spec.evaluation)
     cv_lag_plan = _mlforecast_cv_lag_plan(
         min_obs=min_obs,
         horizon=h,
@@ -1835,6 +1975,10 @@ def forecast_with_mlforecast(
         season_length=season,
         lags=lags,
         levels=spec.levels,
+        max_windows=spec.evaluation.max_calibration_windows if spec.accuracy_first else 3,
+        allow_lag_cap=not spec.accuracy_first,
+        minimum_effective_rows=max(spec.evaluation.minimum_training_observations,
+                                   spec.evaluation.minimum_seasonal_cycles * season) if spec.accuracy_first else 1,
     )
     if interval_plan is not None:
         lags = list(interval_plan.lags)
@@ -1844,10 +1988,27 @@ def forecast_with_mlforecast(
         spec,
         family_label="MLForecast",
     )
+    breadth_warning = ""
+    omitted_factories = []
+    if spec.accuracy_first and not spec.model_allowlist and spec.model_policy != "all":
+        effective_rows = int((history.groupby("unique_id").size() - max(lags)).clip(lower=0).sum())
+        if effective_rows < 48:
+            permitted = {"LinearRegression", "Ridge", "Ridge_Regularized", "BayesianRidge", "ElasticNet", "Huber"}
+            if effective_rows >= 24:
+                permitted.add("LightGBM_Shallow")
+            omitted = [alias for alias, _ in model_factories if alias not in permitted]
+            omitted_factories = [item for item in model_factories if item[0] not in permitted]
+            model_factories = [item for item in model_factories if item[0] in permitted]
+            breadth_warning = (
+                f"MLForecast effective lagged training rows={effective_rows}; using the bounded regularized/shallow ladder. "
+                f"Insufficient automatic learner support: {', '.join(omitted)}."
+            )
     if not model_factories:
         raise ImportError("MLForecast requires at least one installed sklearn or LightGBM regressor")
 
     date_features = ["month", "dayofweek"] if profile.freq.upper().startswith("D") or profile.freq.upper().startswith("B") else ["month"]
+    from nixtla_scaffold.calendar_features import native_calendar_features
+    date_features = date_features + native_calendar_features(history, spec, profile.freq)
     lag_transforms, lag_transform_warnings = _mlforecast_lag_transforms(
         spec,
         lags=lags,
@@ -1863,8 +2024,12 @@ def forecast_with_mlforecast(
         min_training_rows=MLFORECAST_MIN_OBS,
         forecast_origin=profile.end,
     )
+    from nixtla_scaffold.ml_features import native_transforms
+    lag_transforms = native_transforms(history, spec, feature_bundle, lag_transforms)
 
     run_warnings: list[str] = []
+    if breadth_warning:
+        run_warnings.append(breadth_warning)
     allowlist_warning = _model_allowlist_warning(spec)
     if allowlist_warning:
         run_warnings.append(allowlist_warning)
@@ -1918,6 +2083,8 @@ def forecast_with_mlforecast(
         prediction_intervals_factory=interval_factory,
         lag_transforms=lag_transforms,
         exogenous_features=feature_bundle,
+        date_features_as_dummies=spec.feature_recipe.date_features_as_dummies or spec.calendar.enabled,
+        feature_recipe=spec.feature_recipe,
     )
     run_warnings.extend(fit_warnings)
 
@@ -1966,12 +2133,14 @@ def forecast_with_mlforecast(
                 prediction_intervals_factory=cv_interval_factory,
                 lag_transforms=lag_transforms,
                 exogenous_features=feature_bundle,
+                date_features_as_dummies=spec.feature_recipe.date_features_as_dummies or spec.calendar.enabled,
+                feature_recipe=spec.feature_recipe,
             )
             cv = cv.reset_index() if "unique_id" not in cv.columns else cv.copy()
             cv["ds"] = pd.to_datetime(cv["ds"])
             cv = cv.sort_values(["unique_id", "ds"]).reset_index(drop=True)
             metrics = _attach_cv_metadata(
-                _metrics_from_cv(cv, scales_by_series=_error_scale_map(history, season)),
+                _metrics_from_cv(cv, scales_by_series=_error_scale_map(history, season, cv)),
                 requested_horizon=spec.horizon,
                 selection_horizon=h,
                 n_windows=n_windows,
@@ -1983,6 +2152,22 @@ def forecast_with_mlforecast(
         except Exception as exc:
             run_warnings.append(f"MLForecast cross-validation failed: {exc}")
 
+    evidence = complete_evidence(
+        forecast.attrs.get("candidate_evidence", {}), forecast, history, spec, profile,
+        [alias for alias, _ in model_factories], run_warnings,
+    )
+    for alias, factory in omitted_factories:
+        recipe = CandidateRecipe(alias, "mlforecast", estimator_definition(factory()),
+                                 {"frequency": profile.freq, "horizon": spec.horizon, "lags": lags,
+                                  "eligibility": "insufficient_automatic_learner_support"})
+        evidence["recipes"][recipe.fingerprint] = recipe.to_dict()
+        for uid, group in history.groupby("unique_id", sort=True):
+            evidence["fits"].append({
+                "unique_id": str(uid), "model": alias, "cutoff": pd.Timestamp(group.ds.max()).isoformat(),
+                "recipe_id": recipe.fingerprint, "status": "ineligible",
+                "fitted_structure": {}, "fitted_structure_status": "not_attempted",
+                "diagnostics": [breadth_warning],
+            })
     return ModelResult(
         forecast=forecast,
         backtest_metrics=metrics,
@@ -1997,6 +2182,7 @@ def forecast_with_mlforecast(
             cv_used_exogenous_features=cv_used_exogenous_features,
         ),
         warnings=tuple(run_warnings),
+        model_policy_resolution={"candidate_evidence": evidence},
     )
 
 
@@ -2118,6 +2304,7 @@ def _mlforecast_model_factories(*, min_obs: int) -> list[tuple[str, Callable[[],
                     "LightGBM",
                     lambda: lgb.LGBMRegressor(
                         n_estimators=100,
+                        n_jobs=1,
                         learning_rate=0.1,
                         num_leaves=31,
                         verbose=-1,
@@ -2128,6 +2315,7 @@ def _mlforecast_model_factories(*, min_obs: int) -> list[tuple[str, Callable[[],
                     "LightGBM_Conservative",
                     lambda: lgb.LGBMRegressor(
                         n_estimators=60,
+                        n_jobs=1,
                         learning_rate=0.05,
                         num_leaves=15,
                         min_child_samples=10,
@@ -2139,6 +2327,7 @@ def _mlforecast_model_factories(*, min_obs: int) -> list[tuple[str, Callable[[],
                     "LightGBM_Shallow",
                     lambda: lgb.LGBMRegressor(
                         n_estimators=80,
+                        n_jobs=1,
                         learning_rate=0.08,
                         num_leaves=7,
                         max_depth=3,
@@ -2152,6 +2341,7 @@ def _mlforecast_model_factories(*, min_obs: int) -> list[tuple[str, Callable[[],
                     lambda: lgb.LGBMRegressor(
                         objective="huber",
                         n_estimators=80,
+                        n_jobs=1,
                         learning_rate=0.06,
                         num_leaves=15,
                         min_child_samples=8,
@@ -2175,14 +2365,16 @@ def _mlforecast_interval_plan(
     lags: list[int],
     levels: tuple[int, ...],
     allow_lag_cap: bool = True,
+    max_windows: int = 3,
+    minimum_effective_rows: int = 1,
 ) -> MLForecastIntervalPlan | None:
     if not levels or horizon < 1 or min_obs < 1 or not lags:
         return None
     original_lags = tuple(sorted(set(lag for lag in lags if lag >= 1)))
     candidates: list[tuple[bool, int, int, MLForecastIntervalPlan]] = []
-    max_windows = min(3, max(0, (min_obs - 2) // max(1, horizon)))
+    max_windows = min(max_windows, max(0, (min_obs - 2) // max(1, horizon)))
     for n_windows in range(2, max_windows + 1):
-        lag_cap = min_obs - n_windows * horizon - 1
+        lag_cap = min_obs - n_windows * horizon - minimum_effective_rows
         if lag_cap < 1:
             continue
         kept_lags = tuple(lag for lag in original_lags if lag <= lag_cap)
@@ -2234,10 +2426,18 @@ def _mlforecast_fit_predict_resilient(
     prediction_intervals_factory: Callable[[], Any] | None,
     lag_transforms: dict[int, list[Any]] | None,
     exogenous_features: DriverFeatureBundle,
+    date_features_as_dummies: bool = False,
+    feature_recipe: FeatureRecipeSpec | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
     from mlforecast import MLForecast
 
     warnings_out: list[str] = []
+    from threadpoolctl import threadpool_limits
+    from nixtla_scaffold.ml_features import fit_options
+    from nixtla_scaffold.schema import FeatureRecipeSpec
+    recipe = feature_recipe or FeatureRecipeSpec()
+    advanced_fit_options = fit_options(recipe, horizon)
+
     df = _mlforecast_training_frame(history, exogenous_features)
     predict_kwargs: dict[str, Any] = {}
     if prediction_intervals_factory is not None:
@@ -2246,7 +2446,7 @@ def _mlforecast_fit_predict_resilient(
         predict_kwargs["X_df"] = exogenous_features.future
 
     def fit_kwargs() -> dict[str, Any]:
-        kwargs: dict[str, Any] = {}
+        kwargs: dict[str, Any] = dict(advanced_fit_options)
         if prediction_intervals_factory is not None:
             kwargs["prediction_intervals"] = prediction_intervals_factory()
         if exogenous_features.feature_columns:
@@ -2254,11 +2454,45 @@ def _mlforecast_fit_predict_resilient(
         return kwargs
 
     constructor_kwargs: dict[str, Any] = {}
+    if date_features_as_dummies:
+        constructor_kwargs["date_features_as_dummies"] = True
     if lag_transforms:
         constructor_kwargs["lag_transforms"] = lag_transforms
 
+    def attach_evidence(ml, forecast, options):
+        forecast = _normalize_statsforecast_output(forecast)
+        support = df.sort_values(["unique_id", "ds"]).copy()
+        after_warmup = support.groupby("unique_id", sort=False).cumcount().ge(max(lags, default=0))
+        finite = support[["y", *exogenous_features.feature_columns]].apply(
+            lambda column: np.isfinite(pd.to_numeric(column, errors="coerce")),
+        ).all(axis=1)
+        support = support.loc[after_warmup & finite, ["unique_id", "ds", "y"]]
+        training_support = {
+            "rows": len(support),
+            "sha256": hashlib.sha256(support.to_csv(index=False, lineterminator="\n").encode()).hexdigest(),
+            "scope": "finite supplied training rows after target-lag warmup; additional target-feature warmup is shared by the matched recipe",
+        }
+        forecast.attrs["candidate_evidence"] = ml_fit_evidence(
+            ml, forecast, history, execution={
+                "frequency": freq, "horizon": horizon, "lags": lags, "date_features": date_features,
+                "date_features_as_dummies": date_features_as_dummies,
+                "native_feature_recipe": recipe.to_dict(),
+                "actual_feature_names": list(ml.ts.features_order_),
+                "lag_transforms": lag_transforms or {}, "num_threads": 1, "estimator_threadpool_limit": 1,
+                "training_support": training_support,
+                "fit_options": options, "external_feature_columns": list(exogenous_features.feature_columns),
+                **({"driver_source_receipts": list(exogenous_features.source_receipts)}
+                   if exogenous_features.source_receipts else {}),
+            },
+        )
+        for fit in forecast.attrs["candidate_evidence"]["fits"]:
+            fit["fit_predict_seconds"] = perf_counter() - attempt_started
+            fit["timing_scope"] = "successful_attempt_shared_across_its_models"
+        return forecast
+
+    attempt_started = perf_counter()
     try:
-        with warnings.catch_warnings(record=True) as caught:
+        with warnings.catch_warnings(record=True) as caught, threadpool_limits(limits=1):
             warnings.simplefilter("always")
             ml = MLForecast(
                 models={alias: factory() for alias, factory in model_factories},
@@ -2268,19 +2502,21 @@ def _mlforecast_fit_predict_resilient(
                 num_threads=1,
                 **constructor_kwargs,
             )
-            ml.fit(df, **fit_kwargs())
+            options = fit_kwargs()
+            ml.fit(df, **options)
             explainability = _mlforecast_feature_importance(ml)
             forecast = ml.predict(h=horizon, **predict_kwargs)
         warnings_out.extend(_format_caught_warnings(caught, prefix="MLForecast warning"))
-        return _normalize_statsforecast_output(forecast), explainability, warnings_out
+        return attach_evidence(ml, forecast, options), explainability, warnings_out
     except Exception as exc:
         warnings_out.append(f"MLForecast full ladder failed; retrying candidate-by-candidate ({exc})")
 
     frames: list[pd.DataFrame] = []
     explainability_frames: list[pd.DataFrame] = []
     for alias, factory in model_factories:
+        attempt_started = perf_counter()
         try:
-            with warnings.catch_warnings(record=True) as caught:
+            with warnings.catch_warnings(record=True) as caught, threadpool_limits(limits=1):
                 warnings.simplefilter("always")
                 ml = MLForecast(
                     models={alias: factory()},
@@ -2290,17 +2526,19 @@ def _mlforecast_fit_predict_resilient(
                     num_threads=1,
                     **constructor_kwargs,
                 )
-                ml.fit(df, **fit_kwargs())
+                options = fit_kwargs()
+                ml.fit(df, **options)
                 explainability_frames.append(_mlforecast_feature_importance(ml))
                 forecast = ml.predict(h=horizon, **predict_kwargs)
-            frames.append(_normalize_statsforecast_output(forecast))
+            frames.append(attach_evidence(ml, forecast, options))
             warnings_out.extend(_format_caught_warnings(caught, prefix="MLForecast warning"))
         except Exception as model_exc:
             if prediction_intervals_factory is None:
                 warnings_out.append(f"MLForecast candidate {alias} failed and was skipped ({model_exc})")
                 continue
+            attempt_started = perf_counter()
             try:
-                with warnings.catch_warnings(record=True) as caught:
+                with warnings.catch_warnings(record=True) as caught, threadpool_limits(limits=1):
                     warnings.simplefilter("always")
                     ml = MLForecast(
                         models={alias: factory()},
@@ -2310,12 +2548,12 @@ def _mlforecast_fit_predict_resilient(
                         num_threads=1,
                         **constructor_kwargs,
                     )
-                    fallback_fit_kwargs = {"static_features": []} if exogenous_features.feature_columns else {}
+                    fallback_fit_kwargs = {**advanced_fit_options, **({"static_features": []} if exogenous_features.feature_columns else {})}
                     ml.fit(df, **fallback_fit_kwargs)
                     explainability_frames.append(_mlforecast_feature_importance(ml))
                     fallback_predict_kwargs = {"X_df": exogenous_features.future} if exogenous_features.feature_columns else {}
                     forecast = ml.predict(h=horizon, **fallback_predict_kwargs)
-                frames.append(_normalize_statsforecast_output(forecast))
+                frames.append(attach_evidence(ml, forecast, fallback_fit_kwargs))
                 warnings_out.extend(_format_caught_warnings(caught, prefix="MLForecast warning"))
                 warnings_out.append(
                     f"MLForecast candidate {alias} could not produce conformal intervals; kept point forecast only ({model_exc})"
@@ -2323,7 +2561,7 @@ def _mlforecast_fit_predict_resilient(
             except Exception as point_exc:
                 warnings_out.append(f"MLForecast candidate {alias} failed and was skipped ({point_exc})")
     if not frames:
-        raise RuntimeError("no MLForecast candidate model able to be fitted")
+        raise RuntimeError("no MLForecast candidate model able to be fitted: " + "; ".join(warnings_out))
     explainability = (
         pd.concat(explainability_frames, ignore_index=True)
         if explainability_frames
@@ -2346,15 +2584,20 @@ def _mlforecast_cross_validation_resilient(
     prediction_intervals_factory: Callable[[], Any] | None,
     lag_transforms: dict[int, list[Any]] | None,
     exogenous_features: DriverFeatureBundle,
+    date_features_as_dummies: bool = False,
+    feature_recipe: FeatureRecipeSpec | None = None,
 ) -> tuple[pd.DataFrame, list[str], bool]:
     from mlforecast import MLForecast
+    from nixtla_scaffold.ml_features import fit_options
+    from nixtla_scaffold.schema import FeatureRecipeSpec
+    advanced_fit_options = fit_options(feature_recipe or FeatureRecipeSpec(), horizon)
 
     warnings_out: list[str] = []
     df = _mlforecast_training_frame(history, exogenous_features)
     uses_exogenous_features = bool(exogenous_features.feature_columns) and set(exogenous_features.feature_columns).issubset(df.columns)
 
     def cv_kwargs() -> dict[str, Any]:
-        kwargs: dict[str, Any] = {}
+        kwargs: dict[str, Any] = dict(advanced_fit_options)
         if prediction_intervals_factory is None:
             if exogenous_features.feature_columns:
                 kwargs["static_features"] = []
@@ -2366,9 +2609,11 @@ def _mlforecast_cross_validation_resilient(
         return kwargs
 
     def point_cv_kwargs() -> dict[str, Any]:
-        return {"static_features": []} if exogenous_features.feature_columns else {}
+        return {**advanced_fit_options, **({"static_features": []} if exogenous_features.feature_columns else {})}
 
     constructor_kwargs: dict[str, Any] = {}
+    if date_features_as_dummies:
+        constructor_kwargs["date_features_as_dummies"] = True
     if lag_transforms:
         constructor_kwargs["lag_transforms"] = lag_transforms
 
@@ -2492,7 +2737,10 @@ def _driver_model_cv_delta(
 def select_champions(
     all_models: pd.DataFrame,
     metrics: pd.DataFrame,
+    *,
+    policy: SelectionPolicy | None = None,
 ) -> pd.DataFrame:
+    policy = policy or SelectionPolicy()
     model_cols = model_columns(all_models)
     available_by_series = _available_forecast_models_by_series(all_models, model_cols)
     fallback = pd.DataFrame(
@@ -2506,29 +2754,61 @@ def select_champions(
         ]
     )
     if metrics.empty:
+        if policy.objective == "monthly_landing":
+            raise ValueError("Monthly landing selection requires complete closed-month and next-28 backtests")
         return fallback
+    if "selection_eligible" in metrics:
+        metrics = metrics.loc[metrics["selection_eligible"].fillna(False)].copy()
+        if metrics.empty:
+            if policy.objective == "monthly_landing":
+                raise ValueError("Monthly landing selection has no eligible complete candidate")
+            return fallback
+
+    if policy.objective == "monthly_landing":
+        scores = ["landing_mape_pct", "next28_mape_pct", "daily_wmape_pct"]
+        if not set(scores).issubset(metrics):
+            raise ValueError("Monthly landing scorecard is missing; daily errors cannot substitute for it")
+        usable = metrics.loc[np.isfinite(metrics[scores].to_numpy(float)).all(axis=1)].copy()
+        usable = _filter_metrics_to_available_forecasts(usable, available_by_series)
+        missing = set(all_models.unique_id.astype(str)) - set(usable.unique_id.astype(str))
+        if missing:
+            raise ValueError(f"Monthly landing scorecard has no complete comparable candidate for {sorted(missing)}")
+        usable = usable.sort_values(["unique_id", *scores, "model"], kind="stable")
+        chosen = usable.drop_duplicates("unique_id").rename(columns={"model": "selected_model"})
+        chosen["selection_reason"] = "lowest Landing MAPE; ties: Next28 MAPE, date-averaged WMAPE, stable model name"
+        chosen = _apply_naive_guard(chosen, usable, sort_col=scores[0], margin=policy.naive_guard_min_improvement)
+        return _append_horizon_selection_reason(chosen)
 
     # Use RMSE as primary metric (penalizes large errors quadratically)
     # Fall back to MAE if RMSE is not available
     sort_col = "rmse" if "rmse" in metrics.columns else "mae"
-    usable = metrics.dropna(subset=[sort_col]).copy()
+    usable = metrics.loc[np.isfinite(pd.to_numeric(metrics[sort_col], errors="coerce"))].copy()
     usable = _filter_metrics_to_available_forecasts(usable, available_by_series)
     if usable.empty:
-        usable = metrics.dropna(subset=["mae"]).copy()
+        usable = metrics.loc[np.isfinite(pd.to_numeric(metrics["mae"], errors="coerce"))].copy()
         sort_col = "mae"
         usable = _filter_metrics_to_available_forecasts(usable, available_by_series)
     if usable.empty:
         return fallback
-    usable = usable.sort_values(["unique_id", sort_col, "mae", "abs_bias"])
-    chosen = usable.groupby("unique_id", as_index=False).first()
+    score_cols = list(dict.fromkeys([sort_col, "mae", "abs_bias"]))
+    usable = usable.sort_values(["unique_id", *score_cols, "model"], kind="stable")
+    tied = usable.groupby(["unique_id", *score_cols], dropna=False)["model"]
+    usable["_tied_models"] = tied.transform(lambda models: ", ".join(sorted(set(models))))
+    usable["_tie_count"] = tied.transform("nunique")
+    chosen = usable.drop_duplicates("unique_id", keep="first").copy()
     chosen = chosen.rename(columns={"model": "selected_model"})
     chosen["selection_reason"] = f"lowest backtested {sort_col.upper()}, tie-broken by MAE and bias"
+    tie_mask = chosen["_tie_count"] > 1
+    chosen.loc[tie_mask, "selection_reason"] += (
+        "; tied available metrics: " + chosen.loc[tie_mask, "_tied_models"]
+        + "; deterministic model-name order, not evidence of superiority"
+    )
     keep_cols = ["unique_id", "selected_model", "selection_reason"]
     for col in _selection_metric_columns(chosen):
         if col in chosen.columns:
             keep_cols.append(col)
     chosen = chosen[keep_cols]
-    chosen = _apply_naive_guard(chosen, usable, sort_col=sort_col)
+    chosen = _apply_naive_guard(chosen, usable, sort_col=sort_col, margin=policy.naive_guard_min_improvement)
     chosen = _append_horizon_selection_reason(chosen)
     result_cols = ["unique_id", "selected_model", "selection_reason"]
     for col in _selection_metric_columns(chosen):
@@ -2555,11 +2835,12 @@ def _append_horizon_selection_reason(selection: pd.DataFrame) -> pd.DataFrame:
             continue
         if selected_h >= requested_h:
             try:
-                windows = int(row.get("cv_windows"))
+                windows = int(row.get("cv_disjoint_windows", row.get("cv_windows")))
             except (TypeError, ValueError):
                 windows = None
             if windows is not None and windows < 2:
-                suffix = f"validated through requested horizon {requested_h} with only {windows} CV window(s); planning claim limited"
+                kind = "disjoint full-horizon window(s)" if "cv_disjoint_windows" in row else "CV window(s)"
+                suffix = f"evaluated through requested horizon {requested_h} with only {windows} {kind}; planning claim limited"
             else:
                 suffix = f"validated through requested horizon {requested_h}"
         else:
@@ -2601,15 +2882,18 @@ def _filter_metrics_to_available_forecasts(
     return metrics.loc[mask].copy()
 
 
-def _apply_naive_guard(chosen: pd.DataFrame, all_metrics: pd.DataFrame, *, sort_col: str = "rmse") -> pd.DataFrame:
-    """If the selected model doesn't beat naive by ≥5% on the primary metric
-    (RMSE by default), fall back to naive. Penalizes big errors more when using RMSE."""
+def _apply_naive_guard(
+    chosen: pd.DataFrame, all_metrics: pd.DataFrame, *, sort_col: str = "rmse",
+    margin: float = SelectionPolicy().naive_guard_min_improvement,
+) -> pd.DataFrame:
+    """Retain the reference unless the declared practical improvement is achieved."""
     naive_models = {"Naive", "SeasonalNaive"}
     naive_metrics = all_metrics[all_metrics["model"].isin(naive_models)].copy()
     if naive_metrics.empty:
         return chosen
     metric_col = sort_col if sort_col in naive_metrics.columns else "mae"
-    best_naive = naive_metrics.sort_values(["unique_id", metric_col, "mae"]).groupby("unique_id", as_index=False).first()
+    ties = ["next28_mape_pct", "daily_wmape_pct"] if metric_col == "landing_mape_pct" else ["mae"]
+    best_naive = naive_metrics.sort_values(["unique_id", metric_col, *ties, "model"], kind="stable").drop_duplicates("unique_id", keep="first")
     rename_map = {"model": "naive_model"}
     keep_naive = ["unique_id", "naive_model"]
     for col in _selection_metric_columns(best_naive):
@@ -2619,14 +2903,16 @@ def _apply_naive_guard(chosen: pd.DataFrame, all_metrics: pd.DataFrame, *, sort_
     best_naive = best_naive.rename(columns=rename_map)[keep_naive]
     merged = chosen.merge(best_naive, on="unique_id", how="left")
     naive_metric_col = f"naive_{metric_col}"
-    margin = 0.05
     guard_mask = (
         merged["selected_model"].notna()
         & ~merged["selected_model"].isin(naive_models)
         & merged[metric_col].notna()
         & merged[naive_metric_col].notna()
-        & (merged[naive_metric_col] > 0)
-        & ((1.0 - merged[metric_col] / merged[naive_metric_col]) < margin)
+        & (merged[naive_metric_col] >= 0)
+        & (
+            (merged[metric_col] > merged[naive_metric_col] * (1.0 - margin))
+            | ((merged[naive_metric_col] == 0) & (merged[metric_col] == 0))
+        )
     )
     if guard_mask.any():
         merged.loc[guard_mask, "selected_model"] = merged.loc[guard_mask, "naive_model"]
@@ -2635,7 +2921,7 @@ def _apply_naive_guard(chosen: pd.DataFrame, all_metrics: pd.DataFrame, *, sort_
             if col in merged.columns and nc in merged.columns:
                 merged.loc[guard_mask, col] = merged.loc[guard_mask, nc]
         merged.loc[guard_mask, "selection_reason"] = (
-            f"naive guard: selected model did not beat naive by ≥5% on backtested {metric_col.upper()}; "
+            f"naive guard: selected model did not improve on naive by at least {margin:.0%} on backtested {metric_col.upper()}, or tied its zero error; "
             "fell back to best naive baseline per benchmark guardrail"
         )
     result_cols = ["unique_id", "selected_model", "selection_reason"]
@@ -2673,7 +2959,7 @@ def model_columns(frame: pd.DataFrame) -> list[str]:
     return [
         col
         for col in frame.columns
-        if col not in {"unique_id", "ds"} and "-lo-" not in col and "-hi-" not in col
+        if col not in {"unique_id", "ds", "available_at"} and "-lo-" not in col and "-hi-" not in col
     ]
 
 
@@ -2723,6 +3009,8 @@ def _statsforecast_backtest(
     sklearn_aliases: list[str] | None = None,
 ) -> tuple[pd.DataFrame, list[str], pd.DataFrame]:
     sklearn_aliases = sklearn_aliases or []
+    if spec.evaluation.strategy == "none":
+        return _empty_backtest_metrics(), [], _empty_backtest_predictions()
     metric_frames: list[pd.DataFrame] = []
     prediction_frames: list[pd.DataFrame] = []
     all_warnings: list[str] = []
@@ -2730,7 +3018,7 @@ def _statsforecast_backtest(
         grp = grp.sort_values("ds")
         n = len(grp)
         season = profile.season_length
-        h, n_windows, step_size = _adaptive_cv_params(n, spec.horizon, season, strict=spec.strict_cv_horizon)
+        h, n_windows, step_size = _adaptive_cv_params(n, spec.horizon, season, strict=spec.strict_cv_horizon, policy=spec.evaluation)
         if n_windows < 1:
             all_warnings.append(f"{uid}: skipped backtest — only {n} obs, need ≥{h + h + 1} for 1 window")
             continue
@@ -2823,7 +3111,7 @@ def _statsforecast_backtest(
         if spec.weighted_ensemble:
             cv = _add_weighted_ensemble_to_cv(cv)
         metrics = _attach_cv_metadata(
-            _metrics_from_cv(cv, scales_by_series=_error_scale_map(grp, season)),
+            _metrics_from_cv(cv, scales_by_series=_error_scale_map(grp, season, cv)),
             requested_horizon=spec.horizon,
             selection_horizon=h,
             n_windows=n_windows,
@@ -3066,7 +3354,7 @@ def _baseline_backtest(
     for uid, grp in history.groupby("unique_id", sort=True):
         grp = grp.sort_values("ds").reset_index(drop=True)
         n = len(grp)
-        h, n_windows, step_size = _adaptive_cv_params(n, spec.horizon, season, strict=spec.strict_cv_horizon)
+        h, n_windows, step_size = _adaptive_cv_params(n, spec.horizon, season, strict=spec.strict_cv_horizon, policy=spec.evaluation)
         if h < 1 or n_windows < 1:
             continue
         metadata_rows.append(
@@ -3098,10 +3386,71 @@ def _baseline_backtest(
     cv = _filter_prediction_frame_by_allowlist(cv, spec, context="baseline backtest predictions")
     if spec.weighted_ensemble:
         cv = _add_weighted_ensemble_to_cv(cv)
-    metrics = _metrics_from_cv(cv, scales_by_series=_error_scale_map(history, season))
+    metrics = _metrics_from_cv(cv, scales_by_series=_error_scale_map(history, season, cv))
     if metadata_rows:
         metrics = metrics.merge(pd.DataFrame(metadata_rows), on="unique_id", how="left")
     return metrics, cv
+
+
+def paired_comparison_result(result: ModelResult, history: pd.DataFrame, profile: DataProfile, spec: ForecastSpec) -> ModelResult:
+    from dataclasses import replace
+    if spec.evaluation.strategy == "rolling-origin":
+        from nixtla_scaffold.evaluation import frozen_comparison_result
+        return frozen_comparison_result(result, history, profile, spec)
+    if result.backtest_predictions.empty:
+        return result
+    cv = result.backtest_predictions
+    columns = [col for col in model_columns(cv) if col not in {"cutoff", "y"}]
+    scored, receipts, coverage_warnings = [], [], []
+    scales = _error_scale_map(history, profile.season_length, cv)
+    for uid, group in cv.groupby("unique_id", sort=True):
+        future = result.forecast[result.forecast["unique_id"].astype(str) == str(uid)]
+        eligible = [col for col in columns if col in future and not future.empty
+                    and np.isfinite(future[col]).all() and np.isfinite(group[col]).any()]
+        if not eligible:
+            receipts.append({"unique_id": str(uid), "paired_rows": 0, "excluded_rows": len(group), "models": []})
+            continue
+        paired = group.loc[np.isfinite(group[["y", *eligible]]).all(axis=1), ["unique_id", "ds", "cutoff", "y", *eligible]]
+        missing = {model: int((~np.isfinite(group[model])).sum()) for model in eligible if not np.isfinite(group[model]).all()}
+        available_windows, paired_windows = group["cutoff"].nunique(), paired["cutoff"].nunique()
+        receipts.append({"unique_id": str(uid), "paired_rows": len(paired), "excluded_rows": len(group) - len(paired),
+                         "models": eligible, "missing_rows_by_model": missing,
+                         "available_windows": int(available_windows), "paired_windows": int(paired_windows)})
+        if len(paired) < len(group):
+            coverage_warnings.append(
+                f"{uid}: paired tournament retains {len(paired)}/{len(group)} rows and "
+                f"{paired_windows}/{available_windows} origins; missing model rows: {missing}. "
+                "This common-support ranking does not use all available validation evidence."
+            )
+        if paired.empty:
+            continue
+        metrics = _metrics_from_cv(paired, scales_by_series=scales)
+        prefixes, cutoffs = [], []
+        for cutoff, window in paired.groupby("cutoff", sort=True):
+            observed = set(pd.to_datetime(window["ds"]))
+            prefix = 0
+            for period in pd.date_range(cutoff, periods=spec.horizon + 1, freq=profile.freq)[1:]:
+                if period not in observed:
+                    break
+                prefix += 1
+            prefixes.append(prefix)
+            cutoffs.append(pd.Timestamp(cutoff))
+        steps = {len(pd.date_range(left, right, freq=profile.freq)) - 1 for left, right in zip(cutoffs, cutoffs[1:])}
+        metrics["requested_horizon"] = spec.horizon
+        metrics["selection_horizon"] = min(prefixes)
+        metrics["cv_windows"] = len(cutoffs)
+        metrics["cv_step_size"] = next(iter(steps)) if len(steps) == 1 else None
+        metrics["cv_horizon_matches_requested"] = min(prefixes) == spec.horizon
+        metrics["comparison_support"] = "exact_paired_finite_rows"
+        scored.append(metrics)
+    return replace(result, backtest_metrics=pd.concat(scored, ignore_index=True) if scored else _empty_backtest_metrics(),
+                   model_policy_resolution={**result.model_policy_resolution, "comparison": {
+                       "contract": "series_origin_period_shared_finite_snapshot", "cohorts": receipts,
+                       "actual_vintage": "input snapshot; historical publication vintages are not certified",
+                       "scaled_error_reference": "training prefix through each series' earliest supplied backtest cutoff; fixed across origins",
+                   }},
+                   warnings=(*result.warnings, *coverage_warnings,
+                             "Tournament scores use exact shared finite rows; excluded coverage remains in the comparison receipt."))
 
 
 def _metrics_from_cv(
@@ -3115,13 +3464,14 @@ def _metrics_from_cv(
     model_cols = [col for col in model_columns(cv) if col not in {"cutoff", "y"}]
     rows: list[dict[str, Any]] = []
     for uid, grp in cv.groupby("unique_id", sort=True):
-        actual = grp["y"].to_numpy(dtype="float64")
-        denom = float(np.nansum(np.abs(actual)))
+        actual = grp["y"].to_numpy(dtype="float64", na_value=np.nan)
         for model in model_cols:
-            pred = grp[model].to_numpy(dtype="float64")
-            err = pred - actual
-            if not np.isfinite(err).any():
+            pred = grp[model].to_numpy(dtype="float64", na_value=np.nan)
+            valid = np.isfinite(actual) & np.isfinite(pred)
+            if not valid.any():
                 continue
+            err = pred[valid] - actual[valid]
+            denom = float(np.abs(actual[valid]).sum())
             mae = float(np.nanmean(np.abs(err)))
             rmse = float(np.sqrt(np.nanmean(err ** 2)))
             wape = float(np.nansum(np.abs(err)) / denom) if denom else np.nan
@@ -3226,7 +3576,13 @@ def _cv_horizon_warnings(metrics: pd.DataFrame) -> list[str]:
 
 
 def _selection_metric_columns(frame: pd.DataFrame) -> list[str]:
+    from nixtla_scaffold.finance import FINANCE_METRICS
     ordered = [
+        *FINANCE_METRICS, "landing_windows", "next28_windows",
+        "selection_eligible",
+        "comparison_support",
+        "expected_observations",
+        "cv_disjoint_windows",
         "rmse",
         "wape",
         "mae",
@@ -3244,21 +3600,22 @@ def _selection_metric_columns(frame: pd.DataFrame) -> list[str]:
     return [column for column in ordered if column in frame.columns]
 
 
-def _error_scale_map(history: pd.DataFrame, season_length: int) -> dict[str, dict[str, float | None]]:
+def _error_scale_map(history: pd.DataFrame, season_length: int, cv: pd.DataFrame) -> dict[str, dict[str, float | None]]:
+    """Use one shared training-only reference per series, never the holdout tail."""
+    from nixtla_scaffold.external_scoring import _cutoff_scale
+
     scales: dict[str, dict[str, float | None]] = {}
-    lag = max(1, int(season_length or 1))
+    cutoffs = (
+        cv.assign(unique_id=cv["unique_id"].astype(str), cutoff=pd.to_datetime(cv["cutoff"]))
+        .groupby("unique_id")["cutoff"].min()
+        if {"unique_id", "cutoff"}.issubset(cv.columns)
+        else pd.Series(dtype="datetime64[ns]")
+    )
     for uid, grp in history.groupby("unique_id", sort=True):
-        y = pd.to_numeric(grp.sort_values("ds")["y"], errors="coerce").dropna().to_numpy(dtype="float64")
-        active_lag = lag if lag > 1 and len(y) > lag else 1
-        if len(y) <= active_lag:
-            scales[str(uid)] = {"mase_scale": None, "rmsse_scale": None}
-            continue
-        diff = y[active_lag:] - y[:-active_lag]
-        abs_scale = float(np.nanmean(np.abs(diff)))
-        squared_scale = float(np.sqrt(np.nanmean(diff ** 2)))
+        reference = _cutoff_scale(grp, cutoffs.get(str(uid), pd.NaT), season_length=season_length)
         scales[str(uid)] = {
-            "mase_scale": abs_scale if np.isfinite(abs_scale) and abs_scale > 0 else None,
-            "rmsse_scale": squared_scale if np.isfinite(squared_scale) and squared_scale > 0 else None,
+            "mase_scale": reference["mase_scale"],
+            "rmsse_scale": reference["rmsse_scale"],
         }
     return scales
 
@@ -3277,7 +3634,11 @@ def _add_weighted_ensemble_to_cv(cv: pd.DataFrame, *, common_support: bool = Fal
         cutoffs = sorted(cutoff_values.dropna().unique())
         for cutoff in cutoffs:
             cutoff_mask = cutoff_values == cutoff
-            prior = grp.loc[ds_values <= cutoff]
+            prior_mask = (cutoff_values < cutoff) & (ds_values <= cutoff)
+            if "available_at" in grp:
+                available = pd.to_datetime(grp["available_at"], errors="coerce")
+                prior_mask &= available.notna() & (available <= cutoff)
+            prior = grp.loc[prior_mask]
             if prior.empty:
                 continue
             if use_common_support:
@@ -3491,7 +3852,7 @@ def _empty_model_weights() -> pd.DataFrame:
 
 
 def _empty_model_explainability() -> pd.DataFrame:
-    return pd.DataFrame(columns=["engine", "model", "feature", "importance", "importance_type", "interpretation"])
+    return pd.DataFrame(columns=["engine", "model", "horizon_step", "feature", "importance", "importance_type", "interpretation"])
 
 
 def _mlforecast_feature_importance(ml: Any) -> pd.DataFrame:
@@ -3500,24 +3861,34 @@ def _mlforecast_feature_importance(ml: Any) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     models = getattr(ml, "models_", {}) or {}
     fallback_features = list(getattr(getattr(ml, "ts", None), "features_order_", []) or getattr(getattr(ml, "ts", None), "features", []) or [])
-    for model_name, estimator in models.items():
-        importances, importance_type = _estimator_importances(estimator)
-        if importances is None:
-            continue
-        features = list(getattr(_unwrap_pipeline_estimator(estimator), "feature_name_", None) or fallback_features)
-        if not features:
-            features = [f"feature_{idx}" for idx in range(len(importances))]
-        for feature, importance in zip(features, importances, strict=False):
-            rows.append(
-                {
+    for model_name, fitted in models.items():
+        estimators = sorted(fitted.items()) if isinstance(fitted, dict) else [(None, fitted)]
+        for horizon, estimator in estimators:
+            importances, importance_type = _estimator_importances(estimator)
+            if importances is None:
+                continue
+            features = fallback_features
+            if horizon is not None and getattr(ml.ts, "horizon_features_", {}):
+                exog = ml.ts._get_dynamic_exog_cols(features)
+                common, mapping = ml.ts._split_horizon_exog_cols(exog, ml.ts.horizon_features_)
+                features = ml.ts._get_cols_for_horizon(horizon, common, mapping, exog)
+            core = _unwrap_pipeline_estimator(estimator)
+            names = getattr(estimator, "feature_names_in_", None)
+            if names is None:
+                names = getattr(core, "feature_name_", None)
+            features = list(names) if names is not None else features
+            if not features or len(features) != len(importances):
+                raise ValueError(f"{model_name}: fitted feature schema does not match importance vector at horizon {horizon}")
+            for feature, importance in zip(features, importances, strict=True):
+                rows.append({
                     "engine": "mlforecast",
                     "model": str(model_name),
+                    "horizon_step": horizon + 1 if horizon is not None else None,
                     "feature": str(feature),
                     "importance": float(importance),
                     "importance_type": importance_type,
                     "interpretation": _feature_interpretation(str(feature)),
-                }
-            )
+                })
     if not rows:
         return _empty_model_explainability()
     return pd.DataFrame(rows).sort_values(["model", "importance", "feature"], ascending=[True, False, True]).reset_index(drop=True)
@@ -3627,12 +3998,13 @@ def _seasonal_naive(y: np.ndarray, season_length: int, horizon: int) -> np.ndarr
     return np.tile(season, reps)[:horizon]
 
 
-def _interval_windows(min_obs: int, horizon: int, season_length: int) -> int:
-    min_train = max(8, season_length if season_length > 1 else 4)
+def _interval_windows(min_obs: int, horizon: int, season_length: int, *, max_windows: int = 3,
+                      minimum_training: int | None = None) -> int:
+    min_train = minimum_training or max(8, season_length if season_length > 1 else 4)
     available = min_obs - min_train
     if available < horizon:
         return 0
-    return max(0, min(3, available // max(1, horizon)))
+    return max(0, min(max_windows, available // max(1, horizon)))
 
 
 def _adaptive_cv_params(
@@ -3641,6 +4013,7 @@ def _adaptive_cv_params(
     season_length: int,
     *,
     strict: bool = False,
+    policy: EvaluationPolicy | None = None,
 ) -> tuple[int, int, int]:
     """Compute per-series backtest parameters adapted to history depth and seasonality.
 
@@ -3657,6 +4030,9 @@ def _adaptive_cv_params(
     - For short series, reduce windows before reducing horizon
     - For very short series (<2*season), reduce horizon to 1/4 of history
     """
+    if policy is not None and policy.strategy != "legacy":
+        from nixtla_scaffold.evaluation import cv_parameters
+        return cv_parameters(n_obs, requested_horizon, season_length, policy, strict=strict)
     if n_obs < 3:
         return 0, 0, 1
 
@@ -3722,7 +4098,9 @@ def _merge_statsforecast_frames(frames: list[pd.DataFrame], *, keys: list[str]) 
             merged = merged.merge(frame[keys + value_cols], on=keys, how="outer")
     if merged is None:
         return pd.DataFrame(columns=keys)
-    return merged.sort_values(keys).reset_index(drop=True)
+    result = merged.sort_values(keys).reset_index(drop=True)
+    result.attrs["candidate_evidence"] = merge_evidence(*(frame.attrs.get("candidate_evidence", {}) for frame in frames))
+    return result
 
 
 def _is_intermittent_series(y: np.ndarray) -> bool:

@@ -24,7 +24,7 @@ def load_forecast_dataset(
     time_col = time_col or spec.time_col
     target_col = target_col or spec.target_col
 
-    raw = read_tabular_source(source, sheet=sheet)
+    raw = read_tabular_source(source, sheet=sheet, text_columns=(id_col,))
 
     return canonicalize_forecast_frame(
         raw,
@@ -34,7 +34,10 @@ def load_forecast_dataset(
     )
 
 
-def read_tabular_source(source: str | Path | pd.DataFrame, *, sheet: str | int | None = None) -> pd.DataFrame:
+def read_tabular_source(
+    source: str | Path | pd.DataFrame, *, sheet: str | int | None = None,
+    text_columns: tuple[str, ...] = (),
+) -> pd.DataFrame:
     if isinstance(source, pd.DataFrame):
         return source.copy()
 
@@ -43,9 +46,10 @@ def read_tabular_source(source: str | Path | pd.DataFrame, *, sheet: str | int |
         raise FileNotFoundError(path)
     if path.suffix.lower() == ".xls":
         raise ValueError("legacy .xls files are not supported; save as .xlsx or CSV before forecasting")
+    dtype = {column: str for column in text_columns}
     if path.suffix.lower() in {".xlsx", ".xlsm"}:
-        return pd.read_excel(path, sheet_name=sheet or 0, keep_default_na=False, na_values=[""])
-    return pd.read_csv(path, keep_default_na=False, na_values=[""])
+        return pd.read_excel(path, sheet_name=sheet or 0, keep_default_na=False, na_values=[""], dtype=dtype)
+    return pd.read_csv(path, keep_default_na=False, na_values=[""], dtype=dtype)
 
 
 def canonicalize_forecast_frame(
@@ -143,4 +147,3 @@ def _reject_implicit_multi_series(df: pd.DataFrame, *, time_col: str) -> None:
         "Pass --id-col or rename the series identifier to unique_id."
         + hints
     )
-

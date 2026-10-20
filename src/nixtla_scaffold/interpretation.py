@@ -438,11 +438,16 @@ def _naive_comparison(run: Any) -> dict[str, Any]:
         return {"series": [], "notes": ["No backtest metrics available for naive comparison."]}
     naive_models = {"Naive", "SeasonalNaive"}
     naive_metrics = run.backtest_metrics[run.backtest_metrics["model"].isin(naive_models)].copy()
+    if "selection_eligible" in naive_metrics:
+        naive_metrics = naive_metrics.loc[naive_metrics["selection_eligible"].fillna(False)]
     if naive_metrics.empty:
-        return {"series": [], "notes": ["No naive benchmark metrics found in backtest results."]}
-    metric = "rmse" if "rmse" in run.backtest_metrics.columns and "rmse" in run.model_selection.columns else "wape"
+        return {"series": [], "notes": ["No eligible naive benchmark metrics found in backtest results."]}
+    metric = next((name for name in ("rmse", "mae", "wape")
+                   if name in naive_metrics and name in run.model_selection), None)
+    if metric is None:
+        return {"series": [], "notes": ["The directional selection has no comparable backtest score; partial candidate metrics are diagnostic only."]}
     tie_breakers = [col for col in ["mae", "wape", "bias"] if col in naive_metrics.columns and col != metric]
-    best_naive = naive_metrics.sort_values(["unique_id", metric, *tie_breakers]).groupby("unique_id", as_index=False).first()
+    best_naive = naive_metrics.sort_values(["unique_id", metric, *tie_breakers]).drop_duplicates("unique_id")
     best_naive = best_naive.rename(columns={"model": "naive_model", metric: "naive_metric"})
     merged = run.model_selection[["unique_id", "selected_model", metric]].rename(columns={metric: "selected_metric"}).merge(
         best_naive[["unique_id", "naive_model", "naive_metric"]], on="unique_id", how="left"

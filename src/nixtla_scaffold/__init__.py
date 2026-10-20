@@ -81,6 +81,8 @@ from nixtla_scaffold.finn_bridge import (
     score_finn_forecasts,
 )
 from nixtla_scaffold.forecast import run_forecast
+from nixtla_scaffold.analysis import analyze, resume_analysis
+from nixtla_scaffold.schema import AnomalySpec, CalendarSpec
 from nixtla_scaffold.headline import ExecutiveHeadline, build_executive_headline
 from nixtla_scaffold.hierarchy import aggregate_hierarchy_frame, hierarchy_coherence, hierarchy_summary, reconcile_hierarchy_forecast, reconcile_hierarchy_forecast_both
 from nixtla_scaffold.knowledge import load_agent_skill
@@ -113,7 +115,8 @@ from nixtla_scaffold.ops import (
     write_operational_receipts,
 )
 from nixtla_scaffold.pipelines import PIPELINE_SCHEMA_VERSION, refresh_pipeline, run_pipeline
-from nixtla_scaffold.presets import PRESET_NAMES, forecast_spec_preset, preset_catalog
+from nixtla_scaffold.presets import PRESET_NAMES, forecast_spec_preset, preset_catalog, resolve_forecast_spec
+from nixtla_scaffold.production import ProductionReleaseError
 from nixtla_scaffold.profile import profile_dataset
 from nixtla_scaffold.release_gates import OPTIONAL_EXTRAS, ReleaseGateResult, format_release_gate_console_summary, run_release_gates
 from nixtla_scaffold.reports import build_html_report, build_streamlit_app, write_report_artifacts
@@ -127,15 +130,22 @@ from nixtla_scaffold.schema import (
     CustomModelSpec,
     DataProfile,
     DriverEvent,
+    DriverSnapshotGrant,
+    DriverSourceContract,
     EnsembleSpec,
+    EvaluationPolicy,
+    ModelConfiguration,
     FeatureRecipeSpec,
+    IntervalCalibrationSpec,
     ForecastContext,
     ForecastRun,
     ForecastSpec,
     KnownFutureRegressor,
     ParallelSpec,
     PromotionPolicy,
+    ProductionPolicy,
     ResearchBudget,
+    SelectionPolicy,
     SeriesProfile,
     SignalContract,
     SignalNeed,
@@ -160,6 +170,12 @@ __all__ = [
     "ForecastContext",
     "ForecastRun",
     "ForecastSpec",
+    "ProductionPolicy",
+    "ProductionReleaseError",
+    "SelectionPolicy",
+    "EvaluationPolicy",
+    "ModelConfiguration",
+    "resolve_forecast_spec",
     "GOLDEN_SCENARIOS",
     "SCENARIO_ALIASES",
     "SCENARIO_DESCRIPTIONS",
@@ -203,6 +219,7 @@ __all__ = [
     "ContextSource",
     "EnsembleSpec",
     "FeatureRecipeSpec",
+    "IntervalCalibrationSpec",
     "ParallelSpec",
     "PromotionPolicy",
     "ResearchBudget",
@@ -230,6 +247,8 @@ __all__ = [
     "LedgerResult",
     "ReleaseGateResult",
     "DriverEvent",
+    "DriverSnapshotGrant",
+    "DriverSourceContract",
     "KnownFutureRegressor",
     "SeriesProfile",
     "SetupAnswers",
@@ -284,6 +303,8 @@ __all__ = [
     "reconcile_hierarchy_forecast_both",
     "register_run",
     "run_forecast",
+    "analyze",
+    "resume_analysis",
     "run_experiment",
     "run_optimizer",
     "run_finn_bridge",

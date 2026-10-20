@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from hashlib import sha256
 from collections.abc import Iterable
 from typing import Any
 
@@ -8,10 +9,11 @@ import numpy as np
 import pandas as pd
 
 from nixtla_scaffold.model_families import model_family
-from nixtla_scaffold.schema import ForecastRun
+from nixtla_scaffold.schema import ForecastRun, ForecastSpec
 
-ENSEMBLE_LAB_SCHEMA_VERSION = "1.0"
+ENSEMBLE_LAB_SCHEMA_VERSION = "1.1"
 ENSEMBLE_LAB_POLICIES = ("top_k_average", "family_diverse_average")
+_MONTHLY_RANK = ["landing_mape_pct", "next28_mape_pct", "daily_wmape_pct"]
 ENSEMBLE_BACKTEST_COLUMNS = [
     "schema_version",
     "policy",
@@ -41,6 +43,13 @@ ENSEMBLE_SELECTION_COLUMNS = [
     "selected_advisory_policy",
     "scoring_mode",
     "advisory_only",
+    "expected_observations",
+    "comparison_eligible",
+    "reference_model",
+    "reference_rmse",
+    "paired_rmse_improvement",
+    "objective",
+    *_MONTHLY_RANK,
 ]
 ENSEMBLE_POLICY_RECEIPT_COLUMNS = [
     "schema_version",
@@ -54,6 +63,7 @@ ENSEMBLE_POLICY_RECEIPT_COLUMNS = [
     "forecast_rows",
     "advisory_only",
     "notes",
+    "objective",
 ]
 ENSEMBLE_FORECAST_COLUMNS = [
     "schema_version",
@@ -69,6 +79,7 @@ ENSEMBLE_FORECAST_COLUMNS = [
 ]
 
 _META_COLUMNS = {
+    "available_at",
     "unique_id",
     "ds",
     "cutoff",
@@ -116,6 +127,39 @@ def build_ensemble_lab_artifacts(run: ForecastRun) -> dict[str, pd.DataFrame]:
     }
 
 
+def selected_ensemble_comparisons(backtest: pd.DataFrame, selection: pd.DataFrame) -> list[dict]:
+    """Freeze the component winner, then rescore it on the blend's later cohort."""
+    if backtest.empty or "WeightedEnsemble" not in backtest or selection.empty:
+        return []
+    receipts = []
+    for choice in selection.to_dict("records"):
+        uid, reference = str(choice["unique_id"]), choice["selected_model"]
+        if reference == "WeightedEnsemble" or reference not in backtest:
+            continue
+        group = backtest.loc[backtest.unique_id.astype(str).eq(uid)].sort_values(["cutoff", "ds"])
+        supported = group.loc[np.isfinite(group["WeightedEnsemble"])]
+        if supported.empty:
+            continue
+        cohort = group.loc[group.cutoff.ge(supported.cutoff.min())]
+        valid = np.isfinite(cohort[["y", reference, "WeightedEnsemble"]]).all(axis=1)
+        paired = cohort.loc[valid]
+        metrics = []
+        for model in (reference, "WeightedEnsemble"):
+            error = paired[model] - paired["y"]
+            metrics.append({"model": model, "rmse": float(np.sqrt(np.mean(error ** 2))) if len(error) else None,
+                            "mae": float(error.abs().mean()) if len(error) else None,
+                            "bias": float(error.mean()) if len(error) else None})
+        receipts.append({
+            "unique_id": uid, "reference_model": reference, "reference_source": "frozen_full_component_tournament",
+            "planned_later_rows": len(cohort), "paired_rows": len(paired), "comparison_eligible": bool(valid.all()),
+            "warmup_rows": len(group) - len(cohort), "metrics": metrics,
+            "cohort_fingerprint": sha256(paired[["unique_id", "cutoff", "ds"]].to_csv(index=False).encode()).hexdigest(),
+            "advisory_only": True, "confirmation_status": "not_independently_confirmed",
+            "promotion_recommended": False,
+        })
+    return receipts
+
+
 def _build_ensemble_backtest(run: ForecastRun, policies: tuple[str, ...], candidate_models: list[str]) -> pd.DataFrame:
     cv = run.backtest_predictions.copy()
     if cv.empty or "cutoff" not in cv.columns or "y" not in cv.columns:
@@ -128,22 +172,22 @@ def _build_ensemble_backtest(run: ForecastRun, policies: tuple[str, ...], candid
         series_cv = series_cv.sort_values(["cutoff", "ds"])
         cutoffs = [cutoff for cutoff in series_cv["cutoff"].dropna().drop_duplicates().sort_values()]
         for cutoff in cutoffs:
-            prior = series_cv[series_cv["cutoff"] < cutoff]
+            prior = observable_backtest_rows(series_cv, cutoff)
+            if run.spec.selection_policy.objective == "monthly_landing":
+                prior = _complete_origins(prior, run.spec.horizon)
             current = series_cv[series_cv["cutoff"] == cutoff]
             if prior.empty or current.empty:
                 continue
             for policy in policies:
-                selected_models = _select_policy_models(policy, prior, candidate_models, run.spec.ensemble.max_models)
-                if not selected_models:
-                    continue
-                predictions = current[selected_models].apply(pd.to_numeric, errors="coerce").mean(axis=1, skipna=True)
+                selected_models = _select_policy_models(
+                    policy, prior, candidate_models, run.spec.ensemble.max_models,
+                    spec=run.spec, history=_observed_history(run),
+                )
+                predictions = (current[selected_models].apply(pd.to_numeric, errors="coerce").mean(axis=1, skipna=False)
+                               if selected_models else pd.Series(np.nan, index=current.index))
                 for idx, yhat in predictions.items():
-                    if pd.isna(yhat):
-                        continue
                     row = current.loc[idx]
                     y = pd.to_numeric(row.get("y"), errors="coerce")
-                    if pd.isna(y):
-                        continue
                     error = float(yhat) - float(y)
                     rows.append(
                         {
@@ -181,10 +225,13 @@ def _build_ensemble_forecast(run: ForecastRun, policies: tuple[str, ...], candid
     for unique_id, future in run.all_models.groupby("unique_id", dropna=False):
         source = selection_source[selection_source["unique_id"] == unique_id] if "unique_id" in selection_source.columns else selection_source
         for policy in policies:
-            selected_models = _select_policy_models(policy, source, forecast_models, run.spec.ensemble.max_models)
+            selected_models = _select_policy_models(
+                policy, source, forecast_models, run.spec.ensemble.max_models,
+                spec=run.spec, history=_observed_history(run),
+            )
             if not selected_models:
                 continue
-            predictions = future[selected_models].apply(pd.to_numeric, errors="coerce").mean(axis=1, skipna=True)
+            predictions = future[selected_models].apply(pd.to_numeric, errors="coerce").mean(axis=1, skipna=False)
             for idx, yhat in predictions.items():
                 if pd.isna(yhat):
                     continue
@@ -216,35 +263,67 @@ def _build_ensemble_selection(run: ForecastRun, backtest: pd.DataFrame) -> pd.Da
     for (unique_id, policy), group in grouped:
         y = pd.to_numeric(group["y"], errors="coerce")
         errors = pd.to_numeric(group["error"], errors="coerce")
-        valid = y.notna() & errors.notna()
-        if not valid.any():
-            continue
+        valid = np.isfinite(y) & np.isfinite(errors)
+        complete = bool(valid.all())
         y_valid = y[valid]
         errors_valid = errors[valid]
         abs_y_sum = float(y_valid.abs().sum())
+        source = run.backtest_predictions
+        reference = next((name for name in ("Naive", "SeasonalNaive", "RandomWalkWithDrift")
+                          if name in source), None)
+        reference_rmse = None
+        if reference:
+            paired = group[["unique_id", "cutoff", "ds", "y"]].merge(
+                source[["unique_id", "cutoff", "ds", reference]], on=["unique_id", "cutoff", "ds"],
+                how="left", validate="one_to_one",
+            )
+            complete &= bool(np.isfinite(paired[reference]).all())
+            if complete:
+                reference_rmse = float(np.sqrt(np.mean((paired[reference] - paired["y"]) ** 2)))
+        rmse = math.sqrt(float(np.mean(np.square(errors_valid)))) if complete else np.nan
+        finance_metrics = {}
+        if run.spec.selection_policy.objective == "monthly_landing":
+            from nixtla_scaffold.finance import finance_scorecard
+
+            scored, _ = finance_scorecard(
+                _observed_history(run),
+                group[["unique_id", "cutoff", "ds", "y", "yhat"]].rename(columns={"yhat": "Ensemble"}),
+                ["Ensemble"], horizon=run.spec.horizon,
+                clip_negative=run.spec.selection_policy.clip_negative,
+            )
+            finance_metrics = scored.iloc[0][_MONTHLY_RANK].to_dict()
+            complete &= bool(np.isfinite(list(finance_metrics.values())).all())
         rows.append(
             {
                 "schema_version": ENSEMBLE_LAB_SCHEMA_VERSION,
                 "policy": policy,
                 "unique_id": unique_id,
-                "rmse": math.sqrt(float(np.mean(np.square(errors_valid)))),
-                "mae": float(np.mean(np.abs(errors_valid))),
-                "wape": float(np.abs(errors_valid).sum() / abs_y_sum) if abs_y_sum > 0 else np.nan,
-                "bias": float(np.mean(errors_valid)),
+                "rmse": rmse,
+                "mae": float(np.mean(np.abs(errors_valid))) if complete else np.nan,
+                "wape": float(np.abs(errors_valid).sum() / abs_y_sum) if complete and abs_y_sum > 0 else np.nan,
+                "bias": float(np.mean(errors_valid)) if complete else np.nan,
                 "observations": int(valid.sum()),
                 "selected_advisory_policy": False,
                 "scoring_mode": run.spec.ensemble.scoring,
                 "advisory_only": True,
+                "expected_observations": len(group),
+                "comparison_eligible": complete,
+                "reference_model": reference,
+                "reference_rmse": reference_rmse,
+                "paired_rmse_improvement": 1 - rmse / reference_rmse if complete and reference_rmse else None,
+                "objective": run.spec.selection_policy.objective,
+                **finance_metrics,
             }
         )
     selection = pd.DataFrame(rows, columns=ENSEMBLE_SELECTION_COLUMNS)
     if selection.empty:
         return selection
     for unique_id, group in selection.groupby("unique_id", dropna=False):
-        valid = group.dropna(subset=["rmse", "mae"])
+        ranking = _MONTHLY_RANK if run.spec.selection_policy.objective == "monthly_landing" else ["rmse", "mae"]
+        valid = group.loc[group.comparison_eligible].dropna(subset=ranking)
         if valid.empty:
             continue
-        winner_idx = valid.sort_values(["rmse", "mae", "policy"], kind="mergesort").index[0]
+        winner_idx = valid.sort_values([*ranking, "policy"], kind="mergesort").index[0]
         selection.loc[winner_idx, "selected_advisory_policy"] = True
     return selection
 
@@ -274,16 +353,46 @@ def _policy_receipts(
                 "forecast_rows": forecast_rows if enabled else 0,
                 "advisory_only": True,
                 "notes": "prior-cutoff scoring; does not alter champion selection" if enabled else "not requested",
+                "objective": run.spec.selection_policy.objective,
             }
         )
     return pd.DataFrame(rows, columns=ENSEMBLE_POLICY_RECEIPT_COLUMNS)
 
 
-def _select_policy_models(policy: str, evidence: pd.DataFrame, candidate_models: Iterable[str], max_models: int) -> list[str]:
-    metrics = _model_error_metrics(evidence, candidate_models)
+def _observed_history(run: ForecastRun) -> pd.DataFrame:
+    return run.observed_history if not run.observed_history.empty else run.history
+
+
+def _complete_origins(evidence: pd.DataFrame, horizon: int) -> pd.DataFrame:
+    counts = evidence.groupby(["unique_id", "cutoff"]).ds.transform("size")
+    return evidence.loc[counts.eq(horizon)].copy()
+
+
+def _select_policy_models(
+    policy: str, evidence: pd.DataFrame, candidate_models: Iterable[str], max_models: int,
+    *, spec: ForecastSpec | None = None, history: pd.DataFrame | None = None,
+) -> list[str]:
+    ranking = ["rmse", "mae"]
+    if spec is not None and spec.selection_policy.objective == "monthly_landing":
+        from nixtla_scaffold.finance import finance_scorecard
+
+        if history is None:
+            raise ValueError("Monthly ensemble selection requires observed source history.")
+        prior = _complete_origins(evidence, spec.horizon)
+        if prior.empty:
+            return []
+        metrics, _ = finance_scorecard(
+            history, prior, list(candidate_models), horizon=spec.horizon,
+            clip_negative=spec.selection_policy.clip_negative,
+        )
+        ranking = _MONTHLY_RANK
+        metrics = metrics.loc[np.isfinite(metrics[ranking]).all(axis=1)].copy()
+        metrics["family"] = metrics.model.map(model_family)
+    else:
+        metrics = _model_error_metrics(evidence, candidate_models)
     if metrics.empty:
         return []
-    ranked = metrics.sort_values(["rmse", "mae", "model"], kind="mergesort")
+    ranked = metrics.sort_values([*ranking, "model"], kind="mergesort")
     if policy == "top_k_average":
         return ranked["model"].head(max_models).tolist()
     if policy == "family_diverse_average":
@@ -308,8 +417,8 @@ def _model_error_metrics(evidence: pd.DataFrame, candidate_models: Iterable[str]
         if model not in evidence.columns:
             continue
         pred = pd.to_numeric(evidence[model], errors="coerce")
-        valid = y.notna() & pred.notna()
-        if not valid.any():
+        valid = np.isfinite(y) & np.isfinite(pred)
+        if not valid.all():
             continue
         errors = pred[valid] - y[valid]
         rows.append(
@@ -323,6 +432,17 @@ def _model_error_metrics(evidence: pd.DataFrame, candidate_models: Iterable[str]
     return pd.DataFrame(rows, columns=["model", "family", "rmse", "mae"])
 
 
+def observable_backtest_rows(frame: pd.DataFrame, cutoff: pd.Timestamp) -> pd.DataFrame:
+    """Outcomes used for a decision must have landed, not just been forecast."""
+    origins = pd.to_datetime(frame["cutoff"], errors="coerce")
+    dates = pd.to_datetime(frame["ds"], errors="coerce")
+    valid = (origins < cutoff) & (dates <= cutoff)
+    if "available_at" in frame:
+        available = pd.to_datetime(frame["available_at"], errors="coerce")
+        valid &= available.notna() & (available <= cutoff)
+    return frame.loc[valid].copy()
+
+
 def _candidate_model_columns(frame: pd.DataFrame) -> list[str]:
     models: list[str] = []
     for column in frame.columns:
@@ -331,6 +451,8 @@ def _candidate_model_columns(frame: pd.DataFrame) -> list[str]:
         if "-lo-" in column or "-hi-" in column:
             continue
         if column.endswith("_selected") or column == "WeightedEnsemble":
+            continue
+        if model_family(column) == "custom":
             continue
         if pd.api.types.is_numeric_dtype(frame[column]):
             models.append(column)

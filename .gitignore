@@ -1,4 +1,11 @@
 .venv/
+.nixtla-workbench/
+.github/extensions/nixtla-workbench/runtime.json
+.github/nixtla-extension-backups/
+.nixtla-evidence/
+node_modules/
+test-results/
+playwright-report/
 .intern/
 .tmp_validation/
 .tmp_setup_validation/
@@ -11,6 +18,8 @@ __pycache__/
 htmlcov/
 
 # Local environment and secrets
+.azure/
+.runtime-cache/
 .env
 .env.*
 !.env.example

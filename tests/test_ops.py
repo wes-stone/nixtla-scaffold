@@ -27,6 +27,22 @@ def _demo_frame(values: list[int] | None = None) -> pd.DataFrame:
     )
 
 
+def test_driver_refresh_monitor_reports_lost_reference_skill_without_adopting(tmp_path):
+    from nixtla_scaffold.refresh import _driver_refresh_monitor
+    prior, current = tmp_path / "prior", tmp_path / "current"
+    (prior / "audit").mkdir(parents=True)
+    (current / "appendix").mkdir(parents=True)
+    dates = pd.date_range("2025-01-01", periods=3, freq="MS")
+    pd.DataFrame({"unique_id": "A", "ds": dates, "Ridge": [200, 200, 200], "Naive": [100, 100, 100]}).to_csv(prior / "audit" / "all_models.csv", index=False)
+    pd.DataFrame({"unique_id": "A", "ds": dates, "y": [101, 100, 99]}).to_csv(current / "appendix" / "observed_history.csv", index=False)
+    spec = {"spec": {"horizon": 3, "regressors": [{"name": "capacity"}]}}
+    receipt = _driver_refresh_monitor(prior, current, spec, spec)
+    assert receipt["landed_forecast_monitor"][0]["status"] == "reference_regression"
+    assert receipt["incremental_feature_value"] == "not_reconfirmed"
+    assert receipt["availability_status"] == "unavailable"
+    assert not receipt["automatic_replacement"]
+
+
 def test_run_outputs_include_operational_receipts(tmp_path) -> None:
     run = run_forecast(_demo_frame(), ForecastSpec(horizon=2, model_policy="baseline"))
     output_dir = run.to_directory(tmp_path / "run")

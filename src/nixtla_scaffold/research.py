@@ -18,11 +18,14 @@ from nixtla_scaffold.schema import ForecastRun, ForecastSpec, PromotionPolicy, R
 RESEARCH_SCHEMA_VERSION = "nixtla_scaffold.research.v1"
 _PRIMARY_METRICS = ("avg_rmsse", "avg_mase", "avg_rmse")
 _SECONDARY_METRICS = {
+    "avg_landing_mape_pct": ("avg_next28_mape_pct",),
     "avg_rmsse": ("avg_mase", "avg_mae"),
     "avg_mase": ("avg_rmsse", "avg_mae"),
     "avg_rmse": ("avg_mae",),
 }
 _METRIC_COLUMNS = {
+    "avg_landing_mape_pct": "landing_mape_pct",
+    "avg_next28_mape_pct": "next28_mape_pct",
     "avg_rmsse": "rmsse",
     "avg_mase": "mase",
     "avg_rmse": "rmse",
@@ -181,6 +184,7 @@ def run_research_optimizer(
     if patience < 1:
         raise ValueError("patience must be >= 1")
 
+    started = time.monotonic()
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     full_data = load_forecast_dataset(data, sheet=sheet, spec=spec)
@@ -232,7 +236,18 @@ def run_research_optimizer(
         confirmation_cutoffs=promotion_policy.minimum_confirmation_cutoffs,
     )
     split.receipt.to_csv(out / "chronological_split.csv", index=False)
+    from nixtla_scaffold.exposure import reserve_confirmation
+    protected = pd.concat([window for _, window in split.confirmation_windows], ignore_index=True) if split.confirmation_windows else full_data.iloc[:0]
+    exposure_receipt = reserve_confirmation(protected, canonical_spec)
+    _write_json(out / "confirmation_reservation.json", exposure_receipt)
 
+    driver_spec = canonical_spec
+    driver_research: dict[str, Any] = {"sources": [], "status": "not_requested"}
+    driver_requested = canonical_spec.regressors and (variants is None or {"all", "known_future_regressors"}.intersection(requested_variants))
+    if driver_requested and signal_gate["generic_experiments_allowed"]:
+        from nixtla_scaffold.driver_research import prepare_driver_research
+        driver_spec, driver_research = prepare_driver_research(split.tuning_data, canonical_spec)
+    _write_json(out / "driver_research.json", driver_research)
     hypotheses = (
         _generate_hypotheses(
             split.tuning_data,
@@ -243,6 +258,29 @@ def run_research_optimizer(
         if signal_gate["generic_experiments_allowed"]
         else ()
     )
+    if driver_requested:
+        from nixtla_scaffold.driver_research import matched_driver_specs
+        expanded = []
+        for hypothesis in hypotheses:
+            if hypothesis.variant != "known_future_regressors":
+                expanded.append(hypothesis)
+                continue
+            scoped = _spec_for_signal_hypothesis(driver_spec, hypothesis)
+            for regressor in scoped.regressors:
+                model = next((name for name in (scoped.model_allowlist or ("Ridge",))
+                              if name in {"Ridge", "RandomForest", "LightGBM"}), "")
+                try:
+                    matched_driver_specs(scoped, regressor.name, model)
+                except ValueError as exc:
+                    driver_research.setdefault("execution_blockers", []).append({"name": regressor.name, "reason": str(exc)})
+                    continue
+                expanded.append(replace(
+                    hypothesis, hypothesis_id=f"{hypothesis.hypothesis_id}-{len(expanded) + 1}",
+                    regressor_name=regressor.name, driver_model=model,
+                    estimated_cost={**hypothesis.estimated_cost, "compute_units": 2},
+                ))
+        hypotheses = tuple(expanded)
+        _write_json(out / "driver_research.json", driver_research)
     required_variants = (
         {"finn"}
         if (
@@ -283,20 +321,21 @@ def run_research_optimizer(
         "promotion_policy": promotion_policy.to_dict(),
         "signal_discovery_gate": signal_gate,
         "signal_experiment_dispositions": signal_dispositions,
+        "driver_research": driver_research,
         "chronological_split": split.summary(),
+        "confirmation_reservation": exposure_receipt,
         "hypotheses": [hypothesis.to_dict() for hypothesis in hypotheses],
         "invariants": [
             "Baseline execution does not consume a research iteration.",
             "Baseline and treatment must share a resolved candidate fingerprint unless the candidate-set change is the named treatment.",
             "Only tuning rows may seed hypotheses or candidate selection.",
-            "Only one selected native candidate is exposed to untouched confirmation rows.",
+            "Only one selected native candidate is exposed to reserved confirmation rows in this optimizer invocation; prior exposure outside that scope is not certified.",
             "Confirmation uses a fixed candidate specification with walk-forward retraining; later origins may use only actuals that landed before that origin.",
             "External challengers remain advisory and never mutate forecast.csv.",
         ],
     }
     _write_json(out / "research_plan.json", research_plan)
 
-    started = time.monotonic()
     compute_units = 0.0
     baseline_spec = replace(
         _variant_catalog()["baseline"].build_spec(canonical_spec),
@@ -343,6 +382,11 @@ def run_research_optimizer(
             base_experiment_spec,
             hypothesis,
         )
+        control_spec = baseline_spec
+        if hypothesis.driver_model:
+            control_spec, experiment_spec = matched_driver_specs(
+                driver_spec, hypothesis.regressor_name, hypothesis.driver_model,
+            )
         experiment = run_experiment(
             split.tuning_data,
             experiment_spec,
@@ -350,7 +394,7 @@ def run_research_optimizer(
             variants=(hypothesis.variant,),
             max_variants=min(1, limits["max_variants_per_iteration"]),
             hypothesis=hypothesis,
-            matched_control=False,
+            matched_control=bool(hypothesis.driver_model),
         )
         executed_variants.add(hypothesis.variant)
         compute_units += estimated_compute
@@ -359,9 +403,10 @@ def run_research_optimizer(
             iteration_summary.insert(0, "iteration", iteration)
             iteration_summary.insert(1, "hypothesis_id", hypothesis.hypothesis_id)
             summary_frames.append(iteration_summary)
+        candidate_rows = iteration_summary[iteration_summary["variant"].eq(hypothesis.variant)] if not iteration_summary.empty else iteration_summary
         candidate_row = (
-            iteration_summary.iloc[0].to_dict()
-            if not iteration_summary.empty
+            candidate_rows.iloc[0].to_dict()
+            if not candidate_rows.empty
             else {"status": "failed", "reason": "experiment produced no summary row"}
         )
         candidate_dir = (
@@ -369,8 +414,14 @@ def run_research_optimizer(
             or iteration_dir / "missing_candidate"
         )
         candidate_evidence = _row_evidence(candidate_row)
+        comparison_dir, comparison_evidence = baseline_dir, baseline_evidence
+        if hypothesis.driver_model:
+            control_rows = iteration_summary[iteration_summary["variant"].eq("baseline")]
+            if not control_rows.empty:
+                comparison_evidence = _row_evidence(control_rows.iloc[0].to_dict())
+                comparison_dir = _optional_path(comparison_evidence.get("run_path")) or iteration_dir / "missing_control"
         paired = _paired_tuning_evidence(
-            baseline_dir,
+            comparison_dir,
             candidate_dir,
             primary_metric=primary_metric,
             candidate_backtest_path=_optional_path(
@@ -381,7 +432,7 @@ def run_research_optimizer(
         paired_frame = paired.pop("frame")
         paired_frame.to_csv(iteration_dir / "tuning_cutoff_comparison.csv", index=False)
         assessment = _assess_tuning_candidate(
-            baseline_evidence,
+            comparison_evidence,
             candidate_evidence,
             paired,
             hypothesis=hypothesis,
@@ -389,6 +440,20 @@ def run_research_optimizer(
             secondary_metric=secondary_metric,
             policy=promotion_policy,
         )
+        if hypothesis.driver_model:
+            from nixtla_scaffold.driver_research import assess_driver_ablation
+            if candidate_evidence.get("status") == comparison_evidence.get("status") == "success" and primary_metric and secondary_metric:
+                ablation = assess_driver_ablation(
+                    comparison_dir, candidate_dir, hypothesis.driver_model,
+                    primary=primary_metric, secondary=secondary_metric, policy=promotion_policy,
+                )
+            else:
+                ablation = {"passed": False, "reason": "Matching successful learner/control evidence is unavailable."}
+            assessment["driver_ablation"] = ablation
+            _write_json(iteration_dir / "driver_ablation.json", ablation)
+            if not ablation["passed"]:
+                assessment["blockers"].append("Fixed-learner feature ablation did not establish complete, stable incremental value.")
+                assessment["decision"] = "keep_for_learning" if candidate_evidence.get("status") == "success" else "failed"
         reviews = _review_iteration(
             canonical_spec,
             split,
@@ -406,7 +471,7 @@ def run_research_optimizer(
             variant=hypothesis.variant,
             status=str(candidate_evidence.get("status", "unknown")),
             primary_metric=primary_metric,
-            baseline_primary=_number(baseline_evidence.get(primary_metric)) if primary_metric else None,
+            baseline_primary=_number(comparison_evidence.get(primary_metric)) if primary_metric else None,
             candidate_primary=_number(candidate_evidence.get(primary_metric)) if primary_metric else None,
             primary_improvement=_number(assessment.get("primary_improvement")),
             secondary_metric=secondary_metric,
@@ -429,6 +494,9 @@ def run_research_optimizer(
             "schema_version": OPTIMIZER_SCHEMA_VERSION,
             **ledger_row,
             "reviewers": list(reviews),
+            "signal_id": hypothesis.signal_id,
+            "probe_id": hypothesis.probe_id,
+            "regressor_name": hypothesis.regressor_name,
             "advisory_only": True,
         }
         decisions.append(decision)
@@ -449,6 +517,9 @@ def run_research_optimizer(
                     "hypothesis": hypothesis,
                     "assessment": assessment,
                     "candidate_dir": candidate_dir,
+                    "control_spec": control_spec,
+                    "candidate_spec": _variant_catalog()[hypothesis.variant].build_spec(experiment_spec),
+                    "driver_model": hypothesis.driver_model,
                 }
         elif candidate_evidence.get("status") == "success":
             no_improvement_count += 1
@@ -472,16 +543,19 @@ def run_research_optimizer(
         else pd.DataFrame()
     )
     legacy_decisions = tuple(_optimizer_decisions(iteration_summary))
-    confirmation = _run_confirmation(
-        full_data,
-        canonical_spec,
-        split,
-        best_candidate,
-        primary_metric=primary_metric,
-        secondary_metric=secondary_metric,
-        policy=promotion_policy,
-        output_dir=out / "confirmation",
-    )
+    confirmation_compute = 2 * len(split.confirmation_windows) if best_candidate else 0
+    if best_candidate and (_wall_clock_exhausted(started, limits) or _compute_exhausted(compute_units, confirmation_compute, limits)):
+        confirmation = {"status": "budget_exhausted", "passed": False,
+                        "reason": "Remaining budget cannot cover the frozen control/candidate confirmation; protected outcomes were not consumed."}
+        stopped_reason = "budget_exhausted"
+    else:
+        confirmation = _run_confirmation(
+            full_data, canonical_spec, split, best_candidate, primary_metric=primary_metric,
+            secondary_metric=secondary_metric, policy=promotion_policy,
+            output_dir=out / "confirmation", reservation=exposure_receipt,
+        )
+        if confirmation.get("status") == "completed":
+            compute_units += confirmation_compute
     promotion_decision = _promotion_decision(
         best_candidate,
         confirmation,
@@ -575,6 +649,7 @@ def run_research_optimizer(
         "legacy_advisory_decisions": list(legacy_decisions),
         "outputs": {
             "research_plan": "research_plan.json",
+            "driver_research": "driver_research.json",
             "hypotheses": "hypotheses.jsonl",
             "chronological_split": "chronological_split.csv",
             "baseline": "baseline",
@@ -598,6 +673,48 @@ def run_research_optimizer(
         decisions=tuple(decisions),
         next_iteration_questions_markdown=next_questions,
     )
+
+
+def archive_research_evidence(root: Path) -> Path:
+    """Attach bounded, content-indexed research evidence to the unadopted tuning baseline."""
+    from nixtla_scaffold.workbench_store import _filesystem_path
+    root = _filesystem_path(root)
+    baseline = root / "baseline"
+    names = {
+        "research_plan.json", "driver_research.json", "hypotheses.jsonl", "chronological_split.csv",
+        "confirmation_reservation.json", "iteration_manifest.json", "iteration_summary.csv",
+        "iteration_ledger.csv", "iteration_decisions.jsonl", "knowledge_ledger.jsonl",
+        "promotion_decision.json", "stop_receipt.json", "signal_experiment_dispositions.json",
+        "reviews.json", "iteration_decision.json", "driver_ablation.json",
+        "experiment_manifest.json", "tuning_cutoff_comparison.csv", "confirmation_receipt.json",
+        "confirmation_metrics.csv", "confirmation_paired_rows.csv", "confirmation_comparison.csv",
+        "manifest.json", "candidate_evidence.json", "backtest_long.csv", "cutoff_contract.csv",
+        "all_models.csv", "driver_availability_audit.csv", "driver_model_features.csv",
+    }
+    selected = [path for path in root.rglob("*") if path.is_file()
+                and not path.is_relative_to(baseline)
+                and (path.name in names or path.parent.name == "driver_sources")]
+    if len(selected) > 350 or sum(path.stat().st_size for path in selected) > 96 * 1024 * 1024:
+        raise ValueError("Research archive exceeds 350 evidence files or 96 MiB; no silent truncation is allowed")
+    index = {}
+    for path in selected:
+        if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()):
+            raise ValueError("Linked research artifacts cannot enter an immutable archive")
+        relative = path.relative_to(root)
+        target = baseline / "research" / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        data = path.read_bytes()
+        if target.exists() and target.read_bytes() != data:
+            raise ValueError("Research evidence archive already contains different content")
+        target.write_bytes(data)
+        index[relative.as_posix()] = sha256(data).hexdigest()
+    _write_json(baseline / "research" / "evidence_index.json", {
+        "sha256": index, "purpose": "Immutable research trail attached to the tuning-only baseline; not an adopted forecast.",
+    })
+    manifest = json.loads((baseline / "manifest.json").read_text(encoding="utf-8"))
+    manifest["outputs"]["research_evidence"] = "research/evidence_index.json"
+    _write_json(baseline / "manifest.json", manifest)
+    return baseline
 
 
 def _resolve_budget(
@@ -903,6 +1020,20 @@ def _finalize_signal_experiment_dispositions(
         row = dict(disposition)
         if row.get("experiment_status") == "queued":
             decision = decisions_by_hypothesis.get(str(row.get("hypothesis_id", "")))
+            attributable = [item for item in decisions if item.get("signal_id")
+                            and item["signal_id"] == row.get("signal_id")]
+            if attributable:
+                executed = {item.get("regressor_name") for item in attributable}
+                missing = set(row.get("executable_declarations", [])) - executed
+                row["experiment_status"] = "blocked" if missing else "tested"
+                row["experiment_reason"] = (
+                    f"Only a subset of the declarations executed; not tested: {sorted(missing)}."
+                    if missing else "Attributable feature hypotheses executed; inspect their decisions, not only their execution status."
+                )
+                row["experiments"] = [{"hypothesis_id": item["hypothesis_id"], "decision": item["research_decision"],
+                                      "evidence_path": item["evidence_path"]} for item in attributable]
+                finalized.append(row)
+                continue
             if decision is None:
                 row["experiment_status"] = "blocked"
                 row["experiment_reason"] = (
@@ -943,7 +1074,20 @@ def _generate_hypotheses(
             and pd.to_numeric(tuning_data["y"], errors="coerce").dropna().ge(0).all()
         ):
             requested.append("log1p_transform")
-        requested.append("rolling_features")
+        recent_window = max(24, 2 * (spec.season_length or 1), 2 * spec.horizon)
+        for _, group in tuning_data.sort_values("ds").groupby("unique_id"):
+            values = pd.to_numeric(group["y"], errors="coerce").dropna()
+            if len(values) > recent_window and (
+                abs(values.tail(6).median() - values.head(6).median()) > 3 * values.diff().abs().median()
+            ):
+                requested.append("recent_history")
+                break
+        if spec.model_policy in {"mlforecast", "light", "all"}:
+            requested.append("rolling_features")
+            if not spec.feature_recipe.date_features_as_dummies and spec.freq == "D":
+                requested.append("calendar_dummies")
+            if 1 < spec.horizon <= 28 and spec.feature_recipe.mlforecast_strategy == "recursive":
+                requested.append("direct_horizons")
         if spec.regressors:
             requested.append("known_future_regressors")
         if spec.events:
@@ -955,6 +1099,24 @@ def _generate_hypotheses(
     requested = [variant for variant in dict.fromkeys(requested) if variant != "baseline"]
     evidence = _hypothesis_evidence(spec, tuning_data)
     templates = {
+        "calendar_dummies": {
+            "dimension": "calendar encoding",
+            "mechanism": "Categorical weekdays and months avoid imposing ordinal distances on calendar effects.",
+            "effect": "Lower declared primary error on the unchanged chronological cohort.",
+            "required": ("regular calendar", "existing ML-enabled control"),
+            "falsify": "No practical improvement or weaker bias and secondary evidence.",
+            "leakage": "Fixed calendar categories; encoder fitted inside each origin.",
+            "horizon": "Sparse calendar categories can increase variance.",
+        },
+        "direct_horizons": {
+            "dimension": "direct rather than recursive forecasting strategy",
+            "mechanism": "Horizon-specific estimators can avoid recursive error accumulation.",
+            "effect": "Lower declared primary error without changing learner or feature families.",
+            "required": ("sufficient lag history", "existing ML-enabled control"),
+            "falsify": "No practical improvement or excessive fitting cost.",
+            "leakage": "All horizon estimators fit only the origin's training prefix.",
+            "horizon": "One estimator per horizon increases cost and reduces training examples.",
+        },
         "all_models": {
             "dimension": "native model family breadth",
             "mechanism": "A broader serious tournament may capture trend or seasonal structure missed by the current policy.",
@@ -976,7 +1138,7 @@ def _generate_hypotheses(
         "log1p_transform": {
             "dimension": "log1p target transformation",
             "mechanism": "A multiplicative growth process may be more stable on the log scale and less dominated by recent level.",
-            "effect": "Lower scale-free error with unbiased forecasts after inverse transformation.",
+            "effect": "Lower original-scale error without excessive inverse-transform bias; no mean correction is assumed.",
             "required": ("non-negative target history", "output-scale backtest metrics"),
             "falsify": "No paired improvement, inverse-scale bias, or weaker interval/trust evidence.",
             "leakage": "Low; transformation parameters must use training rows only.",
@@ -1163,6 +1325,10 @@ def _run_evidence(run: ForecastRun, path: Path) -> dict[str, Any]:
     selection = run.model_selection
     return {
         "status": "success",
+        "selection_objective": run.spec.selection_policy.objective,
+        "avg_landing_mape_pct": _mean(selection, "landing_mape_pct"),
+        "avg_next28_mape_pct": _mean(selection, "next28_mape_pct"),
+        "series_count": int(selection["unique_id"].nunique()) if "unique_id" in selection else 0,
         "run_path": str(path),
         "avg_rmse": _mean(selection, "rmse"),
         "avg_mae": _mean(selection, "mae"),
@@ -1188,6 +1354,10 @@ def _row_evidence(row: dict[str, Any]) -> dict[str, Any]:
     path = Path(path_value) if path_value else None
     return {
         "status": str(row.get("status", "failed")),
+        "selection_objective": row.get("selection_objective", "daily_rmse"),
+        "avg_landing_mape_pct": _number(row.get("avg_landing_mape_pct")),
+        "avg_next28_mape_pct": _number(row.get("avg_next28_mape_pct")),
+        "series_count": _number(row.get("series_count")),
         "reason": str(row.get("reason", "")),
         "run_path": path_value,
         "avg_rmse": _number(row.get("avg_rmse")),
@@ -1207,11 +1377,14 @@ def _row_evidence(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _select_primary_metric(evidence: dict[str, Any]) -> str | None:
+    if evidence.get("selection_objective") == "monthly_landing":
+        return "avg_landing_mape_pct" if _number(evidence.get("avg_landing_mape_pct")) is not None else None
     return next(
         (
             metric
             for metric in _PRIMARY_METRICS
             if _number(evidence.get(metric)) is not None
+            and (metric != "avg_rmse" or evidence.get("series_count") == 1)
         ),
         None,
     )
@@ -1240,6 +1413,7 @@ def _paired_tuning_evidence(
     primary_metric: str | None,
     candidate_backtest_path: Path | None = None,
     require_explicit_candidate_backtest: bool = False,
+    model: str | None = None,
 ) -> dict[str, Any]:
     empty = {
         "frame": pd.DataFrame(),
@@ -1262,15 +1436,16 @@ def _paired_tuning_evidence(
         )
     ):
         return empty
-    baseline = _selected_backtest_rows(baseline_dir)
+    baseline = _selected_backtest_rows(baseline_dir, model=model)
     candidate = _selected_backtest_rows(
         candidate_dir,
         backtest_path=candidate_backtest_path,
+        model=model,
     )
     if baseline.empty or candidate.empty:
         return empty
     keys = ["unique_id", "cutoff", "ds", "horizon_step"]
-    expected = baseline[keys + ["y_actual"]].copy()
+    expected = baseline[keys + ["y_actual", "yhat", "mase_scale", "rmsse_scale"]].copy()
     observed = candidate[keys + ["y_actual", "yhat", "mase_scale", "rmsse_scale"]].copy()
     paired = expected.merge(
         observed,
@@ -1278,6 +1453,7 @@ def _paired_tuning_evidence(
         how="outer",
         suffixes=("_baseline", "_candidate"),
         indicator=True,
+        validate="one_to_one",
     )
     matched = paired["_merge"].eq("both")
     actual_equal = (
@@ -1285,7 +1461,17 @@ def _paired_tuning_evidence(
         .eq(pd.to_numeric(paired["y_actual_candidate"], errors="coerce"))
         .fillna(False)
     )
-    exact_rows = matched & actual_equal
+    finite = paired[["y_actual_baseline", "y_actual_candidate", "yhat_baseline", "yhat_candidate"]].apply(
+        lambda column: column.map(_number).notna()
+    ).all(axis=1)
+    scale_column = {"avg_mase": "mase_scale", "avg_rmsse": "rmsse_scale"}.get(primary_metric)
+    scale_equal = pd.Series(True, index=paired.index)
+    if scale_column:
+        left = pd.to_numeric(paired[f"{scale_column}_baseline"], errors="coerce")
+        right = pd.to_numeric(paired[f"{scale_column}_candidate"], errors="coerce")
+        scale_equal = left.eq(right) | (left.isna() & right.isna())
+    exact_rows = matched & actual_equal & finite & scale_equal
+    invalid_rows = int((matched & ~finite).sum())
     missing_rows = int(paired["_merge"].eq("left_only").sum())
     extra_rows = int(paired["_merge"].eq("right_only").sum())
     actual_mismatch_rows = int((matched & ~actual_equal).sum())
@@ -1314,20 +1500,48 @@ def _paired_tuning_evidence(
         ],
         ignore_index=True,
     )
+    if primary_metric == "avg_landing_mape_pct":
+        from nixtla_scaffold.finance import finance_cutoff_metrics
+        finance_metrics = []
+        declared_contract = None
+        reference_history = None
+        for variant, frame, directory in (("baseline", baseline_scored, baseline_dir),
+                                           ("candidate", candidate_scored, candidate_dir)):
+            manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+            history_path = manifest["outputs"].get("observed_history") or manifest["outputs"]["history"]
+            history = pd.read_csv(directory / history_path, dtype={"unique_id": str}, keep_default_na=False)
+            identity_columns = ["unique_id", "ds", "y"] + (["available_at"] if "available_at" in history else [])
+            identity = history[identity_columns].sort_values(["unique_id", "ds"]).reset_index(drop=True)
+            if reference_history is not None and not reference_history.equals(identity):
+                raise ValueError("Paired finance research requires identical origin actuals and publication metadata")
+            reference_history = identity
+            policy = manifest["spec"]["selection_policy"]
+            if policy["objective"] != "monthly_landing":
+                raise ValueError("Paired finance research requires the same declared landing objective")
+            contract = (policy["objective"], policy["clip_negative"], manifest["spec"]["horizon"])
+            if declared_contract is not None and declared_contract != contract:
+                raise ValueError("Paired finance research cannot change clipping or the requested horizon")
+            declared_contract = contract
+            finance_metrics.append(finance_cutoff_metrics(
+                frame, history, horizon=manifest["spec"]["horizon"], clip_negative=policy["clip_negative"],
+            ).assign(variant=variant))
+        metrics = metrics.merge(pd.concat(finance_metrics, ignore_index=True),
+                                on=["unique_id", "cutoff", "variant"], how="left", validate="one_to_one")
     metric_column = _METRIC_COLUMNS[primary_metric]
-    pivot = metrics.pivot_table(
-        index="cutoff",
-        columns="variant",
-        values=metric_column,
-        aggfunc="mean",
-    ).reset_index()
+    means = metrics.groupby(["cutoff", "variant"], sort=True)[metric_column].agg(
+        lambda values: _mean(values.to_frame(metric_column), metric_column)
+    ).rename("value").reset_index()
+    pivot = means.pivot(index="cutoff", columns="variant", values="value").reset_index()
+    metrics_complete = False
     if {"baseline", "candidate"}.issubset(pivot.columns):
         pivot["primary_improvement"] = pivot.apply(
             lambda row: _relative_improvement(row["baseline"], row["candidate"]),
             axis=1,
         )
-        valid = pd.to_numeric(pivot["primary_improvement"], errors="coerce").dropna()
-        stable_fraction = float(valid.ge(0).mean()) if not valid.empty else 0.0
+        improvements = pd.to_numeric(pivot["primary_improvement"], errors="coerce")
+        valid = improvements.dropna()
+        metrics_complete = len(valid) == len(pivot)
+        stable_fraction = float(improvements.ge(0).mean()) if len(pivot) else 0.0
         worst_regression = float((-valid).max()) if not valid.empty else None
     else:
         pivot["primary_improvement"] = None
@@ -1342,11 +1556,15 @@ def _paired_tuning_evidence(
         "missing_rows": missing_rows,
         "extra_rows": extra_rows,
         "actual_mismatch_rows": actual_mismatch_rows,
+        "invalid_rows": invalid_rows,
+        "metrics_complete": metrics_complete,
         "exact_match": bool(
             exact_coverage == 1.0
             and missing_rows == 0
             and extra_rows == 0
             and actual_mismatch_rows == 0
+            and invalid_rows == 0
+            and metrics_complete
         ),
         "reason": "",
     }
@@ -1356,12 +1574,15 @@ def _selected_backtest_rows(
     run_dir: Path,
     *,
     backtest_path: Path | None = None,
+    model: str | None = None,
 ) -> pd.DataFrame:
     path = backtest_path or (run_dir / "appendix" / "backtest_long.csv")
     if not path.exists():
         return pd.DataFrame()
-    frame = pd.read_csv(path)
-    if "is_selected_model" in frame.columns:
+    frame = pd.read_csv(path, dtype={"unique_id": str}, keep_default_na=False)
+    if model is not None and "model" in frame.columns:
+        selected = frame[frame["model"].eq(model)].copy()
+    elif "is_selected_model" in frame.columns:
         selected = frame[frame["is_selected_model"].map(_bool)].copy()
     elif backtest_path is not None:
         selected = frame.copy()
@@ -1369,10 +1590,10 @@ def _selected_backtest_rows(
         return pd.DataFrame()
     selected["cutoff"] = pd.to_datetime(selected["cutoff"])
     selected["ds"] = pd.to_datetime(selected["ds"])
-    return selected.drop_duplicates(
-        ["unique_id", "cutoff", "ds", "horizon_step"],
-        keep="first",
-    )
+    keys = ["unique_id", "cutoff", "ds", "horizon_step"]
+    if selected[keys].isna().any().any() or selected["unique_id"].eq("").any() or selected.duplicated(keys).any():
+        raise ValueError(f"{path}: selected backtest contains null or duplicate series/origin/target keys")
+    return selected
 
 
 def _cutoff_metrics(frame: pd.DataFrame) -> pd.DataFrame:
@@ -1383,12 +1604,10 @@ def _cutoff_metrics(frame: pd.DataFrame) -> pd.DataFrame:
     ):
         actual = pd.to_numeric(group["y_actual"], errors="coerce")
         forecast = pd.to_numeric(group["yhat"], errors="coerce")
-        valid = actual.notna() & forecast.notna()
-        if not valid.any():
-            continue
-        errors = actual[valid] - forecast[valid]
-        mae = float(errors.abs().mean())
-        rmse = float(math.sqrt((errors**2).mean()))
+        complete = actual.map(_number).notna().all() and forecast.map(_number).notna().all()
+        errors = actual - forecast
+        mae = float(errors.abs().mean()) if complete else None
+        rmse = float(math.sqrt((errors**2).mean())) if complete else None
         mase_scale = _first_positive(group.get("mase_scale"))
         rmsse_scale = _first_positive(group.get("rmsse_scale"))
         rows.append(
@@ -1398,8 +1617,9 @@ def _cutoff_metrics(frame: pd.DataFrame) -> pd.DataFrame:
                 "unique_id": uid,
                 "mae": mae,
                 "rmse": rmse,
-                "mase": mae / mase_scale if mase_scale else None,
-                "rmsse": rmse / rmsse_scale if rmsse_scale else None,
+                "mase": mae / mase_scale if complete and mase_scale else None,
+                "rmsse": rmse / rmsse_scale if complete and rmsse_scale else None,
+                "metric_status": "complete" if complete else "incomplete_nonfinite",
             }
         )
     return pd.DataFrame(rows)
@@ -1459,6 +1679,10 @@ def _assess_tuning_candidate(
         blockers.append(
             f"candidate produced {paired['actual_mismatch_rows']} tuning actual mismatches"
         )
+    if paired.get("invalid_rows", 0):
+        blockers.append("paired tuning contains missing or nonfinite observations")
+    if paired.get("metrics_complete") is False:
+        blockers.append("paired tuning contains undefined metrics in the declared series cohort")
     if paired.get("window_count", 0) < 1:
         blockers.append("no paired tuning windows")
     elif paired.get("stable_window_fraction", 0.0) < 0.6:
@@ -1678,6 +1902,7 @@ def _run_confirmation(
     secondary_metric: str | None,
     policy: PromotionPolicy,
     output_dir: Path,
+    reservation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from nixtla_scaffold.experiments import _variant_catalog
 
@@ -1689,8 +1914,8 @@ def _run_confirmation(
     if not policy.require_untouched_confirmation:
         return {
             "status": "not_required",
-            "reason": "promotion policy disabled untouched confirmation",
-            "passed": True,
+            "reason": "promotion policy disabled untouched confirmation; accuracy-first runs remain advisory without it",
+            "passed": not spec.accuracy_first,
         }
     if (
         not split.all_series_eligible
@@ -1711,12 +1936,25 @@ def _run_confirmation(
         }
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    from nixtla_scaffold.exposure import consume_confirmation, reserve_confirmation
+    protected = pd.concat([window for _, window in split.confirmation_windows], ignore_index=True)
+    reservation = reservation if reservation is not None else reserve_confirmation(protected, spec)
+    exposure = consume_confirmation(reservation, protected, spec)
+    if exposure["status"] != "consumed_for_frozen_confirmation":
+        receipt = {
+            "status": exposure["status"], "passed": False, "exposure": exposure,
+            "reason": "Recorded target exposure or a prior reservation prevents untouched confirmation. Retrospective tuning remains advisory.",
+        }
+        _write_json(output_dir / "confirmation_receipt.json", receipt)
+        return receipt
     baseline_spec = replace(
-        _variant_catalog()["baseline"].build_spec(spec),
+        best_candidate.get("control_spec") or _variant_catalog()["baseline"].build_spec(spec),
         challengers=(),
     )
     candidate_spec = replace(
-        _variant_catalog()[hypothesis.variant].build_spec(spec),
+        best_candidate.get("candidate_spec") or _variant_catalog()[hypothesis.variant].build_spec(
+            _spec_for_signal_hypothesis(spec, hypothesis)
+        ),
         challengers=(),
     )
     metric_rows: list[dict[str, Any]] = []
@@ -1728,6 +1966,7 @@ def _run_confirmation(
     baseline_extra_rows = 0
     candidate_extra_rows = 0
     gate_failures: list[str] = []
+    driver_confirmations = []
 
     for name, actuals in split.confirmation_windows:
         if actuals.empty:
@@ -1741,7 +1980,7 @@ def _run_confirmation(
             ("candidate", candidate_spec),
         ):
             model_input = training
-            if variant == "candidate" and hypothesis.variant == "known_future_regressors":
+            if variant == "candidate" and hypothesis.variant == "known_future_regressors" and any(item.source is None for item in run_spec.regressors):
                 future = actuals.copy()
                 future["y"] = pd.NA
                 model_input = pd.concat([training, future], ignore_index=True, sort=False)
@@ -1757,6 +1996,16 @@ def _run_confirmation(
             )
             scored_frames[variant] = scored
             coverages[variant] = coverage
+        if best_candidate.get("driver_model"):
+            from nixtla_scaffold.driver_research import assess_driver_confirmation
+            driver_confirmation = assess_driver_confirmation(
+                runs, actuals, training, model=best_candidate["driver_model"],
+                output_dir=output_dir / name, primary=primary_metric,
+                secondary=secondary_metric, policy=policy, window=name,
+            )
+            driver_confirmations.append(driver_confirmation)
+            if not driver_confirmation["passed"]:
+                gate_failures.append(f"{name}:fixed_learner_feature_confirmation_failed")
         baseline_fingerprint = _resolved_candidate_fingerprint(runs["baseline"])
         candidate_fingerprint = _resolved_candidate_fingerprint(runs["candidate"])
         if (
@@ -1797,6 +2046,7 @@ def _run_confirmation(
                     season_length=runs[variant].profile.season_length,
                     variant=variant,
                     window=name,
+                    spec=baseline_spec if variant == "baseline" else candidate_spec,
                 )
             )
         window_expected = int(len(expected))
@@ -1873,14 +2123,19 @@ def _run_confirmation(
         not policy.require_no_new_gate_failures
         or not gate_failures
     )
-    passed = primary_pass and secondary_pass and coverage_pass and cutoff_pass and gate_pass
+    driver_pass = all(item["passed"] for item in driver_confirmations)
+    passed = primary_pass and secondary_pass and coverage_pass and cutoff_pass and gate_pass and driver_pass
     receipt = {
         "schema_version": RESEARCH_SCHEMA_VERSION,
         "status": "completed",
         "passed": passed,
         "training_protocol": "walk_forward_fixed_candidate",
+        "exposure": exposure,
+        "exposure_scope": "recorded_runtime_workspace; exposure outside this scope is not certified",
         "candidate_configuration_fixed_before_confirmation": True,
         "candidate_variant": hypothesis.variant,
+        "frozen_candidate_spec": candidate_spec.to_dict(),
+        "driver_confirmations": driver_confirmations,
         "primary_metric": primary_metric,
         "secondary_metric": secondary_metric,
         "confirmation_cutoffs": int(len(valid_comparisons)),
@@ -1913,6 +2168,7 @@ def _training_before_window(
     full_data: pd.DataFrame,
     actuals: pd.DataFrame,
 ) -> pd.DataFrame:
+    from nixtla_scaffold.evaluation import training_slice
     parts: list[pd.DataFrame] = []
     for uid, expected in actuals.groupby("unique_id", sort=False):
         cutoff = pd.to_datetime(expected["ds"]).min()
@@ -1920,7 +2176,7 @@ def _training_before_window(
             full_data["unique_id"].eq(uid)
             & pd.to_datetime(full_data["ds"]).lt(cutoff)
         ]
-        parts.append(history)
+        parts.append(training_slice(history, pd.to_datetime(history["ds"]).max(), None))
     return pd.concat(parts, ignore_index=True, sort=False)
 
 
@@ -1930,12 +2186,18 @@ def _score_confirmation_run(
     *,
     variant: str,
     window: str,
+    model: str | None = None,
 ) -> tuple[pd.DataFrame, dict[str, int]]:
     expected = actuals[["unique_id", "ds", "y"]].copy()
     expected["ds"] = pd.to_datetime(expected["ds"])
-    forecast = run.forecast[["unique_id", "ds", "yhat"]].copy()
+    source = run.all_models.rename(columns={model: "yhat"}) if model else run.forecast
+    if "yhat" not in source.columns:
+        source = pd.DataFrame(columns=["unique_id", "ds", "yhat"])
+    forecast = source[["unique_id", "ds", "yhat"]].copy()
     forecast["ds"] = pd.to_datetime(forecast["ds"])
-    forecast = forecast.drop_duplicates(["unique_id", "ds"], keep="first")
+    keys = ["unique_id", "ds"]
+    if any(frame[keys].isna().any().any() or frame.duplicated(keys).any() for frame in (expected, forecast)):
+        raise ValueError("Confirmation contains null or duplicate series/target keys")
     extra = forecast.merge(
         expected[["unique_id", "ds"]],
         on=["unique_id", "ds"],
@@ -1948,7 +2210,7 @@ def _score_confirmation_run(
         how="left",
         validate="one_to_one",
     )
-    matched = merged["yhat"].notna()
+    matched = merged["yhat"].map(_number).notna() & merged["y"].map(_number).notna()
     scored = merged.loc[
         matched,
         ["unique_id", "ds", "y", "yhat"],
@@ -1969,6 +2231,7 @@ def _confirmation_metrics(
     season_length: int,
     variant: str,
     window: str,
+    spec: ForecastSpec | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for uid, group in scored.groupby("unique_id", sort=False):
@@ -1998,6 +2261,17 @@ def _confirmation_metrics(
                 "bias": float(errors.mean()),
             }
         )
+    if spec is not None and spec.selection_policy.objective == "monthly_landing":
+        from nixtla_scaffold.finance import finance_cutoff_metrics
+        origin = training.groupby("unique_id").ds.max()
+        frame = scored.assign(cutoff=scored.unique_id.map(origin))
+        history = pd.concat([training[["unique_id", "ds", "y"]],
+                             scored[["unique_id", "ds", "y_actual"]].rename(columns={"y_actual": "y"})],
+                            ignore_index=True)
+        metrics = finance_cutoff_metrics(frame, history, horizon=spec.horizon,
+                                         clip_negative=spec.selection_policy.clip_negative).set_index("unique_id")
+        for row in rows:
+            row.update(metrics.loc[str(row["unique_id"]), ["landing_mape_pct", "next28_mape_pct"]].to_dict())
     return rows
 
 
@@ -2329,15 +2603,14 @@ def _first_positive(values: Any) -> float | None:
     if values is None:
         return None
     numeric = pd.to_numeric(values, errors="coerce")
-    valid = numeric[numeric.gt(0)]
-    return float(valid.iloc[0]) if not valid.empty else None
+    if numeric.empty or not numeric.map(_number).notna().all() or not numeric.gt(0).all() or numeric.nunique() != 1:
+        return None
+    return float(numeric.iloc[0])
 
 
 def _mean(frame: pd.DataFrame, column: str | None) -> float | None:
-    if column is None or frame.empty or column not in frame.columns:
-        return None
-    value = pd.to_numeric(frame[column], errors="coerce").mean()
-    return None if pd.isna(value) else float(value)
+    from nixtla_scaffold.evaluation import complete_metric_mean
+    return complete_metric_mean(frame, column)
 
 
 def _number(value: Any) -> float | None:

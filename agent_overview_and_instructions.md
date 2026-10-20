@@ -6,16 +6,24 @@ This file is the detailed handoff for AI agents, maintainers, and power users. K
 
 When asked to forecast a metric, keep the run explainable and conservative:
 
-1. Confirm the target, grain, time column, forecast horizon, and whether the output is exploratory or planning-facing.
+1. Inspect the selected data first. Infer unambiguous structure, reuse the supplied horizon, and ask only about material ambiguity or authorization. Do not invent units or business semantics.
 2. Normalize the input to `unique_id`, `ds`, and `y`.
-3. Start with `setup --preset accuracy-first --research-budget ... --input <real path>`, then work `signal_needs.json` through bounded capability-first probes before generic optimization.
+3. Start the bounded local baseline without an intake interview when source and horizon are clear. If no horizon is supplied or saved, label six observed-frequency periods provisional and remain directional. Keep unknown business context empty. Use `setup` for reusable configuration, not as a mandatory gate. Work signal needs only within approved source scope.
 4. Open `appendix\accuracy_gate.json` first, then cite the curated artifacts: `OPEN_ME_FIRST.html`, `output\forecast_review.xlsx`, `appendix\trust_summary.csv`, `forecast.csv`, `report.html`, and `llm_context.json`.
 5. Treat `planning_eligible=True` as a horizon-validation flag only. It does not override Low trust, interval failures, residual warnings, hierarchy gaps, data-quality caveats, or business review.
 6. Quote the deterministic executive headline from `diagnostics.json.executive_headline.paragraph` or `llm_context.json`; do not paraphrase it into a stronger claim.
-7. Launch the official run's generated `run_streamlit.ps1` / `streamlit_app.py` before creating any custom UI. A custom dashboard is supplemental only when explicitly requested.
+7. Use the installed Forecast Workbench as the primary Copilot interface for intake, paired comparison, ensembles, research and maintenance. Keep generated Streamlit as the compatibility viewer. Review executable pipelines/custom models separately; native settings never grant execution permission.
 8. Do not stitch per-series winners from different experiment runs into an unofficial hybrid. One official forecast comes from one frozen spec and its within-run selection.
 9. Treat `forecast.xlsx` and `output\forecast_review.xlsx` as automatic package artifacts. Do not invoke Excel COM, LibreOffice, or custom workbook automation unless the user explicitly requests a custom workbook.
 10. Stop when the installed skill and executable package disagree. Use the matching worktree or Git ref instead of hand-building missing capabilities.
+11. New requests default to accuracy-first across interfaces. Historical saved specs retain their original policy; quick runs remain exploratory.
+12. Inspect actual fitted recipes and interval provenance in `audit\candidate_evidence.json`. Do not infer ETS components from an AutoETS alias or describe native TBATS bands as conformal.
+13. Keep full-schedule component scores separate from later-cohort ensemble comparisons. Read `appendix\ensemble_comparisons.json`; incomplete support and small calibration samples cannot earn stronger claims.
+14. Resume a stopped native canvas forecast only through `resume_job`, with its original remaining budget. Reuse saved baselines and frozen hypotheses. Never reset time, reserve confirmation again, or silently replay research or side effects.
+15. Read the profile's `configuration_diagnostics` and `audit\configuration.json` before changing recipes. Separate calendar priors from detected periods, external transforms from native fitted transformations, and inner search loss from the outer objective. Treat shape/jump warnings as review requirements, not forecast caps. Configuration experiments consume the same bounded improvement budget and never auto-adopt.
+16. New daily requests detect anomalies inside each training cutoff. Review `audit\anomalies.json`; never clean the full history before CV or rewrite actuals for a smoother forecast. `analyze` can spend its two existing slots on admissible anomaly/calendar trials before ensembles. Holidays need explicit scope, custom dates need `known_as_of`, persistent shifts are protected, and adjusted recipes calibrate intervals on original outer targets. Saved legacy recipes retain their old behavior.
+17. Inspect native `audit\native_fitted_points.csv` and `native_fitted_summary.csv` for fitted-model flags, distinct from robust preprocessing and future intervals. New requests exclude configuration-review candidates through the declared selection guard; old specs remain warning-only. Never claim that exclusion guarantees accuracy or hide rejected paths by clipping them.
+18. For an explicitly production-bound run, use `--preset production` and inspect `production_readiness.json`. This qualifies the chronological deployed selector, not today's retrospectively selected component. The visible 10% error/5% bias defaults are provisional technical limits, not an approved business SLA. Report exact failed checks instead of a generic disclaimer; never tune gates to pass. Only `release\` is the statistical delivery bundle; its creation grants neither business approval nor publication. Keep old planning/context gates intact and reuse the saved production policy on refresh.
 
 The bundled skill at `skills\nixtla-forecast\SKILL.md` is the most complete agent playbook. From an installed wheel, run:
 
@@ -78,12 +86,12 @@ Useful flags:
 | `--strict-cv-horizon` | Require champion validation at the requested horizon. |
 | `--hierarchy-reconciliation bottom_up|top_down|both|mint_ols|mint_wls_struct` | Produce coherent hierarchy planning outputs. |
 
-## Intake questions
+## Profile-first setup
 
 Use `setup` when the request is broad, the source is query-backed, or the agent needs a reusable workspace:
 
 ```powershell
-nixtla-scaffold setup --workspace runs\usage_overage_setup --data-source kusto --input exports\usage.json --preset accuracy-first --research-budget balanced --series-count single --target-name ARR_30day_avg --time-col day_dt --id-value "Usage Overage ARR" --freq ME --horizon 6 --intervals auto --model-families standard --exploration-mode --mcp-regressor-search --outputs all
+nixtla-scaffold setup --workspace runs\usage_overage_setup --data-source kusto --input exports\usage.json --preset accuracy-first --research-budget time-boxed --research-max-iterations 2 --research-max-variants-per-iteration 1 --research-max-wall-clock-minutes 15 --series-count single --target-name ARR_30day_avg --time-col day_dt --id-value "Usage Overage ARR" --freq ME --horizon 6 --intervals auto --model-families standard --exploration-mode --outputs all
 ```
 
 The setup workspace includes `forecast_setup.yaml`, `questions.json`, `agent_brief.md`,
@@ -92,16 +100,27 @@ The setup workspace includes `forecast_setup.yaml`, `questions.json`, `agent_bri
 data, outputs, reports, and notes. Existing single-series inputs receive a quoted,
 runnable ingest command with an injected series ID.
 
-Ask these before modeling:
+`questions.json` is an optional context reference, not an interview to administer.
+Inspect first and show findings, assumptions and the local execution bound. A
+clear source and supplied horizon require zero intake questions. Ask one focused
+question for competing targets, irregular calendars, missing repair semantics,
+new source access or expensive execution. Do not ask the user to select model
+families, opt into profiling, or choose the standard output files.
 
-1. Which preset should we start from: `quick`, `standard`, `strict`, or `hierarchy`?
-2. Where is the data coming from: CSV, Excel, Kusto, DAX, SQL, DataFrame, or unknown?
-3. How many things are being forecast: single series, a few series, many series, or a hierarchy?
-4. Are intervals required, optional, or automatic?
-5. Which model families are allowed: baseline, StatsForecast, MLForecast, HierarchicalForecast, or research-only NeuralForecast?
-6. Should exploration run before forecasting?
-7. Can the agent use MCPs to find candidate drivers or regressors?
-8. Which standard review surface should open first? Default to the canonical Streamlit workbench; the package already generates the standard CSV, Excel, HTML, diagnostics, and model-card artifacts.
+The canvas bounds local jobs to 15 minutes, with at most two advisory blend
+comparisons or two research iterations. Research reserves eligible confirmation
+before exposing target diagnostics; a full-history forecast consumes that
+snapshot's holdout. Directional ensemble adoption creates a new immutable version,
+not a promotion, publication or official lock. Missing calibrated intervals and
+confirmation remain visible limitations.
+
+Do not run the full-history `profile`/`forecast` examples before a protected
+research workflow. Use the optimizer's chronological split first. Missing
+audience, units or refresh cadence limits claims; it does not require another
+interview before a directional baseline. Generated context fields and
+human-context questions are analyst reference, not a checklist to ask verbatim.
+CLI optimizer wall-clock budgets are checked between stages; use a bounded,
+cancellable process if an individual fit must obey a hard deadline.
 
 ## Data contract
 
@@ -170,7 +189,7 @@ Interval statuses:
 
 | Status | Meaning |
 | --- | --- |
-| `calibrated` | Matching rolling-origin interval coverage exists. |
+| `calibrated` | Matching later coverage meets method-specific sample and support checks; this is not a coverage guarantee. |
 | `calibration_warning` | Evidence exists but coverage gap needs review. |
 | `calibration_fail` | Undercoverage risk. |
 | `future_only` | Future interval exists without matching rolling-origin evidence. |
@@ -263,6 +282,14 @@ Hierarchy column order matters. `region product` creates `Total -> region -> reg
 
 ## Source pipelines, events, drivers, and experiments
 
+Automatic driver research uses contracted, explicitly granted local snapshots
+and tuning-only signed/residual lag screening. Read `driver_research.json` and
+each `driver_ablation.json`: one feature, frozen safe lag, matched learner and
+complete origins must pass before exact-spec later confirmation. Correlation,
+declared publication dates and a changed model family do not prove incremental
+value. Saved snapshot copies support frozen refresh; monitoring cannot adopt.
+No enabled discovery route means unavailable enrichment, not a user opt-out.
+
 For Kusto, DAX, SQL, or other query-backed sources, use `ingest` or a pipeline to preserve source metadata:
 
 ```powershell
@@ -286,10 +313,15 @@ nixtla-scaffold forecast --input examples\monthly_finance_csv\input.csv --horizo
 Use `experiment` for one falsifiable change and `optimize` for a budgeted,
 reviewer-gated sequence with the latest eligible rows reserved for confirmation:
 
+These are independent routes, not sequential steps. `compare-models` executes a
+new forecast tournament; use saved artifacts for inspection-only review. Neither
+that tournament nor a full-history experiment can precede an untouched-confirmation
+claim on the same rows. Start with `optimize` for protected research.
+
 ```powershell
 nixtla-scaffold compare-models --input examples\monthly_finance_csv\input.csv --preset standard --horizon 6 --output runs\compare_models_demo
 nixtla-scaffold experiment --input examples\monthly_finance_csv\input.csv --preset accuracy-first --context-file forecast_context.json --horizon 6 --variants rolling_features --hypothesis "Stable lag structure should improve full-horizon scale-free error." --max-variants 1 --output runs\experiment_rolling
-nixtla-scaffold optimize --input examples\monthly_finance_csv\input.csv --preset accuracy-first --context-file forecast_context.json --horizon 6 --output runs\optimizer
+nixtla-scaffold optimize --input examples\monthly_finance_csv\input.csv --preset accuracy-first --context-file forecast_context.json --horizon 6 --research-budget time-boxed --research-max-iterations 2 --research-max-variants-per-iteration 1 --research-max-wall-clock-minutes 15 --max-iterations 2 --max-variants 1 --output runs\optimizer
 ```
 
 The optimizer writes a chronological split, per-iteration reviewer receipts, a

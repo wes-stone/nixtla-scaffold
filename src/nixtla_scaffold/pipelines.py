@@ -17,7 +17,7 @@ from nixtla_scaffold.connectors import read_query_result_source
 from nixtla_scaffold.data import canonicalize_forecast_frame
 from nixtla_scaffold.forecast import run_forecast
 from nixtla_scaffold.ops import write_operational_receipts
-from nixtla_scaffold.presets import forecast_spec_preset
+from nixtla_scaffold.presets import resolve_forecast_spec
 from nixtla_scaffold.refresh import write_refresh_artifacts
 from nixtla_scaffold.schema import ForecastSpec, forecast_spec_from_dict
 
@@ -61,6 +61,11 @@ def _run_pipeline(
     config_dir = config_path.parent.resolve()
     payload = _load_pipeline_config(config_path)
     out = (_default_output_dir(payload) if output_dir is None else Path(output_dir)).resolve()
+    if forecast and _forecast_enabled(payload):
+        preview_spec = _refresh_spec(previous_run) if previous_run is not None else _forecast_spec_from_config(payload.get("forecast", {}) or {})
+        if preview_spec.production is not None:
+            from nixtla_scaffold.production import reserve_production_output
+            reserve_production_output(out)
     out.mkdir(parents=True, exist_ok=True)
 
     manifest = _base_manifest(payload, config_path, out, previous_run=previous_run)
@@ -81,7 +86,10 @@ def _run_pipeline(
             _attach_pipeline_manifest(Path(forecast_result["forecast_output"]), out / PIPELINE_MANIFEST_FILE, summary_path, manifest)
         return manifest
     except (OSError, ValueError, ImportError, RuntimeError) as exc:
-        manifest["status"] = "failed"
+        from nixtla_scaffold.production import ProductionReleaseError
+        manifest["status"] = "quality_rejected" if isinstance(exc, ProductionReleaseError) else "failed"
+        if manifest["status"] == "quality_rejected":
+            manifest["forecast"]["release_status"] = "rejected"
         manifest["completed_at_utc"] = _utc_now()
         manifest["error"] = {"type": type(exc).__name__, "message": str(exc)}
         _write_pipeline_summary(out, manifest)
@@ -297,6 +305,8 @@ def _write_forecast_run(
         raise ValueError("pipeline forecast config must be a mapping")
     forecast_dir = _resolve_output_path(output_dir, forecast_config.get("output", "forecast"))
     spec = _refresh_spec(previous_run) if previous_run is not None else _forecast_spec_from_config(forecast_config)
+    if spec.production is not None:
+        manifest["forecast"] = {"enabled": True, "forecast_output": str(forecast_dir), "release_status": "pending"}
     run = run_forecast(canonical_path, spec)
     run_output = run.to_directory(forecast_dir)
     challenger_payload = None
@@ -311,7 +321,9 @@ def _write_forecast_run(
         "enabled": True,
         "mode": "refresh" if previous_run is not None else "run",
         "forecast_output": str(run_output),
-        "spec": spec.to_dict(),
+        "spec": run.spec.to_dict(),
+        **({"release_status": "qualified", "release_manifest": str(run_output / "release" / "manifest.json")}
+           if spec.production is not None else {}),
         "refresh": refresh_result or {},
         "challengers": challenger_payload or {},
     }
@@ -321,13 +333,9 @@ def _write_forecast_run(
 
 def _forecast_spec_from_config(forecast_config: Mapping[str, Any]) -> ForecastSpec:
     preset = forecast_config.get("preset")
-    base = forecast_spec_preset(str(preset)) if preset else ForecastSpec()
     overrides = {key: value for key, value in forecast_config.items() if key in _SPEC_FIELD_NAMES}
-    spec_data = base.to_dict() | overrides
-    spec_data["id_col"] = "unique_id"
-    spec_data["time_col"] = "ds"
-    spec_data["target_col"] = "y"
-    return forecast_spec_from_dict(spec_data)
+    overrides.update(id_col="unique_id", time_col="ds", target_col="y")
+    return resolve_forecast_spec(overrides, preset=str(preset) if preset else None)
 
 
 def _refresh_spec(previous_run: str | Path | None) -> ForecastSpec:
@@ -338,6 +346,8 @@ def _refresh_spec(previous_run: str | Path | None) -> ForecastSpec:
         raise FileNotFoundError(manifest_path)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     spec = forecast_spec_from_dict(manifest.get("spec", {}))
+    from nixtla_scaffold.feature_sources import bind_saved_driver_snapshots
+    spec = bind_saved_driver_snapshots(spec, Path(previous_run), manifest)
     return forecast_spec_from_dict(spec.to_dict() | {"id_col": "unique_id", "time_col": "ds", "target_col": "y"})
 
 
@@ -627,8 +637,9 @@ def _query_files(step: Mapping[str, Any], config_dir: Path) -> list[Path]:
 
 
 def _execute_script(command: list[str], *, cwd: Path, timeout_seconds: int | None) -> dict[str, Any]:
+    from nixtla_scaffold.processes import run_script
     try:
-        completed = subprocess.run(command, cwd=str(cwd), text=True, capture_output=True, timeout=timeout_seconds, check=False)
+        completed = run_script(command, cwd=cwd, timeout=timeout_seconds or 300)
     except subprocess.TimeoutExpired as exc:
         return {"exit_code": 124, "stdout": exc.stdout or "", "stderr": f"script timed out after {timeout_seconds} seconds"}
     return {"exit_code": int(completed.returncode), "stdout": completed.stdout, "stderr": completed.stderr}

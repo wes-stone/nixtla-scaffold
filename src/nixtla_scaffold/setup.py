@@ -15,7 +15,7 @@ from nixtla_scaffold.signals import build_initial_signal_needs, write_signal_art
 DATA_SOURCES = ("csv", "excel", "kusto", "dax", "sql", "dataframe", "unknown")
 SERIES_COUNTS = ("single", "few", "many", "hierarchy", "unknown")
 INTERVAL_MODES = ("auto", "point", "intervals")
-MODEL_FAMILIES = ("standard", "light", "auto", "baseline", "statsforecast", "mlforecast", "hierarchicalforecast", "neuralforecast_research")
+MODEL_FAMILIES = ("standard", "light", "auto", "baseline", "statsforecast", "mlforecast", "hierarchicalforecast")
 
 
 @dataclass(frozen=True)
@@ -28,8 +28,8 @@ class SetupAnswers:
     time_col: str = "ds"
     id_col: str = "unique_id"
     id_value: str | None = None
-    preset: str = "standard"
-    horizon: int = 12
+    preset: str = "accuracy-first"
+    horizon: int = 6
     freq: str | None = None
     intervals: str = "auto"
     model_families: tuple[str, ...] = ("standard",)
@@ -131,8 +131,9 @@ def create_forecast_setup(workspace: str | Path, answers: SetupAnswers) -> Setup
 
 
 def setup_questions(answers: SetupAnswers | None = None) -> list[dict[str, Any]]:
+    """Return optional context fields for saved setups, not a mandatory interview."""
     selected = answers or SetupAnswers()
-    return [
+    questions = [
         {
             "id": "decision",
             "question": "What decision will this forecast support, and who is the audience?",
@@ -188,7 +189,7 @@ def setup_questions(answers: SetupAnswers | None = None) -> list[dict[str, Any]]
             "question": "Which model families should be considered?",
             "answer": list(selected.model_families),
             "options": list(MODEL_FAMILIES),
-                "caveat": "Standard is the default serious model policy: StatsForecast, feasible MLForecast, and optional smooth ADAM when installed. Light is the slim path without smooth by default. NeuralForecast is research-only.",
+                "caveat": "Standard is the default serious model policy: StatsForecast, feasible MLForecast, and optional smooth ADAM when installed. Light is the slim path without smooth by default.",
         },
         {
             "id": "research_budget",
@@ -227,47 +228,40 @@ def setup_questions(answers: SetupAnswers | None = None) -> list[dict[str, Any]]
             ),
         },
     ]
+    return [{**question, "reference_only": True} for question in questions]
 
 
 def interactive_answers(defaults: SetupAnswers | None = None) -> SetupAnswers:
+    import pandas as pd
+    from nixtla_scaffold.data import read_tabular_source
+
     current = defaults or SetupAnswers()
-    current = replace(current, preset=_prompt_choice("Which forecast preset should we start from?", PRESET_NAMES, current.preset))
-    current = replace(current, data_source=_prompt_choice("Where is the data coming from?", DATA_SOURCES, current.data_source))
-    current = replace(current, series_count=_prompt_choice("How many different things are we forecasting?", SERIES_COUNTS, current.series_count))
-    current = replace(current, decision=_prompt_text("Decision this forecast supports", current.decision))
-    current = replace(current, audience=_prompt_text("Primary audience", current.audience))
-    current = replace(current, target_name=_prompt_text("Target/metric column or name", current.target_name))
-    current = replace(current, target_semantics=_prompt_text("Target definition/semantics", current.target_semantics or current.target_name))
-    current = replace(current, units=_prompt_text("Target units", current.units))
-    current = replace(current, time_col=_prompt_text("Date/time column", current.time_col))
-    current = replace(current, id_col=_prompt_text("Series ID column", current.id_col))
-    current = replace(
-        current,
-        input_path=_prompt_text("Existing input file (blank for workspace placeholder)", current.input_path or "")
-        or None,
-    )
-    current = replace(current, horizon=int(_prompt_text("Forecast horizon", str(current.horizon))))
-    current = replace(current, freq=_prompt_text("Frequency hint (blank for auto)", current.freq or "") or None)
-    current = replace(current, grain=_prompt_text("Forecast grain", current.grain or current.freq or ""))
-    current = replace(current, refresh_cadence=_prompt_text("Refresh cadence", current.refresh_cadence))
-    current = replace(current, intervals=_prompt_choice("Point forecast or intervals?", INTERVAL_MODES, current.intervals))
-    models = _prompt_text("Model families, comma-separated", ",".join(current.model_families))
-    current = replace(current, model_families=tuple(item.strip() for item in models.split(",") if item.strip()))
-    current = replace(current, exploration_mode=_prompt_bool("Run exploration mode first?", current.exploration_mode))
-    current = replace(current, source_discovery=_prompt_bool("Run bounded connected-source discovery?", current.source_discovery))
-    current = replace(current, mcp_regressor_search=_prompt_bool("Allow MCP search for candidate regressors?", current.mcp_regressor_search))
-    budget_profile = _prompt_choice(
-        "Research budget profile",
-        ("time-boxed", "balanced", "deep", "custom"),
-        current.research_budget.profile,
-    )
-    if budget_profile == "custom":
-        max_minutes = int(_prompt_text("Custom maximum wall-clock minutes", str(current.research_budget.max_wall_clock_minutes or 60)))
-        current = replace(current, research_budget=ResearchBudget(profile="custom", max_wall_clock_minutes=max_minutes))
-    else:
-        current = replace(current, research_budget=ResearchBudget(profile=budget_profile))
-    outputs = _prompt_text("Outputs, comma-separated", ",".join(current.outputs))
-    return replace(current, outputs=tuple(item.strip() for item in outputs.split(",") if item.strip()))
+    if not current.input_path:
+        path = _prompt_text("Selected input file", "")
+        if not path:
+            raise ValueError("Select a source file before interactive setup.")
+        current = replace(current, input_path=path)
+    raw = read_tabular_source(current.input_path)
+    if raw.empty:
+        raise ValueError("Selected source has no rows.")
+    columns = list(raw.columns)
+    dates = [col for col in columns if str(col).lower() in {"ds", "date", "month", "time", "period"}]
+    time_col = current.time_col if current.time_col in columns else dates[0] if len(dates) == 1 else _prompt_text("Which column is the time axis?", "")
+    ids = [col for col in columns if str(col).lower() in {"unique_id", "series", "series_id", "product"}]
+    id_col = current.id_col if current.id_col in columns else ids[0] if len(ids) == 1 else current.id_col
+    numeric = [col for col in columns if col not in {time_col, id_col} and pd.api.types.is_numeric_dtype(raw[col])]
+    target = current.target_name if current.target_name in columns else numeric[0] if len(numeric) == 1 else _prompt_text("Which numeric column should be forecast?", "")
+    if time_col not in columns or target not in columns:
+        raise ValueError("The time and target columns must exist in the selected source.")
+    calendar = pd.to_datetime(raw[time_col], errors="raise").drop_duplicates().sort_values()
+    freq = current.freq or (pd.infer_freq(calendar) if len(calendar) >= 3 else None)
+    if not freq:
+        freq = _prompt_text("The observed calendar is irregular. Which forecast frequency should be used?", "")
+    if not freq:
+        raise ValueError("An explicit frequency is required for an irregular calendar.")
+    print(f"Observed {len(raw)} rows; time={time_col}, target={target}, frequency={freq}. Horizon={current.horizon}.")
+    return replace(current, time_col=time_col, target_name=target, id_col=id_col, freq=freq,
+                   series_count="few" if id_col in columns and raw[id_col].nunique() > 1 else "single")
 
 
 def _config_payload(
@@ -295,7 +289,7 @@ def _config_payload(
             "source_discovery": answers.source_discovery,
             "mcp_regressor_search_allowed": answers.mcp_regressor_search,
             "research_budget": answers.research_budget.to_dict(),
-            "model_family_caveat": "Baseline, StatsForecast, MLForecast, and hierarchy reconciliation are active when optional dependencies/data contracts support them. NeuralForecast is research-only.",
+            "model_family_caveat": "Baseline, StatsForecast, MLForecast, and hierarchy reconciliation are active when optional dependencies/data contracts support them.",
             "interval_caveat": "Prediction intervals are gated by available history and model support.",
             "regressor_caveat": "Only use regressors as model features when future values are known and leakage checks pass.",
         },
@@ -320,13 +314,13 @@ def _agent_brief(
     lines = [
         f"# Forecast setup brief: {answers.name}",
         "",
-        "Use this file as the agent intake before running a forecast. Do not skip exploration when the grain, frequency, or metric definition is uncertain.",
+        "Inspect the selected data first. These saved context fields are optional reference, not an interview. Ask only for consequential ambiguity or authorization; otherwise proceed within the bounded local forecast request.",
         "",
-        "## Intake answers",
+        "## Supplied context and optional reference",
         "",
     ]
     for item in questions:
-        lines.append(f"- **{item['question']}** `{item['answer']}`")
+        lines.append(f"- **{item['id'].replace('_', ' ').capitalize()}**: `{item['answer']}`")
         if "caveat" in item:
             lines.append(f"  Caveat: {item['caveat']}")
     lines.extend(
@@ -351,23 +345,27 @@ def _agent_brief(
             "",
             "## Required exploration checks",
             "",
-            "1. Confirm the metric definition and whether it is raw, adjusted, billed, consumed, trial, internal, or external.",
-            "2. Confirm the forecast grain and whether each row maps to one `unique_id`, `ds`, `y` point.",
-            "3. Profile missing dates, duplicate keys, sparse histories, zeros, negatives, and outliers.",
+            "1. Establish metric meaning from supplied definitions and metadata. Preserve unknown units, audience and business meaning; do not invent answers or block a directional baseline on optional context.",
+            "2. Derive grain, date coverage and series keys from the selected source. Ask one focused question only for an unresolved competing target, calendar or consequential aggregation/repair.",
+            "3. Before target-dependent profiling, choose the evidence path: ordinary full-history forecasting is retrospective; confirmatory research must reserve its chronological split before inspecting targets. Never claim a previously viewed tail is untouched.",
             "4. Check whether hierarchy or grouped rollups are needed before stakeholder use.",
-            "5. Choose model families deliberately: baselines for sanity, StatsForecast for classical production, MLForecast for feasible lag/calendar ML and audited future-regressor experiments, HierarchicalForecast for reconciliation, NeuralForecast for research only.",
-            "6. List possible drivers/events and separate known future assumptions from historical-only explanatory variables.",
+            "5. Choose model families deliberately: baselines for sanity, StatsForecast for classical production, MLForecast for feasible lag/calendar ML and audited future-regressor experiments, HierarchicalForecast for reconciliation.",
+            "6. Investigate drivers/events from supplied evidence, not a feature interview. Unknown future events mean not modeled, not that no events exist.",
             "7. Decide whether intervals are appropriate after seeing history length and backtest windows.",
-            "8. Inventory relevant connected sources, then use bounded schema/count/sample/aggregate queries; record available, unavailable, irrelevant, and opted-out sources in forecast_context.json.",
+            "8. Obtain explicit scope and approval before accessing a new connected source. Use bounded queries only within that scope and record source dispositions in forecast_context.json.",
             "9. Never copy discovered drivers into model regressors. Admit them only after future-availability, latency, leakage, and rolling-origin evidence pass.",
             "10. Read appendix/accuracy_gate.json after the run. Directional-only output must not be described as planning-ready.",
-            "11. Work signal_needs.json in priority order. Append every bounded query to signal_probe_ledger.jsonl and put only validated dispositions in signal_contracts.json.",
-            "12. Launch the official run's generated run_streamlit.ps1 / streamlit_app.py first. Never replace it with a custom dashboard unless the user explicitly requests a supplemental UI.",
+            "11. Work signal_needs.json within approved scope. Record unavailable routes honestly, never fabricated opt-outs or satisfied needs; keep incomplete discovery explicit without blocking an otherwise valid directional baseline.",
+            "12. Prefer the installed Forecast Workbench canvas for supported review and ensemble paths, but continue with the matching CLI when absent. Retain run_streamlit.ps1 / streamlit_app.py as the compatibility viewer.",
             "13. Do not stitch per-series winners from different experiment runs into a hybrid official forecast. One official forecast must come from one frozen spec and its within-run selection.",
             "14. forecast.xlsx and output/forecast_review.xlsx are automatic artifacts. Do not invoke Excel COM, LibreOffice, or custom workbook automation unless the user explicitly asks for a custom workbook.",
             "15. Stop if the installed skill and executable package disagree; use a matching worktree or Git ref instead of hand-building missing capabilities.",
+            "16. Do not ask users to choose profiling, models, intervals, outputs or a routine research budget. Agent-created setups should explicitly use time-boxed bounds: two iterations, one variant each, 15 minutes. A larger saved budget is not new authorization to spend it.",
+            "17. Unknown required context fields stay empty; do not weaken AccuracyPolicy or populate placeholders to get planning-ready status. Preserve independent analysis while resolving only consequential blockers.",
             "",
             "## Next commands",
+            "",
+            "These are ordinary full-history commands, not a protected research sequence. For confirmatory work, use optimize's chronological split before any full-target profile or ingest-with-forecast. Do not run these first and relabel the same tail as untouched.",
             "",
         ]
     )
@@ -431,7 +429,7 @@ def _forecast_context(root: Path, answers: SetupAnswers) -> ForecastContext:
     source_status = (
         "available"
         if input_path is not None and input_path.exists()
-        else ("planned" if answers.source_discovery else "opted_out")
+        else ("planned" if answers.source_discovery else "unavailable")
     )
     source = ContextSource(
         source_id=f"target_{answers.data_source}",
@@ -441,7 +439,7 @@ def _forecast_context(root: Path, answers: SetupAnswers) -> ForecastContext:
         query_ref=str(root / "queries" / f"source{_query_extension(answers.data_source)}")
         if answers.data_source in {"kusto", "dax", "sql"}
         else "",
-        notes="Primary target source; add each relevant connected source before running the forecast.",
+        notes="Primary target source; additional source discovery stays within explicit authorization and is not a prerequisite for a directional local baseline.",
     )
     return ForecastContext(
         decision=answers.decision,
@@ -504,7 +502,7 @@ def _model_policy_part(answers: SetupAnswers) -> str:
     families = set(answers.model_families)
     if "baseline" in families and len(families) == 1:
         return " --model-policy baseline"
-    if "statsforecast" in families and families.isdisjoint({"mlforecast", "hierarchicalforecast", "neuralforecast_research"}):
+    if "statsforecast" in families and families.isdisjoint({"mlforecast", "hierarchicalforecast"}):
         return " --model-policy statsforecast"
     if "standard" in families and len(families) == 1:
         return " --model-policy standard"

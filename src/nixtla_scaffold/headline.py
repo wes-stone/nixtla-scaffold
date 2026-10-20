@@ -393,6 +393,9 @@ def _horizon_sentence(trust_row: dict[str, Any], final: dict[str, Any]) -> str:
     if state == "full_horizon_validated" and full_claim:
         return f"Horizon: validated through the full requested {requested}-step horizon. "
     if state == "full_horizon_validated":
+        if trust_row.get("cv_disjoint_windows") is not None:
+            disjoint = _display_value(trust_row["cv_disjoint_windows"], "unknown")
+            return f"Horizon: {cv_windows} rolling origins include only {disjoint} disjoint full-horizon window(s); planning claim limited. "
         return f"Horizon: full requested {requested}-step horizon was evaluated on only {cv_windows} CV window(s); planning claim limited. "
     if state == "partial_horizon_validated":
         return f"Horizon: validated through step {validated} of {requested}; later steps are directional. "

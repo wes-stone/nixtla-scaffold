@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import os
 from importlib import metadata
 import platform
 import re
 import subprocess
 import sys
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, Sequence
 
@@ -19,6 +21,7 @@ from nixtla_scaffold.model_families import MODEL_ALLOWLIST_CANDIDATES, canonical
 
 FillMethod = Literal["ffill", "zero", "interpolate", "drop"]
 ModelPolicy = Literal["standard", "light", "auto", "baseline", "statsforecast", "mlforecast", "all"]
+RunMode = Literal["accuracy-first", "quick", "legacy"]
 EventEffect = Literal["additive", "multiplicative"]
 TargetTransform = Literal["none", "log", "log1p"]
 HierarchyReconciliationMethod = Literal["none", "bottom_up", "top_down", "both", "mint_ols", "mint_wls_struct"]
@@ -71,6 +74,68 @@ class DriverEvent:
 
 
 @dataclass(frozen=True)
+class DriverSnapshotGrant:
+    """Caller-authorized local snapshot, bound to content and series scope."""
+
+    source_id: str
+    path: str
+    sha256: str
+    series_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        from pathlib import Path
+        if not self.source_id.strip() or not Path(self.path).is_absolute():
+            raise ValueError("driver snapshot grants require a source ID and an absolute local path")
+        if len(self.sha256) != 64 or any(char not in "0123456789abcdef" for char in self.sha256):
+            raise ValueError("driver snapshot grant requires a lowercase SHA256")
+        if not self.series_ids or any(not isinstance(uid, str) or not uid for uid in self.series_ids):
+            raise ValueError("driver snapshot grant requires explicit nonblank text series IDs")
+        if len(set(self.series_ids)) != len(self.series_ids):
+            raise ValueError("driver snapshot grant contains duplicate series IDs")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {**asdict(self), "series_ids": list(self.series_ids)}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> DriverSnapshotGrant:
+        return cls(**{**data, "series_ids": tuple(data.get("series_ids", ()))})
+
+
+@dataclass(frozen=True)
+class DriverSourceContract:
+    """Declared semantics; validated against a separately granted snapshot."""
+
+    source_id: str
+    grain: str
+    units: str
+    measure_kind: Literal["stock", "flow", "rate"]
+    query_ref: str
+    business_mechanism: str
+    entity_col: str = "unique_id"
+    time_col: str = "ds"
+    value_col: str = "value"
+    release_col: str = "available_at"
+    vintage_col: str = "vintage"
+    period_end_col: str = "period_end"
+    units_col: str = "units"
+    aggregation: Literal["none"] = "none"
+
+    def __post_init__(self) -> None:
+        for name, value in asdict(self).items():
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"driver source contract requires nonblank {name}")
+        if self.measure_kind not in {"stock", "flow", "rate"} or self.aggregation != "none":
+            raise ValueError("driver snapshots must already have the declared stock/flow/rate grain; implicit aggregation is forbidden")
+        columns = (self.entity_col, self.time_col, self.value_col, self.release_col,
+                   self.vintage_col, self.period_end_col, self.units_col)
+        if len(set(columns)) != len(columns):
+            raise ValueError("driver source contract column roles must be distinct")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class KnownFutureRegressor:
     """Declared candidate model input with future-value and leakage audit metadata.
 
@@ -89,6 +154,8 @@ class KnownFutureRegressor:
     owner: str = ""
     refresh_latency_days: int | None = None
     notes: str = ""
+    source: DriverSourceContract | None = None
+    historical_lags: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if not str(self.name).strip():
@@ -105,9 +172,27 @@ class KnownFutureRegressor:
             raise ValueError("known-future regressor mode must be 'audit_only' or 'model_candidate'")
         if self.refresh_latency_days is not None and self.refresh_latency_days < 0:
             raise ValueError("known-future regressor refresh_latency_days must be >= 0")
+        if any(type(lag) is not int or lag < 1 for lag in self.historical_lags):
+            raise ValueError("historical_lags must contain positive integer periods")
+        if len(set(self.historical_lags)) != len(self.historical_lags):
+            raise ValueError("historical_lags must not contain duplicates")
+        if self.historical_lags and self.availability != "historical_only":
+            raise ValueError("historical_lags apply only to historical-only signals")
+        if self.source is not None:
+            if not isinstance(self.source, DriverSourceContract):
+                raise ValueError("regressor source must be a DriverSourceContract")
+            if self.future_file is not None:
+                raise ValueError("contracted drivers use only the granted snapshot, not a second future_file")
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        if self.source is None:
+            data.pop("source")
+        if self.historical_lags:
+            data["historical_lags"] = list(self.historical_lags)
+        else:
+            data.pop("historical_lags")
+        return data
 
 
 _RESEARCH_BUDGET_DEFAULTS: dict[str, dict[str, int | float | None]] = {
@@ -587,8 +672,45 @@ class FeatureRecipeSpec:
     pca: bool | None = None
     feature_selection: bool = False
     weekly_to_daily: bool = True
+    date_features_as_dummies: bool = False
+    mlforecast_strategy: Literal["recursive", "direct"] = "recursive"
+    horizon_features: tuple[tuple[int, tuple[str, ...]], ...] = ()
+    lookup_lag_columns: tuple[str, ...] = ()
+    pooled_rolling_window: int | None = None
+    pooled_partition_columns: tuple[str, ...] = ()
+    pooled_series_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        if not isinstance(self.date_features_as_dummies, bool):
+            raise ValueError("feature_recipe.date_features_as_dummies must be a boolean")
+        if self.mlforecast_strategy not in {"recursive", "direct"}:
+            raise ValueError("feature_recipe.mlforecast_strategy must be recursive or direct")
+        features = self.horizon_features.items() if isinstance(self.horizon_features, dict) else self.horizon_features
+        normalized = []
+        for horizon, columns in features:
+            if isinstance(horizon, str) and re.fullmatch(r"[1-9][0-9]*", horizon):
+                horizon = int(horizon)
+            if type(horizon) is not int or horizon < 1:
+                raise ValueError("horizon_features keys must be positive integers")
+            if not isinstance(columns, (list, tuple)) or not columns:
+                raise ValueError("horizon_features values must be nonempty column arrays")
+            normalized.append((horizon, _feature_columns(columns)))
+        if len({h for h, _ in normalized}) != len(normalized):
+            raise ValueError("horizon_features cannot repeat a horizon")
+        object.__setattr__(self, "horizon_features", tuple(sorted(normalized)))
+        if self.horizon_features and self.mlforecast_strategy != "direct":
+            raise ValueError("horizon_features require the explicit direct forecasting strategy")
+        for name in ("lookup_lag_columns", "pooled_partition_columns", "pooled_series_ids"):
+            object.__setattr__(self, name, _feature_columns(getattr(self, name)))
+        if self.lookup_lag_columns and self.mlforecast_strategy != "direct":
+            raise ValueError("LookupLag requires direct strategy so lookups never use generated future targets")
+        if self.pooled_rolling_window is not None:
+            if type(self.pooled_rolling_window) is not int or self.pooled_rolling_window < 1:
+                raise ValueError("pooled_rolling_window must be a positive integer")
+            if not self.pooled_partition_columns and len(self.pooled_series_ids) < 2:
+                raise ValueError("Pooled rolling features require a declared multi-series cohort or partition columns")
+        elif self.pooled_partition_columns or self.pooled_series_ids:
+            raise ValueError("Declare pooled_rolling_window when enabling pooled or partitioned transforms")
         if self.fiscal_year_start < 1 or self.fiscal_year_start > 12:
             raise ValueError("feature_recipe.fiscal_year_start must be between 1 and 12")
         object.__setattr__(self, "fourier_periods", _positive_int_tuple(self.fourier_periods, "feature_recipe.fourier_periods"))
@@ -602,7 +724,7 @@ class FeatureRecipeSpec:
 
     @property
     def enabled(self) -> bool:
-        return bool(self.fourier_periods or self.lag_periods or self.rolling_window_periods or self.recipes_to_run or self.pca or self.feature_selection)
+        return bool(self.fourier_periods or self.lag_periods or self.rolling_window_periods or self.recipes_to_run or self.pca or self.feature_selection or self.date_features_as_dummies or self.mlforecast_strategy == "direct" or self.lookup_lag_columns or self.pooled_rolling_window)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -610,7 +732,18 @@ class FeatureRecipeSpec:
         data["lag_periods"] = list(self.lag_periods)
         data["rolling_window_periods"] = list(self.rolling_window_periods)
         data["recipes_to_run"] = list(self.recipes_to_run)
+        data["horizon_features"] = {str(h): list(columns) for h, columns in self.horizon_features}
+        for name in ("lookup_lag_columns", "pooled_partition_columns", "pooled_series_ids"):
+            data[name] = list(getattr(self, name))
         return data
+
+
+def _feature_columns(values) -> tuple[str, ...]:
+    if not isinstance(values, (list, tuple)) or any(not isinstance(v, str) or not v.strip() for v in values):
+        raise ValueError("Feature columns and series IDs must be arrays of nonblank strings")
+    if len(set(values)) != len(values):
+        raise ValueError("Feature columns and series IDs cannot contain duplicates")
+    return tuple(values)
 
 
 @dataclass(frozen=True)
@@ -830,14 +963,276 @@ class CustomModelSpec:
 
 
 @dataclass(frozen=True)
+class ModelConfiguration:
+    """Explicit native settings; empty values retain the original model recipes."""
+
+    seasonal_periods: tuple[int, ...] = ()
+    mfles_seasonality: Literal["auto", "additive", "multiplicative"] = "auto"
+    mfles_fourier_order: int | None = None
+    automfles_metric: Literal["smape", "mse", "mae"] = "smape"
+    automfles_test_size: int | None = None
+    automfles_windows: int = 2
+    automfles_step_size: int | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.seasonal_periods, (tuple, list)):
+            raise ValueError("seasonal_periods must be an array of integer periods")
+        periods = tuple(self.seasonal_periods)
+        if len(periods) > 3 or any(type(p) is not int or p < 2 for p in periods):
+            raise ValueError("seasonal_periods requires at most three integer periods >= 2")
+        if len(set(periods)) != len(periods):
+            raise ValueError("seasonal_periods must be unique, in order of modeling importance")
+        object.__setattr__(self, "seasonal_periods", periods)
+        if self.mfles_seasonality not in {"auto", "additive", "multiplicative"}:
+            raise ValueError("mfles_seasonality must be auto, additive, or multiplicative")
+        if self.mfles_fourier_order is not None and (
+            type(self.mfles_fourier_order) is not int or self.mfles_fourier_order < 1
+        ):
+            raise ValueError("mfles_fourier_order must be a positive integer")
+        if self.automfles_metric not in {"smape", "mse", "mae"}:
+            raise ValueError("automfles_metric must be smape, mse, or mae; monthly landing is an outer objective")
+        for name in ("automfles_test_size", "automfles_windows", "automfles_step_size"):
+            value = getattr(self, name)
+            if value is None and name != "automfles_windows":
+                continue
+            if type(value) is not int or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {**asdict(self), "seasonal_periods": list(self.seasonal_periods)}
+
+
+@dataclass(frozen=True)
+class EvaluationPolicy:
+    strategy: Literal["rolling-origin", "legacy", "none"] = "rolling-origin"
+    max_windows: int = 24
+    max_calibration_windows: int = 20
+    step_size: int | None = 1
+    minimum_training_observations: int = 8
+    minimum_seasonal_cycles: int = 2
+    reference_minimum_training_observations: int = 4
+    training_window: int | None = None
+    evidence_directory: str | None = None
+    known_target_exposure: Literal["unrecorded", "exposed"] = "unrecorded"
+    cache_directory: str | None = None
+    cache_max_bytes: int = 268435456
+
+    def __post_init__(self) -> None:
+        if self.strategy not in {"rolling-origin", "legacy", "none"}:
+            raise ValueError("evaluation strategy must be rolling-origin, legacy, or none")
+        if self.known_target_exposure not in {"unrecorded", "exposed"}:
+            raise ValueError("known_target_exposure must be unrecorded or exposed; callers cannot certify an unexposed history")
+        if self.cache_directory is not None and (
+            not isinstance(self.cache_directory, str) or not self.cache_directory.strip()
+        ):
+            raise ValueError("cache_directory must be a nonblank local path")
+        if type(self.cache_max_bytes) is not int or not 1024 <= self.cache_max_bytes <= 4 * 1024**3:
+            raise ValueError("cache_max_bytes must be between 1024 and 4294967296")
+        if self.evidence_directory is not None and (
+            not isinstance(self.evidence_directory, str) or not self.evidence_directory.strip()
+        ):
+            raise ValueError("evidence_directory must be a nonblank local path")
+        for name in ("max_windows", "max_calibration_windows", "minimum_training_observations", "minimum_seasonal_cycles",
+                     "reference_minimum_training_observations", "step_size", "training_window"):
+            value = getattr(self, name)
+            if value is None and name in {"step_size", "training_window"}:
+                continue
+            if type(value) is not int or value < 1:
+                raise ValueError(f"evaluation {name} must be a positive integer")
+        if self.reference_minimum_training_observations > self.minimum_training_observations:
+            raise ValueError("reference minimum cannot exceed the ordinary training minimum")
+        if self.training_window is not None and self.training_window < self.reference_minimum_training_observations:
+            raise ValueError("training_window must support the reference training minimum")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class SelectionPolicy:
+    """Within-run guard; cross-run admission remains governed by PromotionPolicy."""
+
+    naive_guard_min_improvement: float = 0.05
+    objective: Literal["daily_rmse", "monthly_landing"] = "daily_rmse"
+    clip_negative: bool = False
+    configuration_guard: Literal["exclude", "warn"] = "exclude"
+
+    def __post_init__(self) -> None:
+        if self.objective not in {"daily_rmse", "monthly_landing"}:
+            raise ValueError("selection objective must be daily_rmse or monthly_landing")
+        if type(self.clip_negative) is not bool:
+            raise ValueError("selection clip_negative must be a boolean")
+        if not isinstance(self.configuration_guard, str) or self.configuration_guard not in {"exclude", "warn"}:
+            raise ValueError("configuration_guard must be exclude or warn")
+        if not math.isfinite(self.naive_guard_min_improvement) or not 0 <= self.naive_guard_min_improvement < 1:
+            raise ValueError("naive_guard_min_improvement must be finite and in [0, 1)")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def contract(self) -> dict[str, Any]:
+        if self.objective == "monthly_landing":
+            return {
+                "version": 2, "objective": "monthly_landing", "scale": "original_target_units",
+                "primary": "landing_mape_pct", "secondary": ["next28_mape_pct", "daily_wmape_pct"],
+                "calendar": "daily flows; current and next calendar month closing within observed history and forecast horizon",
+                "aggregation": "actuals through origin plus remaining daily forecasts; equal window mean absolute percentage error",
+                "daily_aggregation": "clip each origin prediction before per-date averaging",
+                "clip_negative": self.clip_negative, "missing_window_policy": "whole_candidate_unavailable",
+                "zero_denominator": "undefined_not_zero",
+                "naive_guard_min_improvement": self.naive_guard_min_improvement,
+                "configuration_guard": self.configuration_guard,
+                "exact_ties": "reference_guard_then_stable_model_name_not_superiority",
+            }
+        return {
+            "version": 1,
+            "objective": "statistical_squared_error_not_business_loss",
+            "scale": "original_target_units",
+            "primary": "rmse",
+            "secondary": ["mae", "absolute_signed_bias"],
+            "horizon_weighting": "equal_observation",
+            "references": ["Naive", "SeasonalNaive"],
+            "naive_guard_min_improvement": self.naive_guard_min_improvement,
+            "configuration_guard": self.configuration_guard,
+            "exact_ties": "reference_guard_then_stable_model_name_not_superiority",
+            "undefined_primary": "mae_when_no_finite_rmse_in_tournament_otherwise_directional_fallback",
+            "scaled_error_reference": "training_through_earliest_supplied_cutoff",
+            "undefined_scaled_errors": "unavailable_not_zero",
+            "panel_primary_order": ["equal_series_rmsse", "equal_series_mase", "rmse_single_series_only"],
+            "panel_missing_metric": "whole_declared_cohort_unavailable_no_silent_series_exclusion",
+        }
+
+
+@dataclass(frozen=True)
+class IntervalCalibrationSpec:
+    """Opt-in residual calibration; never changes the point-model recipe."""
+
+    method: Literal["native", "split_conformal", "nexcp"] = "native"
+    rho: float = 0.99
+    max_windows: int = 64
+    aggregate_totals: bool = False
+
+    def __post_init__(self) -> None:
+        if type(self.aggregate_totals) is not bool:
+            raise ValueError("aggregate_totals must be a boolean")
+        if self.method not in {"native", "split_conformal", "nexcp"}:
+            raise ValueError("interval calibration method must be native, split_conformal, or nexcp")
+        if isinstance(self.rho, bool) or not isinstance(self.rho, (int, float)) or not 0 < self.rho <= 1:
+            raise ValueError("interval calibration rho must be in (0, 1]")
+        if type(self.max_windows) is not int or not 20 <= self.max_windows <= 256:
+            raise ValueError("interval calibration max_windows must be an integer between 20 and 256")
+
+
+@dataclass(frozen=True)
+class CalendarSpec:
+    """Deterministic daily features, not judgment multipliers or inferred geography."""
+
+    enabled: bool = False
+    holiday_calendar: Literal["none", "us_federal", "custom"] = "none"
+    custom_dates: tuple[str, ...] = ()
+    known_as_of: str | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.enabled) is not bool or self.holiday_calendar not in {"none", "us_federal", "custom"}:
+            raise ValueError("calendar requires a boolean enabled and none, us_federal, or custom holiday_calendar")
+        if not isinstance(self.custom_dates, (tuple, list)):
+            raise ValueError("calendar custom_dates must be a list of ISO dates")
+        for value in self.custom_dates:
+            if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+                raise ValueError("calendar custom_dates must contain YYYY-MM-DD dates")
+            pd.Timestamp(value)
+        object.__setattr__(self, "custom_dates", tuple(sorted(set(self.custom_dates))))
+        if bool(self.custom_dates) != (self.holiday_calendar == "custom"):
+            raise ValueError("custom dates require the custom calendar, with at least one date")
+        if self.known_as_of is not None:
+            if not isinstance(self.known_as_of, str):
+                raise ValueError("calendar known_as_of must be an ISO timestamp string")
+            stamp = pd.Timestamp(self.known_as_of)
+            if pd.isna(stamp):
+                raise ValueError("calendar known_as_of must be a valid timestamp")
+        if self.holiday_calendar == "custom" and self.known_as_of is None:
+            raise ValueError("custom calendar dates require known_as_of for historical availability")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class AnomalySpec:
+    """Versioned, training-only robust seasonal treatment with conservative guards."""
+
+    mode: Literal["off", "detect", "adjust"] = "detect"
+    version: int = 1
+    lookback: int = 182
+    threshold: float = 6.0
+    minimum_relative_deviation: float = 0.25
+    maximum_adjusted_fraction: float = 0.03
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"off", "detect", "adjust"} or type(self.version) is not int or self.version != 1:
+            raise ValueError("anomaly requires mode off, detect, or adjust and version 1")
+        if type(self.lookback) is not int or not 56 <= self.lookback <= 1096:
+            raise ValueError("anomaly lookback must be an integer between 56 and 1096 observations")
+        for name, lower, upper in (("threshold", 3.5, 20), ("minimum_relative_deviation", 0.05, 2),
+                                   ("maximum_adjusted_fraction", 0.001, 0.05)):
+            value = getattr(self, name)
+            if type(value) not in {int, float} or not math.isfinite(value) or not lower <= value <= upper:
+                raise ValueError(f"anomaly {name} must be between {lower} and {upper}")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class ProductionPolicy:
+    """Versioned statistical release contract, not business approval or a guarantee."""
+
+    version: int = 1
+    max_error_pct: float = 10.0
+    max_abs_bias_pct: float = 5.0
+    coverage_tolerance: float = 0.05
+    minimum_selection_windows: int = 3
+    calibration_windows: int = 20
+    minimum_assessment_windows: int = 5
+    ensemble_members: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if type(self.version) is not int or self.version != 1:
+            raise ValueError("production version must be 1")
+        for name, lower, upper in (("max_error_pct", 0, 100), ("max_abs_bias_pct", 0, 100),
+                                   ("coverage_tolerance", 0, 0.1)):
+            value = getattr(self, name)
+            if type(value) not in {int, float} or not math.isfinite(value) or not lower <= value <= upper:
+                raise ValueError(f"production {name} must be finite and in [{lower}, {upper}]")
+        for name, lower in (("minimum_selection_windows", 3), ("calibration_windows", 20),
+                            ("minimum_assessment_windows", 5)):
+            value = getattr(self, name)
+            if type(value) is not int or not lower <= value <= 64:
+                raise ValueError(f"production {name} must be an integer in [{lower}, 64]")
+        if not isinstance(self.ensemble_members, (tuple, list)) or any(
+            not isinstance(member, str) for member in self.ensemble_members
+        ):
+            raise ValueError("production ensemble_members must be a list or tuple of canonical model names")
+        members = tuple(self.ensemble_members)
+        if (members and len(members) < 2) or len(members) != len(set(members)):
+            raise ValueError("production ensemble_members must contain at least two distinct native models")
+        if any(member not in MODEL_ALLOWLIST_CANDIDATES for member in members):
+            raise ValueError("production ensemble_members must use canonical native model names")
+        object.__setattr__(self, "ensemble_members", members)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class ForecastSpec:
     """User-facing forecast settings with safe defaults."""
 
-    horizon: int = 12
+    horizon: int = 6
     freq: str | None = None
     season_length: int | None = None
     levels: tuple[int, ...] = (80, 95)
-    model_policy: ModelPolicy = "light"
+    model_policy: ModelPolicy = "standard"
     fill_method: FillMethod = "ffill"
     id_col: str = "unique_id"
     time_col: str = "ds"
@@ -847,6 +1242,7 @@ class ForecastSpec:
     hierarchy: tuple[str, ...] = ()
     events: tuple[DriverEvent, ...] = field(default_factory=tuple)
     regressors: tuple[KnownFutureRegressor, ...] = field(default_factory=tuple)
+    driver_snapshots: tuple[DriverSnapshotGrant, ...] = ()
     custom_models: tuple[CustomModelSpec, ...] = field(default_factory=tuple)
     challengers: tuple[ChallengerSpec, ...] = field(default_factory=tuple)
     transform: TransformSpec = field(default_factory=TransformSpec)
@@ -858,16 +1254,52 @@ class ForecastSpec:
     train_known_future_regressors: bool = False
     mlforecast_feature_policy: MLForecastFeaturePolicy = "basic"
     require_backtest: bool = False
-    strict_cv_horizon: bool = False
+    strict_cv_horizon: bool = True
     weighted_ensemble: bool = True
+    paired_validation: bool = True
     verbose: bool = True
     context: ForecastContext | None = None
+    run_mode: RunMode = "accuracy-first"
+    policy_version: int = 1
+    selection_policy: SelectionPolicy = field(default_factory=SelectionPolicy)
+    model_configuration: ModelConfiguration = field(default_factory=ModelConfiguration)
+    calendar: CalendarSpec = field(default_factory=CalendarSpec)
+    anomaly: AnomalySpec = field(default_factory=AnomalySpec)
+    evaluation: EvaluationPolicy = field(default_factory=EvaluationPolicy)
+    interval_calibration: IntervalCalibrationSpec = field(default_factory=IntervalCalibrationSpec)
+    production: ProductionPolicy | None = None
 
     def __post_init__(self) -> None:
+        if self.production is not None and not isinstance(self.production, ProductionPolicy):
+            raise ValueError("production must be a ProductionPolicy or None")
+        if self.cleaning.clean_outliers and self.anomaly.mode == "detect":
+            object.__setattr__(self, "anomaly", replace(self.anomaly, mode="adjust"))
+        if self.anomaly.mode == "adjust" and self.interval_calibration.method == "native":
+            object.__setattr__(self, "interval_calibration", replace(self.interval_calibration, method="split_conformal"))
+        source_ids = [grant.source_id for grant in self.driver_snapshots]
+        if len(source_ids) != len(set(source_ids)) or len(source_ids) > 8:
+            raise ValueError("driver snapshots require unique source IDs and at most eight grants")
+        if self.run_mode not in {"accuracy-first", "quick", "legacy"}:
+            raise ValueError("run_mode must be accuracy-first, quick, or legacy")
+        expected_version = 0 if self.run_mode == "legacy" else 1
+        if type(self.policy_version) is not int or self.policy_version != expected_version:
+            raise ValueError(f"run_mode {self.run_mode!r} requires policy_version {expected_version}")
+        if self.run_mode == "legacy" and self.evaluation == EvaluationPolicy():
+            object.__setattr__(self, "evaluation", replace(self.evaluation, strategy="legacy"))
+        elif self.run_mode == "quick" and self.evaluation == EvaluationPolicy():
+            object.__setattr__(self, "evaluation", EvaluationPolicy(
+                max_windows=2, step_size=None, minimum_training_observations=4, minimum_seasonal_cycles=1,
+            ))
+        if self.context is None and self.run_mode != "legacy":
+            object.__setattr__(self, "context", ForecastContext(research_budget=ResearchBudget(
+                profile="time-boxed", max_iterations=2, max_variants_per_iteration=1,
+            )))
         if self.horizon < 1:
             raise ValueError("horizon must be >= 1")
-        if self.season_length is not None and self.season_length < 1:
-            raise ValueError("season_length must be >= 1")
+        if any(h > self.horizon for h, _ in self.feature_recipe.horizon_features):
+            raise ValueError("horizon_features cannot exceed the forecast horizon")
+        if self.season_length is not None and (type(self.season_length) is not int or self.season_length < 1):
+            raise ValueError("season_length must be an integer >= 1")
         invalid_levels = [level for level in self.levels if level <= 0 or level >= 100]
         if invalid_levels:
             raise ValueError(f"interval levels must be between 0 and 100, got {invalid_levels}")
@@ -901,6 +1333,10 @@ class ForecastSpec:
         if self.context is not None and self.context.requested_horizon not in {None, self.horizon}:
             raise ValueError("forecast context requested_horizon must match ForecastSpec.horizon")
 
+    @property
+    def accuracy_first(self) -> bool:
+        return self.run_mode == "accuracy-first"
+
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["levels"] = list(self.levels)
@@ -908,6 +1344,10 @@ class ForecastSpec:
         data["hierarchy"] = list(self.hierarchy)
         data["events"] = [event.to_dict() for event in self.events]
         data["regressors"] = [regressor.to_dict() for regressor in self.regressors]
+        if self.driver_snapshots:
+            data["driver_snapshots"] = [grant.to_dict() for grant in self.driver_snapshots]
+        else:
+            data.pop("driver_snapshots", None)
         if self.custom_models:
             data["custom_models"] = [custom.to_dict() for custom in self.custom_models]
         else:
@@ -921,6 +1361,7 @@ class ForecastSpec:
         data["cleaning"] = self.cleaning.to_dict()
         data["ensemble"] = self.ensemble.to_dict()
         data["parallel"] = self.parallel.to_dict()
+        data["model_configuration"] = self.model_configuration.to_dict()
         if self.context is None:
             data.pop("context", None)
         else:
@@ -949,12 +1390,43 @@ def forecast_spec_from_dict(data: dict[str, Any]) -> ForecastSpec:
     custom_models = tuple(_custom_model_from_dict(item) for item in data.get("custom_models", []) if isinstance(item, dict))
     challengers = tuple(_challenger_from_dict(item) for item in data.get("challengers", []) if isinstance(item, dict))
     context_data = data.get("context") if isinstance(data.get("context"), dict) else None
+    run_mode = data.get("run_mode", "legacy")
+    legacy = run_mode == "legacy"
+    if not legacy and "policy_version" not in data:
+        raise ValueError("A saved non-legacy spec requires policy_version; use resolve_forecast_spec for a new request")
+    selection_data = data.get("selection_policy", {})
+    if not isinstance(selection_data, dict):
+        raise ValueError("selection_policy must be an object")
+    selection_data = {"configuration_guard": "warn", **selection_data}
+    evaluation_data = data.get("evaluation", {"strategy": "legacy"} if legacy else {})
+    if not isinstance(evaluation_data, dict):
+        raise ValueError("evaluation must be an object")
+    interval_data = data.get("interval_calibration", {})
+    if not isinstance(interval_data, dict):
+        raise ValueError("interval_calibration must be an object")
+    production_data = data.get("production")
+    if production_data is not None and (
+        not isinstance(production_data, dict) or set(production_data) - set(ProductionPolicy.__dataclass_fields__)
+    ):
+        raise ValueError("production must be an object containing only declared production settings")
+    configuration_data = data.get("model_configuration", {})
+    if not isinstance(configuration_data, dict):
+        raise ValueError("model_configuration must be an object")
+    unknown_configuration = set(configuration_data) - set(ModelConfiguration.__dataclass_fields__)
+    if unknown_configuration:
+        raise ValueError(f"Unknown model_configuration settings: {sorted(unknown_configuration)}")
+    policies = {}
+    for name, kind, default in (("calendar", CalendarSpec, {}), ("anomaly", AnomalySpec, {"mode": "off"})):
+        payload = data.get(name, default)
+        if not isinstance(payload, dict) or set(payload) - set(kind.__dataclass_fields__):
+            raise ValueError(f"{name} must be an object containing only declared {name} settings")
+        policies[name] = kind(**payload)
     return ForecastSpec(
-        horizon=int(data.get("horizon", 12)),
+        horizon=int(data.get("horizon", 12 if legacy else 6)),
         freq=data.get("freq"),
-        season_length=_optional_int(data.get("season_length")),
+        season_length=data.get("season_length"),
         levels=tuple(int(level) for level in data.get("levels", (80, 95))),
-        model_policy=data.get("model_policy", "light"),
+        model_policy=data.get("model_policy", "light" if legacy else "standard"),
         fill_method=data.get("fill_method", "ffill"),
         id_col=data.get("id_col", "unique_id"),
         time_col=data.get("time_col", "ds"),
@@ -964,6 +1436,7 @@ def forecast_spec_from_dict(data: dict[str, Any]) -> ForecastSpec:
         hierarchy=tuple(data.get("hierarchy", ())),
         events=events,
         regressors=regressors,
+        driver_snapshots=tuple(DriverSnapshotGrant.from_dict(item) for item in data.get("driver_snapshots", ())),
         custom_models=custom_models,
         challengers=challengers,
         transform=TransformSpec(
@@ -980,6 +1453,13 @@ def forecast_spec_from_dict(data: dict[str, Any]) -> ForecastSpec:
             pca=feature_recipe_data.get("pca"),
             feature_selection=bool(feature_recipe_data.get("feature_selection", False)),
             weekly_to_daily=bool(feature_recipe_data.get("weekly_to_daily", True)),
+            date_features_as_dummies=feature_recipe_data.get("date_features_as_dummies", False),
+            mlforecast_strategy=feature_recipe_data.get("mlforecast_strategy", "recursive"),
+            horizon_features=feature_recipe_data.get("horizon_features", ()),
+            lookup_lag_columns=feature_recipe_data.get("lookup_lag_columns", ()),
+            pooled_rolling_window=feature_recipe_data.get("pooled_rolling_window"),
+            pooled_partition_columns=feature_recipe_data.get("pooled_partition_columns", ()),
+            pooled_series_ids=feature_recipe_data.get("pooled_series_ids", ()),
         ),
         cleaning=CleaningSpec(
             clean_missing_values=bool(cleaning_data.get("clean_missing_values", True)),
@@ -1002,10 +1482,20 @@ def forecast_spec_from_dict(data: dict[str, Any]) -> ForecastSpec:
         train_known_future_regressors=bool(data.get("train_known_future_regressors", False)),
         mlforecast_feature_policy=data.get("mlforecast_feature_policy", "basic"),
         require_backtest=bool(data.get("require_backtest", False)),
-        strict_cv_horizon=bool(data.get("strict_cv_horizon", False)),
+        strict_cv_horizon=bool(data.get("strict_cv_horizon", not legacy)),
         weighted_ensemble=bool(data.get("weighted_ensemble", True)),
+        paired_validation=bool(data.get("paired_validation", not legacy)),
         verbose=bool(data.get("verbose", True)),
         context=forecast_context_from_dict(context_data) if context_data is not None else None,
+        run_mode=run_mode,
+        policy_version=data.get("policy_version", 0 if legacy else 1),
+        selection_policy=SelectionPolicy(**selection_data),
+        model_configuration=ModelConfiguration(**configuration_data),
+        calendar=policies["calendar"],
+        anomaly=policies["anomaly"],
+        evaluation=EvaluationPolicy(**evaluation_data),
+        interval_calibration=IntervalCalibrationSpec(**interval_data),
+        production=ProductionPolicy(**production_data) if production_data is not None else None,
     )
 
 
@@ -1215,6 +1705,8 @@ def _known_future_regressor_from_dict(data: dict[str, Any]) -> KnownFutureRegres
         owner=str(data.get("owner", "")),
         refresh_latency_days=_optional_int(data.get("refresh_latency_days")),
         notes=str(data.get("notes", "")),
+        source=DriverSourceContract(**data["source"]) if data.get("source") is not None else None,
+        historical_lags=tuple(data.get("historical_lags", ())),
     )
 
 
@@ -1329,6 +1821,7 @@ class DataProfile:
     data_freshness: str | None
     warnings: tuple[str, ...] = ()
     series: tuple[SeriesProfile, ...] = ()
+    configuration_diagnostics: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -1362,9 +1855,18 @@ class ForecastRun:
     warnings: list[str] = field(default_factory=list)
     engine: str = "baseline"
     model_policy_resolution: dict[str, Any] = field(default_factory=dict)
+    observed_history: pd.DataFrame = field(default_factory=pd.DataFrame)
 
     def manifest(self) -> dict[str, Any]:
         outputs = {
+            **({
+                "production_readiness": "production_readiness.json",
+                "production_backtest": "audit/production_backtest.csv",
+                "production_decisions": "audit/production_decisions.json",
+                "production_calibration": "audit/production_calibration.json",
+                **({"production_release": "release/manifest.json"} if
+                   self.model_policy_resolution.get("production", {}).get("readiness", {}).get("release_allowed") else {}),
+            } if self.spec.production is not None else {}),
             "history": "appendix/history.csv",
             "forecast": "forecast.csv",
             "forecast_long": "appendix/forecast_long.csv",
@@ -1379,6 +1881,9 @@ class ForecastRun:
             "model_pareto_frontier": "appendix/model_pareto_frontier.csv",
             "feature_selection_receipts": "appendix/feature_selection_receipts.csv",
             "ensemble_policy_receipts": "appendix/ensemble_policy_receipts.csv",
+            "ensemble_comparisons": "appendix/ensemble_comparisons.json",
+            "candidate_evidence": "audit/candidate_evidence.json",
+            "candidate_fits": "audit/candidate_fits.csv",
             "model_window_metrics": "appendix/model_window_metrics.csv",
             "residual_diagnostics": "appendix/residual_diagnostics.csv",
             "residual_tests": "appendix/residual_tests.csv",
@@ -1438,6 +1943,29 @@ class ForecastRun:
                 outputs["hierarchy_reconciliation"] = "appendix/hierarchy_reconciliation.csv"
             if not self.hierarchy_reconciliation_comparison.empty:
                 outputs["hierarchy_reconciliation_comparison"] = "appendix/hierarchy_reconciliation_comparison.csv"
+        if not self.observed_history.empty:
+            outputs["observed_history"] = "appendix/observed_history.csv"
+        if self.model_policy_resolution.get("configuration"):
+            outputs["configuration"] = "audit/configuration.json"
+            for name in ("series", "seasonality", "phases", "models"):
+                outputs[f"configuration_{name}"] = f"audit/configuration_{name}.csv"
+        if self.model_policy_resolution.get("anomalies"):
+            outputs["anomalies"] = "audit/anomalies.json"
+            outputs["anomaly_points"] = "audit/anomaly_points.csv"
+            outputs["anomaly_series"] = "audit/anomaly_series.csv"
+        if any("native_fitted" in fit for fit in self.model_policy_resolution.get("candidate_evidence", {}).get("fits", [])):
+            outputs["native_fitted_points"] = "audit/native_fitted_points.csv"
+            outputs["native_fitted_summary"] = "audit/native_fitted_summary.csv"
+        if self.spec.interval_calibration.method != "native":
+            outputs["interval_comparison"] = "appendix/interval_comparison.csv"
+            outputs["interval_calibration"] = "audit/interval_calibration.json"
+            outputs["interval_support"] = "appendix/interval_support.csv"
+        if self.spec.selection_policy.objective == "monthly_landing":
+            outputs["finance_scorecard"] = "appendix/finance_scorecard.csv"
+            outputs["finance_windows"] = "appendix/finance_windows.csv"
+        if self.spec.interval_calibration.aggregate_totals:
+            outputs["aggregate_intervals"] = "appendix/aggregate_intervals.csv"
+            outputs["aggregate_interval_support"] = "audit/aggregate_interval_support.json"
         if self.spec.events:
             outputs["scenario_assumptions"] = "appendix/scenario_assumptions.csv"
             outputs["scenario_forecast"] = "appendix/scenario_forecast.csv"
@@ -1474,6 +2002,8 @@ class ForecastRun:
         return {
             "engine": self.engine,
             "spec": self.spec.to_dict(),
+            "scoring_contract": self.spec.selection_policy.contract(),
+            "promotion_policy": (self.spec.context.promotion_policy if self.spec.context else PromotionPolicy()).to_dict(),
             "effective_levels": self.effective_levels(),
             "profile": self.profile.to_dict(),
             "reproducibility": _reproducibility_metadata(self),
@@ -1497,8 +2027,10 @@ class ForecastRun:
 
     def diagnostics(self) -> dict[str, Any]:
         from nixtla_scaffold.diagnostics import build_run_diagnostics
+        from nixtla_scaffold.outputs import cached_output_tables
 
-        return build_run_diagnostics(self)
+        with cached_output_tables(self):
+            return build_run_diagnostics(self)
 
     def interpretation(self) -> dict[str, Any]:
         from nixtla_scaffold.interpretation import build_interpretation_payload
@@ -1510,10 +2042,10 @@ class ForecastRun:
 
         return build_model_card(self)
 
-    def to_directory(self, output_dir: str | Path) -> Path:
+    def to_directory(self, output_dir: str | Path, *, release: bool = True) -> Path:
         from nixtla_scaffold.outputs import write_run
 
-        return write_run(self, output_dir)
+        return write_run(self, output_dir, release=release)
 
     def to_excel(self, output_path: str | Path) -> Path:
         from nixtla_scaffold.outputs import write_workbook
@@ -1524,6 +2056,10 @@ class ForecastRun:
 def _reproducibility_metadata(run: ForecastRun) -> dict[str, Any]:
     return {
         "data_hash_sha256": _frame_hash(run.history, columns=["unique_id", "ds", "y"]),
+        "observed_data_hash_sha256": (
+            _frame_hash(run.observed_history, columns=["unique_id", "ds", "y"])
+            if not run.observed_history.empty else None
+        ),
         "forecast_origin": run.profile.end,
         "frequency": run.profile.freq,
         "season_length": run.profile.season_length,
@@ -1534,6 +2070,9 @@ def _reproducibility_metadata(run: ForecastRun) -> dict[str, Any]:
                 "nixtla-scaffold",
                 "pandas",
                 "numpy",
+                "scipy",
+                "scikit-learn",
+                "coreforecast",
                 "statsforecast",
                 "utilsforecast",
                 "mlforecast",
@@ -1544,6 +2083,28 @@ def _reproducibility_metadata(run: ForecastRun) -> dict[str, Any]:
             ]
         ),
         "git_sha": _git_sha(),
+        "runtime_source": _runtime_source_identity(),
+        "thread_environment": {
+            key: os.environ.get(key) for key in
+            ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS")
+        },
+    }
+
+
+def _runtime_source_identity(package_root: Path | None = None) -> dict[str, Any]:
+    root = package_root or Path(__file__).resolve().parent
+    hashes = {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(root.glob("*.py"))
+    }
+    lock = root / "runtime.lock"
+    if not lock.is_file():
+        lock = root.parent.parent / "uv.lock"
+    return {
+        "kind": "observed_source_snapshot_not_execution_certification",
+        "sha256": hashlib.sha256(json.dumps(hashes, sort_keys=True).encode()).hexdigest(),
+        "files": hashes,
+        "lockfile_sha256": hashlib.sha256(lock.read_bytes()).hexdigest() if lock.is_file() else None,
     }
 
 

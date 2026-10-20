@@ -3,23 +3,27 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any, Literal
 
-from nixtla_scaffold.schema import ForecastContext, ForecastSpec
+from nixtla_scaffold.schema import EvaluationPolicy, ForecastSpec, ProductionPolicy, forecast_spec_from_dict
 
-ForecastPresetName = Literal["quick", "accuracy-first", "standard", "strict", "hierarchy", "finance"]
-CANONICAL_PRESET_NAMES: tuple[str, ...] = ("quick", "accuracy-first", "standard", "strict", "hierarchy")
+ForecastPresetName = Literal["quick", "accuracy-first", "standard", "strict", "hierarchy", "finance", "production"]
+CANONICAL_PRESET_NAMES: tuple[str, ...] = ("quick", "accuracy-first", "standard", "strict", "hierarchy", "production")
 PRESET_ALIASES: dict[str, str] = {"finance": "standard"}
 PRESET_NAMES: tuple[str, ...] = CANONICAL_PRESET_NAMES + tuple(PRESET_ALIASES)
 
 
 _PRESET_SPECS: dict[str, ForecastSpec] = {
-    "quick": ForecastSpec(horizon=6, model_policy="baseline", weighted_ensemble=True, verbose=False),
+    "production": ForecastSpec(
+        require_backtest=True, weighted_ensemble=False,
+        evaluation=EvaluationPolicy(max_windows=32, step_size=None),
+        production=ProductionPolicy(),
+    ),
+    "quick": ForecastSpec(run_mode="quick", horizon=6, model_policy="baseline", weighted_ensemble=True, verbose=False),
     "accuracy-first": ForecastSpec(
         horizon=6,
         model_policy="standard",
         strict_cv_horizon=True,
         weighted_ensemble=True,
         verbose=True,
-        context=ForecastContext(),
     ),
     "standard": ForecastSpec(horizon=6, model_policy="standard", weighted_ensemble=True, verbose=True),
     "strict": ForecastSpec(
@@ -40,6 +44,7 @@ _PRESET_SPECS: dict[str, ForecastSpec] = {
 }
 
 _PRESET_DESCRIPTIONS: dict[str, str] = {
+    "production": "Fail-closed statistical delivery: chronological selector replay, benchmark/error/bias gates, policy-residual intervals and immutable release bundle. Not business approval.",
     "quick": "Exploratory, non-promotable first pass: baseline ladder, intervals when available, and concise output.",
     "accuracy-first": "Accuracy-first workflow: serious native tournament, full-horizon validation when feasible, bounded context research, and explicit claim gates with directional fallback.",
     "standard": "Default audit-ready forecast: standard model policy, trust/action artifacts, intervals, and full audit output.",
@@ -81,8 +86,23 @@ def preset_catalog() -> list[dict[str, Any]]:
                 "mlforecast_feature_policy": spec.mlforecast_feature_policy,
                 "weighted_ensemble": spec.weighted_ensemble,
                 "verbose": spec.verbose,
-                "accuracy_first": spec.context is not None,
+                "accuracy_first": spec.accuracy_first,
+                "run_mode": spec.run_mode,
+                "policy_version": spec.policy_version,
                 "research_budget_profile": spec.context.research_budget.profile if spec.context is not None else None,
             }
         )
     return rows
+
+
+def resolve_forecast_spec(settings: dict[str, Any] | None = None, *, preset: str | None = None) -> ForecastSpec:
+    """Resolve a new request; use forecast_spec_from_dict for saved manifests."""
+    settings = dict(settings or {})
+    if settings.get("run_mode") == "legacy":
+        if preset is not None:
+            raise ValueError("A saved legacy recipe cannot also request a new preset")
+        return forecast_spec_from_dict(settings)
+    base = forecast_spec_preset(preset or settings.get("run_mode", "accuracy-first"))
+    if isinstance(settings.get("selection_policy"), dict):
+        settings["selection_policy"] = base.selection_policy.to_dict() | settings["selection_policy"]
+    return forecast_spec_from_dict(base.to_dict() | settings)

@@ -80,15 +80,6 @@
       "caveat": "More moving parts; guard against leakage and only use when future drivers are known.",
       "repo_code": "https://github.com/Nixtla/mlforecast; key docs/source areas: forecast.py, lag_transforms.py, target_transforms.py, feature engineering examples, cross-validation guides.",
       "source": "https://nixtlaverse.nixtla.io/mlforecast/"
-    },
-    {
-      "name": "NeuralForecast",
-      "use": "Research-only optional future extension.",
-      "apis": "NeuralForecast.fit, predict; NBEATS, NHITS and related models.",
-      "contract": "Long DataFrame with unique_id, ds, y.",
-      "caveat": "Heavier dependencies and lower interpretability; not a core MVP default.",
-      "repo_code": "https://github.com/Nixtla/neuralforecast; research-only for now, especially model modules and example notebooks.",
-      "source": "https://nixtlaverse.nixtla.io/neuralforecast/"
     }
   ],
   "nixtla_doc_deep_links": [
@@ -177,15 +168,6 @@
       "verified_at": "2026-04-24; repository HEAD observed at 38455f016f99c07b1082570dca6cf4ca53e6216a",
       "use": "Future source for known-future driver models, lag/rolling feature transforms, target transformations, and cross-validation.",
       "source": "https://github.com/Nixtla/mlforecast"
-    },
-    {
-      "name": "NeuralForecast research-only source",
-      "repo": "Nixtla/neuralforecast",
-      "paths": ["neuralforecast/core.py", "neuralforecast/auto.py", "neuralforecast/models/"],
-      "examples": ["nbs/docs/"],
-      "verified_at": "2026-04-24; research-only, not core MVP",
-      "use": "Optional future research for NHITS/NBEATS-style models when explainability and dependency weight are acceptable.",
-      "source": "https://github.com/Nixtla/neuralforecast"
     }
   ],
   "checklist": [
@@ -261,10 +243,10 @@
   ],
   "agent_recipes": [
     {
-      "name": "Agent setup intake",
+      "name": "Analyst-first setup",
       "source": "nixtla-scaffold setup",
-      "steps": "Start broad forecasting requests with setup. Capture data source, number of series, interval posture, exploration mode, MCP regressor-search permission, and requested outputs before modeling.",
-      "command": "nixtla-scaffold setup --workspace runs\\my_forecast_setup --data-source kusto --series-count many --target-name ARR --time-col Month --freq ME --horizon 6 --intervals auto --model-families statsforecast mlforecast hierarchicalforecast --exploration-mode --mcp-regressor-search --outputs all"
+      "steps": "Inspect the selected source before asking questions; infer supported mappings, grain and series counts. Setup persists available facts, not a mandatory intake form. Models, intervals and standard outputs are analyst defaults. Keep unknown business context empty and baseline claims directional. Reserve confirmation before target diagnostics for research. New MCP regressor-search access needs scope and authorization; --mcp-regressor-search is not consent. Optional families include MLForecast and HierarchicalForecast when installed and justified.",
+      "command": "nixtla-scaffold setup --workspace runs\\my_forecast_setup --data-source csv --input data.csv --preset accuracy-first --horizon 6 --research-budget time-boxed --research-max-iterations 2 --research-max-variants-per-iteration 1 --research-max-wall-clock-minutes 15"
     },
     {
       "name": "Excel MCP handoff",
@@ -286,4 +268,3 @@
     }
   ]
 }
-

@@ -212,6 +212,10 @@ def test_opt_in_known_future_regressors_feed_mlforecast_artifacts(tmp_path) -> N
     pytest.importorskip("mlforecast")
     future_file = tmp_path / "future_seats.csv"
     _future_driver_file(future_file)
+    historical_plan = _ml_history_frame()[["unique_id", "ds", "seats_plan"]].assign(known_as_of="2022-12-01")
+    future_plan = pd.read_csv(future_file).assign(known_as_of="2022-12-01")
+    future_plan["ds"] = pd.to_datetime(future_plan["ds"])
+    pd.concat([historical_plan, future_plan], ignore_index=True).to_csv(future_file, index=False)
     regressor = KnownFutureRegressor(
         name="Seats plan",
         value_col="seats_plan",
@@ -246,6 +250,28 @@ def test_opt_in_known_future_regressors_feed_mlforecast_artifacts(tmp_path) -> N
     workbook = pd.ExcelFile(output_dir / "forecast.xlsx")
     assert "Driver Model Features" in workbook.sheet_names
     assert "Driver Model CV Delta" in workbook.sheet_names
+
+
+def test_unavailable_historical_plan_cannot_score_a_different_feature_recipe(tmp_path) -> None:
+    from nixtla_scaffold import EvaluationPolicy
+    future_file = tmp_path / "current_only_plan.csv"
+    _future_driver_file(future_file)
+    regressor = KnownFutureRegressor(
+        name="Seats plan", value_col="seats_plan", availability="plan", mode="model_candidate",
+        future_file=str(future_file),
+    )
+    run = run_forecast(
+        _ml_history_frame(),
+        ForecastSpec(horizon=2, freq="ME", levels=(), model_policy="mlforecast",
+                     model_allowlist=("LinearRegression",), regressors=(regressor,),
+                     train_known_future_regressors=True, weighted_ensemble=False,
+                     evaluation=EvaluationPolicy(max_windows=2)),
+    )
+    assert run.driver_model_features["status"].eq("included").all()
+    assert run.backtest_predictions["LinearRegression"].isna().all()
+    assert run.driver_model_cv_delta.empty
+    assert run.backtest_metrics.empty or not run.backtest_metrics["selection_eligible"].any()
+    assert any("external feature recipe" in message for message in run.warnings)
 
 
 def test_historical_only_regressor_lags_feed_mlforecast_without_future_file(tmp_path) -> None:

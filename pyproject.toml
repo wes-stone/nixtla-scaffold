@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nixtla-scaffold"
-version = "0.2.3"
+version = "0.3.0"
 description = "Simple, explainable Nixtla forecasting scaffold for finance users and AI agents."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -30,12 +30,17 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Information Analysis",
 ]
 dependencies = [
+    "jsonschema>=4.0",
+    "lightgbm==4.7.0",
+    "mlforecast==1.1.0",
     "numpy>=1.26",
     "openpyxl>=3.1",
     "pandas>=2.0",
     "plotly>=6.0",
+    "psutil>=5.9",
     "pyyaml>=6.0",
-    "statsforecast>=1.7",
+    "scikit-learn==1.7.2",
+    "statsforecast==2.1.1",
     "streamlit>=1.56.0",
     "utilsforecast>=0.2.16",
 ]
@@ -43,15 +48,23 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 hierarchy = ["hierarchicalforecast>=1.0"]
-ml = ["lightgbm>=4.0", "mlforecast>=1.0"]
-smooth = ["smooth>=1.0.3,<2"]
-neural = ["neuralforecast>=2.0"]
+ml = ["lightgbm==4.7.0", "mlforecast==1.1.0", "scikit-learn==1.7.2"]
+smooth = [
+    "smooth==1.1.0; python_version >= '3.11'",
+    "smooth==1.0.3; python_version < '3.11'",
+]
+conformal = ["conformalforecast==0.1.0", "utilsforecast==0.2.17"]
 datasets = [
     "datasetsforecast>=1.0.0",
 ]
 
 [project.scripts]
 nixtla-scaffold = "nixtla_scaffold.cli:main"
+
+[tool.uv.sources]
+conformalforecast = { git = "https://github.com/Nixtla/conformalforecast", rev = "a27acfc21b336f6fc5173aaa7f7fe06399c59e67" }
+utilsforecast = { git = "https://github.com/Nixtla/utilsforecast", rev = "b30fe6ab6574540fa3e858737fdba7b1d8d43450", extra = "conformal" }
+smooth = { url = "https://github.com/openforecast-org/smooth/releases/download/v1.1.0-py/smooth-1.1.0-cp312-cp312-win_amd64.whl", marker = "python_version == '3.12' and sys_platform == 'win32' and platform_machine == 'AMD64'" }
 
 [project.urls]
 Homepage = "https://github.com/wes-stone/nixtla-scaffold"
@@ -62,6 +75,7 @@ Issues = "https://github.com/wes-stone/nixtla-scaffold/issues"
 packages = ["src/nixtla_scaffold"]
 
 [tool.hatch.build.targets.wheel.force-include]
+"uv.lock" = "nixtla_scaffold/runtime.lock"
 "skills/nixtla-forecast/SKILL.md" = "nixtla_scaffold/skills/nixtla-forecast/SKILL.md"
 "skills/nixtla-forecast/skill_manifest.json" = "nixtla_scaffold/skills/nixtla-forecast/skill_manifest.json"
 
@@ -78,7 +92,20 @@ include = [
     "/knowledge",
     "/skills/nixtla-forecast/SKILL.md",
     "/skills/nixtla-forecast/skill_manifest.json",
+    "/PRODUCT.md",
+    "/DESIGN.md",
+    "/tools/build_workbench_bundle.py",
+    "/tools/runtime_benchmark.py",
+    "/tools/feature_benchmark.py",
+    "/tools/forecast_benchmark.json",
+    "/.github/extensions/nixtla-workbench",
     "/uv.lock",
+]
+exclude = [
+    "/.github/extensions/nixtla-workbench/ui/node_modules",
+    "/.github/extensions/nixtla-workbench/ui/dist",
+    "/.github/extensions/nixtla-workbench/ui/test-results",
+    "/.github/extensions/nixtla-workbench/runtime.json",
 ]
 
 [tool.pytest.ini_options]

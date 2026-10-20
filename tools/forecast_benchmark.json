@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "seed": {"development": 71631, "confirmation": 98147},
+  "models": ["Naive", "SeasonalNaive", "AutoETS", "Ridge"],
+  "max_seconds_per_lane": 900,
+  "windows": 13,
+  "interval_levels": [],
+  "interval_scope": "Point-workflow benchmark; interval validity remains covered by independent calibration contracts.",
+  "tasks": [
+    {"name": "daily_seasonal", "kind": "seasonal", "freq": "D", "season": 7, "length": 420, "horizon": 28, "step": 7, "series": 1, "objective": "daily_rmse"},
+    {"name": "daily_trend_landing", "kind": "trend", "freq": "D", "season": 7, "length": 468, "horizon": 63, "step": 7, "series": 1, "objective": "monthly_landing"},
+    {"name": "daily_shift", "kind": "shift", "freq": "D", "season": 7, "length": 420, "horizon": 28, "step": 7, "series": 1, "objective": "daily_rmse"},
+    {"name": "daily_intermittent", "kind": "intermittent", "freq": "D", "season": 7, "length": 420, "horizon": 14, "step": 7, "series": 1, "objective": "daily_rmse"},
+    {"name": "daily_landing", "kind": "seasonal", "freq": "D", "season": 7, "length": 468, "horizon": 63, "step": 7, "series": 1, "objective": "monthly_landing"},
+    {"name": "monthly_trend", "kind": "trend", "freq": "MS", "season": 12, "length": 180, "horizon": 6, "step": 6, "series": 1, "objective": "daily_rmse"},
+    {"name": "quarterly_seasonal", "kind": "seasonal", "freq": "QS", "season": 4, "length": 120, "horizon": 4, "step": 4, "series": 1, "objective": "daily_rmse"},
+    {"name": "daily_panel", "kind": "trend", "freq": "D", "season": 7, "length": 420, "horizon": 14, "step": 7, "series": 3, "objective": "daily_rmse"}
+  ],
+  "policy": {
+    "greedy_max_steps": 32,
+    "minimum_prior_origins": 3,
+    "horizon_groups": 3,
+    "confirmation_use": "One final comparison after development; failed or interrupted attempts consume the final assessment.",
+    "promotion": "No automatic adoption. Preserve existing practical-improvement, secondary, coverage and untouched-confirmation guards."
+  }
+}

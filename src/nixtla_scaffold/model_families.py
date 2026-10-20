@@ -34,6 +34,8 @@ STATS_SKLEARN_MODELS = (
     "StatsSklearn_Lasso",
 )
 
+EXTENDED_STATSFORECAST_MODELS = ("AutoCES", "AutoTBATS")
+
 BASELINE_MODELS = {
     "Naive",
     "HistoricAverage",
@@ -46,9 +48,12 @@ BASELINE_MODELS = {
 
 STATSFORECAST_MODELS = {
     *STATS_SKLEARN_MODELS,
+    *EXTENDED_STATSFORECAST_MODELS,
     "SES",
     "SeasonalExpSmoothing",
     "AutoETS",
+    "AutoETS_Damped",
+    "AutoETS_Undamped",
     "AutoARIMA",
     "Holt",
     "HoltWinters",
@@ -81,6 +86,10 @@ _MODEL_ALIASES = {
     "autoarima": "AutoARIMA",
     "ets": "AutoETS",
     "autoets": "AutoETS",
+    "ces": "AutoCES",
+    "autoces": "AutoCES",
+    "tbats": "AutoTBATS",
+    "autotbats": "AutoTBATS",
     "theta": "Theta",
     "autotheta": "AutoTheta",
     "optimizedtheta": "OptimizedTheta",

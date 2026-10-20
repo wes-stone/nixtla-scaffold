@@ -92,7 +92,7 @@ Product catalog or SKU-level forecasting. Tests pipeline scalability.
 These scenarios incorporate 26 verified knowledge facts from 10 autoresearch iterations:
 
 1. **Intermittent demand** (Scenario 11): Croston models don't help on Bernoulli-zero patterns; ZeroForecast is WAPE-optimal when >50% zeros
-2. **Level shift** (Scenario 13): Distribution shift causes 15-21 holdout underperformances; James-Stein shrinkage addresses this
+2. **Level shift** (Scenario 13): Distribution shift can produce holdout underperformance. Automatic post-selection shrinkage has been removed: a treatment must earn its own chronological backtest, not alter a winner after scoring.
 3. **Mixed history** (Scenario 5): Short-history series need fallback selection, not crashed pipelines
 4. **Fill methods** (Scenario 28): Gap repair is critical for real data quality
 5. **Naive comparison** (Scenario 29): Naive guard never triggers because backtest already selects models beating naive; holdout underperformance is distribution shift

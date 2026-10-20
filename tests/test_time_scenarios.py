@@ -6,6 +6,7 @@ from nixtla_scaffold import DriverEvent, ForecastSpec, add_fiscal_calendar, aggr
 from nixtla_scaffold.cli import main
 from nixtla_scaffold.data import canonicalize_forecast_frame
 from nixtla_scaffold.profile import profile_dataset, repair_time_index
+from nixtla_scaffold.schema import forecast_spec_from_dict
 from nixtla_scaffold.transformations import apply_event_adjustments
 
 
@@ -259,13 +260,31 @@ def test_two_point_series_has_no_backtest_metrics_but_still_forecasts() -> None:
     assert "backtest not available" in run.model_selection["selection_reason"].iloc[0]
 
 
-def test_three_point_series_unblocks_backtest_metrics() -> None:
+def test_three_point_legacy_series_preserves_diagnostic_backtest_metrics() -> None:
     df = _frame(pd.date_range("2026-01-31", periods=3, freq="ME"), [10, 12, 15])
 
-    run = run_forecast(df, ForecastSpec(horizon=1, model_policy="baseline"))
+    spec = forecast_spec_from_dict({"horizon": 1, "model_policy": "baseline"})
+    run = run_forecast(df, spec)
 
+    assert spec.evaluation.strategy == "legacy"
     assert not run.backtest_metrics.empty
     assert {"wape", "mae", "bias"}.issubset(run.model_selection.columns)
+    assert set(run.backtest_metrics["observations"]) == {1}
+
+
+def test_three_point_accuracy_first_series_is_directional_without_lowering_training_minimum() -> None:
+    df = _frame(pd.date_range("2026-01-31", periods=3, freq="ME"), [10, 12, 15])
+    spec = ForecastSpec(horizon=1, model_policy="baseline")
+
+    run = run_forecast(df, spec)
+
+    assert spec.evaluation.reference_minimum_training_observations == 4
+    assert len(run.forecast) == 1
+    assert run.forecast["yhat"].notna().all()
+    assert run.backtest_metrics.empty
+    assert run.model_policy_resolution["evaluation"]["origins"] == []
+    assert "backtest not available" in run.model_selection["selection_reason"].iloc[0]
+    assert any("directional baseline, not a validated winner" in warning for warning in run.warnings)
 
 
 def test_hierarchy_sparse_child_aligns_with_parent_calendar_after_repair() -> None:

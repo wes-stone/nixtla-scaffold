@@ -100,6 +100,12 @@ def test_signal_contract_round_trip_and_capability_routing() -> None:
     assert "telemetry_store" in routes[0]["source_families"]
 
 
+def test_disabled_discovery_is_unavailable_not_an_invented_user_opt_out():
+    from nixtla_scaffold.signals import build_initial_signal_needs
+    needs = build_initial_signal_needs(target_semantics="", grain="", source_discovery_enabled=False)
+    assert all(need.status == "unavailable" and "not a user opt-out" in need.notes for need in needs)
+
+
 def test_regressor_candidate_requires_temporal_and_leakage_contract() -> None:
     with pytest.raises(ValueError, match="known_as_of_col"):
         SignalContract(

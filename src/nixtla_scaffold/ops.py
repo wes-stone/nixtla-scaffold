@@ -140,6 +140,11 @@ def build_run_receipt(run_dir: str | Path) -> dict[str, Any]:
         "python_version": reproducibility.get("python_version"),
         "package_versions": reproducibility.get("package_versions", {}),
         "diagnostics_status": diagnostics.get("status"),
+        **({"production_release": {
+            "qualification": _read_json(run / "production_readiness.json").get("status", "incomplete"),
+            "bundle_created": (run / "release" / "manifest.json").is_file(),
+        }}
+           if spec.get("production") is not None else {}),
         "warning_count": len(manifest.get("warnings", [])) if isinstance(manifest, dict) else 0,
         "next_actions": diagnostics.get("next_diagnostic_steps", []),
         "artifacts": artifact_rows,
@@ -182,6 +187,24 @@ def build_validation_receipt(run_dir: str | Path) -> pd.DataFrame:
     _append_check(rows, "manifest_exists", "run", (run / "manifest.json").exists(), "manifest.json is present.", "Run forecast again or restore manifest.json.")
     _append_check(rows, "diagnostics_exists", "run", (run / "diagnostics.json").exists(), "diagnostics.json is present.", "Run forecast again or restore diagnostics.json.")
     _append_check(rows, "forecast_exists", "run", (run / "forecast.csv").exists(), "forecast.csv is present.", "Run forecast again or restore forecast.csv.")
+    if manifest.get("spec", {}).get("production") is not None:
+        from hashlib import sha256
+        readiness = _read_json(run / "production_readiness.json")
+        released = _read_json(run / "release" / "manifest.json")
+        hashes = released.get("sha256", {})
+        intact = isinstance(hashes, dict) and set(hashes) == {"forecast.csv", "qualification.json", "summary.md"}
+        if intact:
+            intact = all(
+                (run / "release" / name).is_file()
+                and sha256((run / "release" / name).read_bytes()).hexdigest() == digest
+                for name, digest in hashes.items()
+            )
+        _append_check(
+            rows, "production_release", "quality_contract",
+            readiness.get("release_allowed") is True and released.get("status") == "qualified_statistical_release" and intact,
+            f"Production statistical release: {readiness.get('status', 'incomplete')}.",
+            "Review production_readiness.json and release checksums; missing or changed delivery files cannot pass.",
+        )
 
     history = _read_csv(run / "appendix" / "history.csv")
     history_required = set(CANONICAL_COLUMNS)

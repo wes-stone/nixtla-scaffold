@@ -83,6 +83,7 @@ def append_custom_model_result(
     history: pd.DataFrame,
     profile: DataProfile,
     spec: ForecastSpec,
+    invocation_kind: str = "future",
 ) -> ModelResult:
     """Append the optional custom challenger to the model tournament."""
 
@@ -95,7 +96,7 @@ def append_custom_model_result(
             raise ValueError("custom models do not support target transforms or normalization_factor_col in v1; run on raw y units instead")
         if custom.model_name in set(base_result.forecast.columns):
             raise ValueError(f"custom model name {custom.model_name!r} conflicts with an existing model column")
-        custom_result = forecast_with_custom_model(history, profile, spec, custom)
+        custom_result = forecast_with_custom_model(history, profile, spec, custom, invocation_kind=invocation_kind)
     except Exception as exc:
         invocation_rows = exc.invocation_rows if isinstance(exc, CustomModelExecutionError) else []
         warning = f"custom model {custom.model_name} failed and was excluded; built-in candidates remain ({exc})"
@@ -154,10 +155,12 @@ def forecast_with_custom_model(
     profile: DataProfile,
     spec: ForecastSpec,
     custom: CustomModelSpec,
+    *,
+    invocation_kind: str = "future",
 ) -> ModelResult:
     invocation_rows: list[dict[str, Any]] = []
     try:
-        forecast = _custom_future_forecast(history, profile, spec, custom, invocation_rows)
+        forecast = _custom_future_forecast(history, profile, spec, custom, invocation_rows, invocation_kind=invocation_kind)
         metrics, backtest_predictions = _custom_backtest(history, profile, spec, custom, invocation_rows)
     except Exception as exc:
         raise CustomModelExecutionError(str(exc), invocation_rows=invocation_rows) from exc
@@ -168,7 +171,7 @@ def forecast_with_custom_model(
             "and was scored independently outside WeightedEnsemble"
         )
     ]
-    if backtest_predictions.empty:
+    if backtest_predictions.empty and spec.evaluation.strategy != "none":
         warnings_out.append(f"custom model {custom.model_name} did not produce rolling-origin backtest metrics")
     contracts = _custom_contract_frame(custom, status="succeeded", invocation_count=len(invocation_rows), error="")
     invocations = _custom_invocation_frame(invocation_rows)
@@ -221,9 +224,14 @@ def _custom_future_forecast(
     spec: ForecastSpec,
     custom: CustomModelSpec,
     invocation_rows: list[dict[str, Any]],
+    *,
+    invocation_kind: str = "future",
 ) -> pd.DataFrame:
     future_grid = _future_grid_from_history(history, profile.freq, spec.horizon)
     cutoff = pd.to_datetime(history["ds"]).max()
+    if invocation_kind == "backtest":
+        future_grid["cutoff"] = cutoff
+        future_grid["horizon_step"] = future_grid.groupby("unique_id", sort=False).cumcount() + 1
     validated = _invoke_and_validate(
         custom,
         history=history,
@@ -232,7 +240,7 @@ def _custom_future_forecast(
         freq=profile.freq,
         cutoff=cutoff,
         levels=spec.levels,
-        invocation_kind="future",
+        invocation_kind=invocation_kind,
         invocation_rows=invocation_rows,
     )
     return validated.rename(columns={"yhat": custom.model_name})[["unique_id", "ds", custom.model_name]]
@@ -251,7 +259,7 @@ def _custom_backtest(
     for uid, grp in history.groupby("unique_id", sort=True):
         grp = grp.sort_values("ds").reset_index(drop=True)
         n_obs = len(grp)
-        h, n_windows, step_size = _adaptive_cv_params(n_obs, spec.horizon, season, strict=spec.strict_cv_horizon)
+        h, n_windows, step_size = _adaptive_cv_params(n_obs, spec.horizon, season, strict=spec.strict_cv_horizon, policy=spec.evaluation)
         if h < 1 or n_windows < 1:
             continue
         for window in range(n_windows, 0, -1):
@@ -312,7 +320,7 @@ def _custom_backtest(
         return _empty_backtest_metrics(), _empty_backtest_predictions()
 
     backtest_predictions = pd.concat(cv_frames, ignore_index=True).sort_values(["unique_id", "cutoff", "ds"]).reset_index(drop=True)
-    metrics = _metrics_from_cv(backtest_predictions, scales_by_series=_error_scale_map(history, season))
+    metrics = _metrics_from_cv(backtest_predictions, scales_by_series=_error_scale_map(history, season, backtest_predictions))
     if not metrics.empty and metadata_rows:
         metadata = pd.DataFrame(metadata_rows)
         metadata = (
@@ -454,15 +462,8 @@ def _invoke_script(
             str(output_path),
             *list(custom.extra_args),
         ]
-        completed = subprocess.run(
-            command,
-            shell=False,
-            capture_output=True,
-            text=True,
-            timeout=custom.timeout_seconds,
-            check=False,
-            cwd=tmp_path,
-        )
+        from nixtla_scaffold.processes import run_script
+        completed = run_script(command, timeout=custom.timeout_seconds, cwd=tmp_path)
         metadata = {
             "command_json": json.dumps(command, default=str),
             "script_path": str(script),
@@ -694,7 +695,7 @@ def _custom_policy_resolution(
 
     prior_identity = out.get("resolved_candidate_identity", {})
     prior_candidates = (
-        list(prior_identity.get("resolved_candidates", ()))
+        [name for name in prior_identity.get("resolved_candidates", ()) if name != custom.model_name]
         if isinstance(prior_identity, dict)
         else []
     )
@@ -705,20 +706,8 @@ def _custom_policy_resolution(
 
 
 def _replace_model_result(result: ModelResult, **updates: Any) -> ModelResult:
-    values = {
-        "forecast": result.forecast,
-        "backtest_metrics": result.backtest_metrics,
-        "backtest_predictions": result.backtest_predictions,
-        "engine": result.engine,
-        "model_weights": result.model_weights,
-        "model_explainability": result.model_explainability,
-        "custom_model_contracts": result.custom_model_contracts,
-        "custom_model_invocations": result.custom_model_invocations,
-        "warnings": result.warnings,
-        "model_policy_resolution": result.model_policy_resolution,
-    }
-    values.update(updates)
-    return ModelResult(**values)
+    from dataclasses import replace
+    return replace(result, **updates)
 
 
 def _concat_frames(*frames: pd.DataFrame) -> pd.DataFrame:

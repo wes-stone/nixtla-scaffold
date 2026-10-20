@@ -162,14 +162,17 @@ def _horizon_receipt(run: Any) -> dict[str, str]:
     required = {"unique_id", "selected_model", "selection_horizon", "requested_horizon", "cv_windows", "cv_horizon_matches_requested"}
     if not required.issubset(selection.columns):
         return _receipt("horizon_claim_audited", "warning", "model_selection missing CV horizon contract columns")
-    rows = selection[list(required)].copy()
+    columns = [*required, *(["cv_disjoint_windows"] if "cv_disjoint_windows" in selection else [])]
+    rows = selection[columns].copy()
     selected = pd.to_numeric(rows["selection_horizon"], errors="coerce")
     requested = pd.to_numeric(rows["requested_horizon"], errors="coerce")
-    windows = pd.to_numeric(rows["cv_windows"], errors="coerce")
+    window_column = "cv_disjoint_windows" if "cv_disjoint_windows" in rows else "cv_windows"
+    windows = pd.to_numeric(rows[window_column], errors="coerce")
     full_horizon = selected.notna() & requested.notna() & (selected >= requested) & windows.notna() & (windows >= 2)
     status = "passed" if bool(full_horizon.all()) else "warning"
     evidence = "; ".join(
-        f"{row['unique_id']}:{row['selected_model']} h={row['selection_horizon']}/{row['requested_horizon']} windows={row['cv_windows']}"
+        f"{row['unique_id']}:{row['selected_model']} h={row['selection_horizon']}/{row['requested_horizon']} "
+        f"windows={row['cv_windows']} horizon_evidence_windows={row[window_column]}"
         for row in rows.to_dict("records")
     )
     return _receipt("horizon_claim_audited", status, evidence)

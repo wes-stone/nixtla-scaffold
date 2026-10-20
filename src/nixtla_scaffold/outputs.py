@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 import math
 from datetime import datetime, timezone
+from contextlib import contextmanager
+from contextvars import ContextVar
+from functools import wraps
 from html import escape
 from pathlib import Path
 from typing import Any, Sequence
@@ -64,6 +67,9 @@ MODEL_TRADEOFF_SCORE_COLUMNS = [
     "cv_windows",
     "cv_step_size",
     "cv_horizon_matches_requested",
+    "selection_eligible",
+    "comparison_support",
+    "cv_disjoint_windows",
 ]
 MODEL_PARETO_FRONTIER_COLUMNS = [
     "unique_id",
@@ -94,6 +100,9 @@ MODEL_PARETO_FRONTIER_COLUMNS = [
     "cv_windows",
     "cv_step_size",
     "cv_horizon_matches_requested",
+    "selection_eligible",
+    "comparison_support",
+    "cv_disjoint_windows",
 ]
 FEATURE_SELECTION_RECEIPT_COLUMNS = [
     "feature",
@@ -128,8 +137,52 @@ BORROWED_STRENGTH_ADVISOR_COLUMNS = [
 ]
 
 
-def write_run(run: ForecastRun, output_dir: str | Path) -> Path:
+_OUTPUT_TABLES: ContextVar[tuple[ForecastRun, dict[str, pd.DataFrame]] | None] = ContextVar("output_tables", default=None)
+
+
+@contextmanager
+def cached_output_tables(run: ForecastRun):
+    """Reuse read-only derived tables during one synchronous report, never across edits."""
+    current = _OUTPUT_TABLES.get()
+    if current is not None and current[0] is run:
+        yield
+        return
+    token = _OUTPUT_TABLES.set((run, {}))
+    try:
+        yield
+    finally:
+        _OUTPUT_TABLES.reset(token)
+
+
+def _output_batch(function):
+    @wraps(function)
+    def wrapped(run, *args, **kwargs):
+        with cached_output_tables(run):
+            return function(run, *args, **kwargs)
+    return wrapped
+
+
+def _cached_table(function):
+    @wraps(function)
+    def wrapped(run):
+        current = _OUTPUT_TABLES.get()
+        if current is None or current[0] is not run:
+            return function(run)
+        cache = current[1]
+        if function.__name__ not in cache:
+            cache[function.__name__] = function(run)
+        return cache[function.__name__].copy(deep=True)
+    return wrapped
+
+
+@_output_batch
+def write_run(run: ForecastRun, output_dir: str | Path, *, release: bool = True) -> Path:
+    if type(release) is not bool:
+        raise ValueError("release must be a boolean")
     out = Path(output_dir)
+    if run.spec.production is not None:
+        from nixtla_scaffold.production import reserve_production_output
+        reserve_production_output(out)
     out.mkdir(parents=True, exist_ok=True)
     appendix = out / APPENDIX_DIR
     appendix.mkdir(parents=True, exist_ok=True)
@@ -139,6 +192,8 @@ def write_run(run: ForecastRun, output_dir: str | Path) -> Path:
     selected_forecast = build_selected_forecast(run, forecast_long)
 
     run.history.to_csv(appendix / "history.csv", index=False)
+    if not run.observed_history.empty:
+        run.observed_history.to_csv(appendix / "observed_history.csv", index=False)
     selected_forecast.to_csv(out / "forecast.csv", index=False)
     forecast_long.to_csv(appendix / "forecast_long.csv", index=False)
     backtest_long = build_backtest_long(run)
@@ -179,12 +234,68 @@ def write_run(run: ForecastRun, output_dir: str | Path) -> Path:
         ):
             write_signal_artifacts(run.spec.context, appendix)
     run.model_explainability.to_csv(appendix / "model_explainability.csv", index=False)
+    if run.spec.selection_policy.objective == "monthly_landing":
+        from nixtla_scaffold.finance import FINANCE_METRICS, WINDOW_COLUMNS
+        scorecard = run.model_policy_resolution.get("finance_scorecard", {})
+        pd.DataFrame(scorecard.get("scores", []), columns=[
+            "unique_id", "model", *FINANCE_METRICS, "landing_windows", "next28_windows",
+        ]).to_csv(appendix / "finance_scorecard.csv", index=False)
+        pd.DataFrame(scorecard.get("windows", []), columns=WINDOW_COLUMNS).to_csv(appendix / "finance_windows.csv", index=False)
+    if run.spec.interval_calibration.aggregate_totals:
+        records = run.model_policy_resolution.get("aggregate_intervals", [])
+        pd.DataFrame([{key: value for key, value in row.items() if key != "support"} for row in records],
+                     columns=["unique_id", "model", "kind", "offset", "start", "end", "cutoff",
+                              "level", "point_total", "lower", "upper", "calibration_windows", "order_statistic",
+                              "status", "method", "assumptions"]).to_csv(appendix / "aggregate_intervals.csv", index=False)
+        (audit / "aggregate_interval_support.json").write_text(_json(records), encoding="utf-8")
     run.all_models.to_csv(audit / "all_models.csv", index=False)
     run.model_selection.to_csv(audit / "model_selection.csv", index=False)
     run.backtest_metrics.to_csv(audit / "backtest_metrics.csv", index=False)
     run.backtest_predictions.to_csv(audit / "backtest_predictions.csv", index=False)
     backtest_windows_frame(run).to_csv(audit / "backtest_windows.csv", index=False)
     run.model_weights.to_csv(audit / "model_weights.csv", index=False)
+    (audit / "candidate_evidence.json").write_text(
+        _json(run.model_policy_resolution.get("candidate_evidence", {})), encoding="utf-8",
+    )
+    build_candidate_fits(run).to_csv(audit / "candidate_fits.csv", index=False)
+    if any("native_fitted" in fit for fit in run.model_policy_resolution.get("candidate_evidence", {}).get("fits", [])):
+        from nixtla_scaffold.native_fitted import fitted_frames
+        for name, frame in fitted_frames(run).items():
+            frame.to_csv(audit / f"native_fitted_{name}.csv", index=False)
+    configuration = run.model_policy_resolution.get("configuration")
+    anomalies = run.model_policy_resolution.get("anomalies")
+    if anomalies is not None:
+        from nixtla_scaffold.anomalies import evidence_frames
+        (audit / "anomalies.json").write_text(_json(anomalies), encoding="utf-8")
+        for name, frame in evidence_frames(anomalies).items():
+            frame.to_csv(audit / f"anomaly_{name}.csv", index=False)
+    if configuration is not None:
+        from nixtla_scaffold.configuration import configuration_frames
+        (audit / "configuration.json").write_text(_json(configuration), encoding="utf-8")
+        for name, frame in configuration_frames(configuration).items():
+            frame.to_csv(audit / f"configuration_{name}.csv", index=False)
+    if run.spec.interval_calibration.method != "native":
+        calibration = run.model_policy_resolution.get("interval_calibration", {})
+        (audit / "interval_calibration.json").write_text(_json(calibration), encoding="utf-8")
+        pd.DataFrame(calibration.get("comparison", []), columns=[
+            "unique_id", "model", "method", "level", "scope", "scope_key", "observations", "cutoffs",
+            "coverage", "mean_width", "mean_interval_score", "weighted_interval_score", "wis_observations",
+            "compared_methods", "metric_version", "scoring_version", "aggregation", "status",
+        ]).to_csv(appendix / "interval_comparison.csv", index=False)
+        support = [{
+            "unique_id": record["unique_id"], "model": record["model"], "method": record["method"],
+            "level": row.get("level"), "status": row["status"], "cutoff": row["cutoff"],
+            "calibration_windows": row.get("calibration", {}).get("windows", 0),
+            "calibration_age_days": row.get("calibration_age_days"),
+            "engine_version": row.get("engine_version"), "reason": row.get("reason", ""),
+        } for record in calibration.get("records", []) for row in record["receipts"] if row["stage"] == "future"]
+        pd.DataFrame(support, columns=[
+            "unique_id", "model", "method", "level", "status", "cutoff", "calibration_windows",
+            "calibration_age_days", "engine_version", "reason",
+        ]).to_csv(appendix / "interval_support.csv", index=False)
+    (appendix / "ensemble_comparisons.json").write_text(
+        _json(run.model_policy_resolution.get("ensemble_comparisons", [])), encoding="utf-8",
+    )
     run.transformation_audit.to_csv(audit / "target_transform_audit.csv", index=False)
     if run.spec.events:
         build_scenario_assumptions_frame(run.spec.events).to_csv(appendix / "scenario_assumptions.csv", index=False)
@@ -233,7 +344,14 @@ def write_run(run: ForecastRun, output_dir: str | Path) -> Path:
         encoding="utf-8",
     )
     (out / "profile.json").write_text(_json(run.profile.to_dict()), encoding="utf-8")
-    (out / "manifest.json").write_text(_json(run.manifest()), encoding="utf-8")
+    from nixtla_scaffold.feature_sources import persist_driver_snapshots
+    manifest = run.manifest()
+    if run.spec.production is not None and not release:
+        manifest["outputs"].pop("production_release", None)
+        manifest["production_delivery"] = {"requested": False, "purpose": "diagnostic_experiment_only"}
+    if run.spec.driver_snapshots or any(item.source for item in run.spec.regressors):
+        manifest["driver_snapshot_artifacts"] = persist_driver_snapshots(run.spec, out)
+    (out / "manifest.json").write_text(_json(manifest), encoding="utf-8")
     (out / "diagnostics.json").write_text(_json(run.diagnostics()), encoding="utf-8")
     (out / "llm_context.json").write_text(_json(build_llm_context(run)), encoding="utf-8")
     (out / "diagnostics.md").write_text(format_run_diagnostics_markdown(run), encoding="utf-8")
@@ -243,7 +361,14 @@ def write_run(run: ForecastRun, output_dir: str | Path) -> Path:
     write_report_artifacts(run, out)
     write_workbook(run, out / "forecast.xlsx")
     write_review_outputs(run, out, selected_forecast=selected_forecast, forecast_long=forecast_long)
-    write_operational_receipts(out)
+    if run.spec.production is not None:
+        from nixtla_scaffold.production import write_production_delivery
+        try:
+            write_production_delivery(run, out, release=release)
+        finally:
+            write_operational_receipts(out)
+    else:
+        write_operational_receipts(out)
     return out
 
 
@@ -426,6 +551,7 @@ def build_training_progress_rows(run: ForecastRun) -> list[dict[str, Any]]:
     return rows
 
 
+@_output_batch
 def write_workbook(run: ForecastRun, output_path: str | Path) -> Path:
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -764,6 +890,8 @@ def build_review_decision_summary(trust_summary: pd.DataFrame) -> pd.DataFrame:
 def build_review_model_leaderboard(model_audit: pd.DataFrame, *, top_n_per_series: int = 8) -> pd.DataFrame:
     """Small model leaderboard; the full model audit remains in model_audit.csv."""
 
+    if "selection_eligible" in model_audit:
+        model_audit = model_audit.loc[model_audit.selection_eligible.fillna(False)]
     columns = [
         "unique_id",
         "model",
@@ -1249,6 +1377,10 @@ INTERVAL_DIAGNOSTIC_COLUMNS = [
     "miss_above_rate",
     "miss_below_rate",
     "observations",
+    "disjoint_windows",
+    "minimum_rank_samples",
+    "mean_interval_score",
+    "dependence_note",
 ]
 
 RESIDUAL_TEST_COLUMNS = [
@@ -1350,6 +1482,7 @@ SELECTED_FORECAST_INTERVAL_COLUMNS = [
     "requested_horizon",
     "selection_horizon",
     "cv_windows",
+    "cv_disjoint_windows",
     "cv_step_size",
     "cv_horizon_matches_requested",
     "row_horizon_status",
@@ -1422,6 +1555,7 @@ def build_forecast_long(run: ForecastRun) -> pd.DataFrame:
                 "requested_horizon",
                 "selection_horizon",
                 "cv_windows",
+                "cv_disjoint_windows",
                 "cv_step_size",
                 "cv_horizon_matches_requested",
                 "row_horizon_status",
@@ -1502,15 +1636,23 @@ def build_forecast_long(run: ForecastRun) -> pd.DataFrame:
                     "selected_model": selected_model,
                     "weight": weights.get((uid, model)),
                     "interval_status": interval_status,
-                    "interval_method": _interval_method(model, has_interval=bool(interval_values)),
+                    "interval_method": _interval_method(model, has_interval=bool(interval_values), run=run, uid=uid),
                     "interval_evidence": _interval_evidence(interval_status, meta),
                     "requested_horizon": meta.get("requested_horizon"),
                     "selection_horizon": meta.get("selection_horizon"),
                     "cv_windows": meta.get("cv_windows"),
+                    "cv_disjoint_windows": meta.get("cv_disjoint_windows"),
                     "cv_step_size": meta.get("cv_step_size"),
                     "cv_horizon_matches_requested": meta.get("cv_horizon_matches_requested"),
                     **horizon_contract,
                 }
+                if is_selected and run.spec.production is not None:
+                    readiness = run.model_policy_resolution.get("production", {}).get("readiness", {})
+                    out.update(
+                        interval_status="policy_qualified" if readiness.get("release_allowed") else "policy_rejected",
+                        interval_method="chronological_selector_split_conformal" if interval_values else "unavailable",
+                        interval_evidence="production_readiness.json; separate policy replay, not component CV coverage",
+                    )
                 for level, (lo_value, hi_value) in interval_values.items():
                     out[f"yhat_lo_{level}"] = lo_value
                     out[f"yhat_hi_{level}"] = hi_value
@@ -1522,6 +1664,7 @@ def build_forecast_long(run: ForecastRun) -> pd.DataFrame:
     return _order_model_feed_columns(_sort_for_feeder(pd.DataFrame(rows), ["unique_id", "ds", "is_selected_model", "weight"]))
 
 
+@_cached_table
 def build_backtest_long(run: ForecastRun) -> pd.DataFrame:
     """Rolling-origin predictions in a feeder-friendly long format with actuals."""
 
@@ -1551,8 +1694,15 @@ def build_backtest_long(run: ForecastRun) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     selected = _selected_model_map(run)
     weights = _weight_map(run)
-    scales = _scale_maps(run.history, run.profile.season_length)
+    from nixtla_scaffold.models import _error_scale_map
+
+    observed = run.observed_history if not run.observed_history.empty else run.history
+    scales = _error_scale_map(observed, run.profile.season_length, run.backtest_predictions)
     model_cols = _model_columns(run.backtest_predictions, extra_exclude={"cutoff", "y"})
+    interval_levels = {
+        model: _interval_levels_for_model(pd.Series(index=run.backtest_predictions.columns, dtype=float), model)
+        for model in model_cols
+    }
     frame = run.backtest_predictions.copy()
     frame["ds"] = pd.to_datetime(frame["ds"])
     frame["cutoff"] = pd.to_datetime(frame["cutoff"])
@@ -1588,7 +1738,7 @@ def build_backtest_long(run: ForecastRun) -> pd.DataFrame:
                     "selected_model": selected_model,
                     "weight": weights.get((str(uid), model)),
                 }
-                for level in _interval_levels_for_model(row, model):
+                for level in interval_levels[model]:
                     lo_col = f"{model}-lo-{level}"
                     hi_col = f"{model}-hi-{level}"
                     lo_value = row.get(lo_col)
@@ -1705,6 +1855,7 @@ def build_series_summary(run: ForecastRun) -> pd.DataFrame:
     return summary[[col for col in columns if col in summary.columns]]
 
 
+@_cached_table
 def build_series_features(run: ForecastRun) -> pd.DataFrame:
     """Cheap deterministic forecastability features for agent review."""
 
@@ -1784,6 +1935,7 @@ def build_series_features(run: ForecastRun) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+@_cached_table
 def build_borrowed_strength_advisor(run: ForecastRun) -> pd.DataFrame:
     """Advisory sparse-series guidance; never changes model selection or forecasts."""
 
@@ -2083,6 +2235,33 @@ def build_model_audit(run: ForecastRun) -> pd.DataFrame:
     return audit.reset_index(drop=True)
 
 
+def build_candidate_fits(run: ForecastRun) -> pd.DataFrame:
+    evidence = run.model_policy_resolution.get("candidate_evidence", {})
+    rows = []
+    for fit in evidence.get("fits", []):
+        recipe = evidence["recipes"][fit["recipe_id"]]
+        intervals = fit.get("intervals", {})
+        calibration = intervals.get("calibration") or {}
+        execution = recipe["execution"]
+        rows.append({
+            **{key: fit.get(key) for key in ("unique_id", "model", "stage", "cutoff", "status", "recipe_id",
+                                           "fitted_structure_status")},
+            "engine": recipe["engine"], "estimator": recipe["estimator"].get("class"),
+            "fitted_method": fit.get("fitted_structure", {}).get("method"),
+            "fitted_structure": _json(fit.get("fitted_structure", {})),
+            "interval_method": intervals.get("method", "unavailable"),
+            "calibration_windows": calibration.get("windows"),
+            "constructor": _json(recipe["estimator"]), "execution": _json(recipe["execution"]),
+            "diagnostics": _json(fit.get("diagnostics", [])),
+            "feature_recipe": _json(execution.get("native_feature_recipe", {})),
+            "input_schema_columns": len(execution["actual_feature_names"]) if "actual_feature_names" in execution else None,
+            "external_inputs": ";".join(execution.get("external_feature_columns", [])),
+            "fit_predict_seconds": fit.get("fit_predict_seconds"),
+            "timing_scope": fit.get("timing_scope", ""),
+        })
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["unique_id", "model", "stage", "status"])
+
+
 def build_model_win_rates(run: ForecastRun) -> pd.DataFrame:
     """Benchmark win rates by model, using SeasonalNaive when available."""
 
@@ -2099,6 +2278,8 @@ def build_model_win_rates(run: ForecastRun) -> pd.DataFrame:
             ]
         )
     metrics = run.backtest_metrics.copy()
+    if "selection_eligible" in metrics:
+        metrics = metrics.loc[metrics.selection_eligible.fillna(False)]
     metric = "mase" if "mase" in metrics.columns and metrics["mase"].notna().any() else "rmse"
     benchmark_model = "SeasonalNaive" if (metrics["model"].astype(str) == "SeasonalNaive").any() else "Naive"
     benchmark = metrics[metrics["model"].astype(str) == benchmark_model][["unique_id", metric]].rename(columns={metric: "benchmark_metric"})
@@ -2155,6 +2336,17 @@ def build_feature_selection_receipts(run: ForecastRun) -> pd.DataFrame:
 
     rows: list[dict[str, Any]] = []
     driver_features = getattr(run, "driver_model_features", pd.DataFrame())
+    intent = run.spec.feature_recipe
+    for name, requested in (("pca", intent.pca), ("feature_selection", intent.feature_selection),
+                            ("recipes_to_run", intent.recipes_to_run), ("weekly_to_daily", intent.weekly_to_daily)):
+        if requested:
+            rows.append({
+                "feature": name, "feature_role": "recorded_intent", "source": "feature_recipe",
+                "models_reporting_importance": 0, "availability_status": "not_executed",
+                "leakage_status": "not_applicable", "cv_evidence_status": "not_scored",
+                "final_decision": "metadata_only_not_a_native_operator",
+                "notes": "This legacy setting records intent only; it did not transform, select, or allocate model inputs.",
+            })
     driver_by_feature = _driver_feature_receipt_map(driver_features)
     cv_features = _driver_cv_feature_set(getattr(run, "driver_model_cv_delta", pd.DataFrame()))
     explainability = getattr(run, "model_explainability", pd.DataFrame())
@@ -2248,6 +2440,8 @@ def build_model_pareto_frontier(run: ForecastRun) -> pd.DataFrame:
     for uid, group in scores.groupby("unique_id", sort=True, dropna=False):
         group = group.copy().reset_index(drop=True)
         base_candidate_mask = _has_any_finite_pareto_metric(group)
+        comparable = group["selection_eligible"].fillna(False) if "selection_eligible" in run.backtest_metrics else pd.Series(True, index=group.index)
+        base_candidate_mask &= comparable
         metric_cols, excluded_metrics = _complete_pareto_metrics(group[base_candidate_mask])
         candidate_mask = pd.Series(False, index=group.index)
         if metric_cols:
@@ -2276,7 +2470,9 @@ def build_model_pareto_frontier(run: ForecastRun) -> pd.DataFrame:
             is_candidate = model in eligible_models
             is_pareto = bool(is_candidate and model in pareto_models)
             is_selected = bool(row.get("is_selected_model"))
-            if not metric_cols or not is_candidate:
+            if not comparable.loc[group["model"].eq(model)].all():
+                pareto_status = "separate_cohort"
+            elif not metric_cols or not is_candidate:
                 pareto_status = "insufficient_metrics"
             elif is_pareto:
                 pareto_status = "non_dominated_tradeoff"
@@ -2287,7 +2483,9 @@ def build_model_pareto_frontier(run: ForecastRun) -> pd.DataFrame:
                     "is_pareto_optimal": is_pareto,
                     "pareto_status": pareto_status,
                     "selection_alignment": _selection_alignment(is_selected=is_selected, is_pareto=is_pareto, pareto_status=pareto_status),
-                    "dominance_scope": "within_unique_id",
+                    "dominance_scope": ("within_unique_id_same_comparison_support"
+                                        if "selection_eligible" in run.backtest_metrics
+                                        else "within_unique_id_legacy_unverified"),
                     "metrics_considered": "|".join(metric_cols),
                     "excluded_metrics": "|".join(excluded_metrics),
                     "excluded_reason": excluded_reason if pareto_status == "insufficient_metrics" else "",
@@ -2324,9 +2522,13 @@ def _aggregate_tradeoff_metrics(metrics: pd.DataFrame) -> pd.DataFrame:
     if "observations" in frame.columns:
         frame["observations"] = pd.to_numeric(frame["observations"], errors="coerce")
         agg["observations"] = "sum"
-    for col in ["requested_horizon", "selection_horizon", "cv_windows", "cv_step_size", "cv_horizon_matches_requested"]:
+    for col in ["requested_horizon", "selection_horizon", "cv_windows", "cv_step_size",
+                "cv_horizon_matches_requested", "comparison_support", "cv_disjoint_windows"]:
         if col in frame.columns:
             agg[col] = "first"
+    if "selection_eligible" in frame:
+        frame["selection_eligible"] = frame["selection_eligible"].fillna(False)
+        agg["selection_eligible"] = "all"
     if not agg:
         return frame[["unique_id", "model"]].drop_duplicates().reset_index(drop=True)
     return frame.groupby(["unique_id", "model"], as_index=False, sort=True).agg(agg)
@@ -2360,6 +2562,8 @@ def _has_any_finite_pareto_metric(group: pd.DataFrame) -> pd.Series:
 
 
 def _selection_alignment(*, is_selected: bool, is_pareto: bool, pareto_status: str) -> str:
+    if pareto_status == "separate_cohort":
+        return "not_comparable"
     if pareto_status == "insufficient_metrics":
         return "selected_insufficient_metrics" if is_selected else "insufficient_metrics"
     if is_selected and is_pareto:
@@ -2463,6 +2667,7 @@ def build_model_window_metrics(run: ForecastRun) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values(["unique_id", "cutoff", "rmse", "model"]).reset_index(drop=True)
 
 
+@_cached_table
 def build_residual_diagnostics(run: ForecastRun) -> pd.DataFrame:
     """Error diagnostics by series, model, and horizon step."""
 
@@ -2516,6 +2721,7 @@ def build_residual_diagnostics(run: ForecastRun) -> pd.DataFrame:
     return pd.DataFrame(rows)[columns].sort_values(["unique_id", "horizon_step", "rmse", "model"]).reset_index(drop=True)
 
 
+@_cached_table
 def build_residual_test_summary(run: ForecastRun) -> pd.DataFrame:
     """Heuristic residual health checks by series and model."""
 
@@ -2905,8 +3111,12 @@ def build_hierarchy_backtest_comparison(run: ForecastRun) -> pd.DataFrame:
     ).reset_index(drop=True)
 
 
+@_cached_table
 def build_interval_diagnostics(run: ForecastRun) -> pd.DataFrame:
     """Empirical interval coverage and width diagnostics."""
+
+    from nixtla_scaffold.evaluation import disjoint_window_count
+    from nixtla_scaffold.intervals import interval_support, minimum_rank_samples
 
     long = build_backtest_long(run)
     if long.empty:
@@ -2919,7 +3129,9 @@ def build_interval_diagnostics(run: ForecastRun) -> pd.DataFrame:
         hi_col = f"yhat_hi_{level}"
         covered_col = f"covered_{level}"
         miss_col = f"miss_direction_{level}"
-        valid = long[long[lo_col].notna() & long[hi_col].notna()].copy()
+        valid = long.loc[
+            np.isfinite(long[[lo_col, hi_col, "y_actual"]]).all(axis=1) & long[lo_col].le(long[hi_col])
+        ].copy()
         if valid.empty:
             continue
         for (uid, model, h), grp in valid.groupby(["unique_id", "model", "horizon_step"], sort=True):
@@ -2934,6 +3146,16 @@ def build_interval_diagnostics(run: ForecastRun) -> pd.DataFrame:
             observations = int(len(grp))
             coverage_status = _coverage_status(coverage_gap, observations)
             meta = metadata.get((str(uid), str(model)), {})
+            model_rows = valid.loc[valid.unique_id.astype(str).eq(str(uid)) & valid.model.eq(model)]
+            disjoint = disjoint_window_count(model_rows, horizon=run.spec.horizon)
+            required = minimum_rank_samples(int(level))
+            if disjoint < required or not interval_support(run, uid, model, int(level), stage="backtest"):
+                coverage_status = "insufficient_observations"
+            alpha = 1 - target
+            y = pd.to_numeric(grp["y_actual"], errors="coerce")
+            interval_score = width + 2 / alpha * (
+                (grp[lo_col] - y).clip(lower=0) + (y - grp[hi_col]).clip(lower=0)
+            )
             rows.append(
                 {
                     "unique_id": uid,
@@ -2945,7 +3167,7 @@ def build_interval_diagnostics(run: ForecastRun) -> pd.DataFrame:
                     "coverage_gap": coverage_gap,
                     "coverage_status": coverage_status,
                     "interval_status": _coverage_status_to_interval_status(coverage_status),
-                    "interval_method": _interval_method(str(model), has_interval=True),
+                    "interval_method": _interval_method(str(model), has_interval=True, run=run, uid=uid, stage="backtest"),
                     "requested_horizon": meta.get("requested_horizon"),
                     "selection_horizon": meta.get("selection_horizon"),
                     "cv_windows": meta.get("cv_windows"),
@@ -2956,6 +3178,10 @@ def build_interval_diagnostics(run: ForecastRun) -> pd.DataFrame:
                     "miss_above_rate": float((miss == "above").mean()) if len(miss) else None,
                     "miss_below_rate": float((miss == "below").mean()) if len(miss) else None,
                     "observations": observations,
+                    "disjoint_windows": disjoint,
+                    "minimum_rank_samples": required,
+                    "mean_interval_score": float(interval_score.mean()),
+                    "dependence_note": "Disjoint forecast windows may remain serially dependent; no independence or coverage guarantee.",
                 }
             )
     if not rows:
@@ -2976,6 +3202,7 @@ TRUST_SUMMARY_COLUMNS = [
     "requested_horizon",
     "selection_horizon",
     "cv_windows",
+    "cv_disjoint_windows",
     "cv_step_size",
     "cv_horizon_matches_requested",
     "horizon_trust_state",
@@ -3004,6 +3231,7 @@ TRUST_SUMMARY_COLUMNS = [
 ]
 
 
+@_cached_table
 def build_trust_summary(run: ForecastRun) -> pd.DataFrame:
     """Decision-ready trust and next-action summary, one row per series."""
 
@@ -3039,6 +3267,8 @@ def build_trust_summary(run: ForecastRun) -> pd.DataFrame:
         requested_horizon = _int_or_none(selected_row.get("requested_horizon"))
         selection_horizon = _int_or_none(selected_row.get("selection_horizon"))
         cv_windows = _int_or_none(selected_row.get("cv_windows"))
+        disjoint_windows = _int_or_none(selected_row.get("cv_disjoint_windows"))
+        evidence_windows = disjoint_windows if disjoint_windows is not None else cv_windows
         cv_step_size = _int_or_none(selected_row.get("cv_step_size"))
         cv_horizon_matches = _bool_or_none(selected_row.get("cv_horizon_matches_requested"))
         history_count = int(history_rows.get(uid, 0))
@@ -3056,7 +3286,7 @@ def build_trust_summary(run: ForecastRun) -> pd.DataFrame:
         residual_stability = _assess_residual_stability(uid, selected_model, residuals)
         interval_gap = _interval_coverage_gap(uid, selected_model, intervals)
         interval_status = _interval_status(uid, selected_model, intervals, run)
-        interval_method = _interval_method(selected_model, has_interval=_selected_future_has_intervals(run, uid))
+        interval_method = _interval_method(selected_model, has_interval=_selected_future_has_intervals(run, uid), run=run, uid=uid)
         seasonality_status = _seasonality_status(uid, seasonality)
         hierarchy_status = _hierarchy_status(uid, coherence)
         event_status = "scenario_events_applied" if run.spec.events else "statistical_baseline_only"
@@ -3086,7 +3316,7 @@ def build_trust_summary(run: ForecastRun) -> pd.DataFrame:
         )
         score, level, deductions = _compute_trust_score(
             backtest_count=observed,
-            cv_windows=cv_windows,
+            cv_windows=evidence_windows,
             primary_metric=primary_metric,
             primary_value=primary_value,
             history_readiness=history_readiness,
@@ -3101,6 +3331,11 @@ def build_trust_summary(run: ForecastRun) -> pd.DataFrame:
             horizon_score_cap=horizon_gate["horizon_trust_score_cap"],
             horizon_gate_result=horizon_gate["horizon_gate_result"],
         )
+        if disjoint_windows is not None and disjoint_windows != cv_windows:
+            caveats.append(
+                f"{cv_windows or 0} rolling origins contain {disjoint_windows} disjoint full-horizon windows; "
+                "overlapping origins are not independent confirmation, and disjointness alone does not establish independence"
+            )
         actions = _recommend_trust_actions(
             level=level,
             caveats=caveats,
@@ -3127,6 +3362,7 @@ def build_trust_summary(run: ForecastRun) -> pd.DataFrame:
                 "requested_horizon": requested_horizon or run.spec.horizon,
                 "selection_horizon": selection_horizon,
                 "cv_windows": cv_windows or 0,
+                "cv_disjoint_windows": disjoint_windows,
                 "cv_step_size": cv_step_size,
                 "cv_horizon_matches_requested": cv_horizon_matches,
                 "horizon_trust_state": horizon_gate["horizon_trust_state"],
@@ -3478,6 +3714,8 @@ def _horizon_gate(
     requested = _int_or_none(row.get("requested_horizon")) or int(requested_horizon)
     selected = _int_or_none(row.get("selection_horizon"))
     windows = cv_windows if cv_windows is not None else _int_or_none(row.get("cv_windows"))
+    disjoint = _int_or_none(row.get("cv_disjoint_windows"))
+    evidence_windows = disjoint if disjoint is not None else windows
     has_evidence = bool(observed) and bool(windows) and selected is not None and selected > 0
 
     if not has_evidence:
@@ -3493,7 +3731,7 @@ def _horizon_gate(
         validated = requested
         unvalidated_start = None
         unvalidated_steps = 0
-        full_claim = (windows or 0) >= 2
+        full_claim = (evidence_windows or 0) >= 2
         cap = None
         result = "passed"
     else:
@@ -3510,10 +3748,10 @@ def _horizon_gate(
             cap = 60
             result = "warning_partial_horizon_validation"
 
-    if has_evidence and (windows or 0) < 2:
+    if has_evidence and (evidence_windows or 0) < 2:
         cap = min(cap, 65) if cap is not None else 65
         if result == "passed":
-            result = "warning_single_cv_window"
+            result = "warning_insufficient_disjoint_windows" if disjoint is not None else "warning_single_cv_window"
 
     if naive_skill is not None and naive_skill < 0:
         cap = min(cap, 35) if cap is not None else 35
@@ -3541,6 +3779,8 @@ def _horizon_row_contract(
     requested = _int_or_none(metadata.get("requested_horizon")) or int(requested_horizon)
     selected = _int_or_none(metadata.get("selection_horizon"))
     windows = _int_or_none(metadata.get("cv_windows"))
+    disjoint = _int_or_none(metadata.get("cv_disjoint_windows"))
+    evidence_windows = disjoint if disjoint is not None else windows
     if selected is None or selected <= 0 or not windows:
         state = "no_rolling_origin_evidence"
         validated = 0
@@ -3559,7 +3799,7 @@ def _horizon_row_contract(
         state = "full_horizon_validated"
         validated = requested
         is_beyond = False
-        eligible = windows >= 2
+        eligible = (evidence_windows or 0) >= 2
         if eligible:
             label = f"Validated through requested horizon {requested}"
             warning = f"validated through requested horizon {requested} with {windows} rolling-origin window(s)"
@@ -3573,10 +3813,18 @@ def _horizon_row_contract(
         state = "partial_horizon_validated"
         validated = selected
         is_beyond = False
-        eligible = windows >= 2
+        eligible = (evidence_windows or 0) >= 2
         label = f"Validated only through step {selected} of {requested}"
         warning = f"validated through CV horizon {selected} of requested {requested}; later steps are directional"
 
+    if disjoint is not None and disjoint < 2 and windows:
+        eligible = False
+        label = f"Directional: {windows} rolling origins, {disjoint} disjoint full-horizon windows"
+        warning += f"; only {disjoint} disjoint requested-horizon windows, insufficient for a planning-ready horizon claim"
+    if _bool_or_none(metadata.get("selection_eligible")) is False:
+        eligible = False
+        label = "Directional: not eligible for the declared paired comparison"
+        warning += "; comparison support is diagnostic or incomplete"
     if eligible:
         if state == "full_horizon_validated":
             eligibility_reason = (
@@ -3618,6 +3866,8 @@ def _naive_skill(
     if selected_value is None or metric == "unavailable" or metrics.empty or metric not in metrics.columns:
         return None
     series_metrics = metrics[metrics["unique_id"].astype(str) == uid].copy()
+    if "selection_eligible" in series_metrics:
+        series_metrics = series_metrics.loc[series_metrics["selection_eligible"].fillna(False)]
     if series_metrics.empty:
         return None
     benchmark_name = "SeasonalNaive" if (series_metrics["model"].astype(str) == "SeasonalNaive").any() else "Naive"
@@ -3679,10 +3929,14 @@ def _interval_coverage_gap(uid: str, selected_model: str, intervals: pd.DataFram
 
 
 def _interval_status(uid: str, selected_model: str, intervals: pd.DataFrame, run: ForecastRun) -> str:
+    from nixtla_scaffold.intervals import interval_support
+
     if selected_model == "WeightedEnsemble":
         return "point_only_ensemble"
     if _selected_future_has_intervals(run, uid) and _selected_forecast_adjusted(run, uid, selected_model):
         return "adjusted_not_recalibrated"
+    if not _selected_future_has_intervals(run, uid):
+        return "unavailable"
     if intervals.empty or "unique_id" not in intervals.columns:
         return "future_only" if _selected_future_has_intervals(run, uid) else "unavailable"
     selected_meta = _selection_row(run.model_selection.copy(), uid)
@@ -3698,6 +3952,8 @@ def _interval_status(uid: str, selected_model: str, intervals: pd.DataFrame, run
         return "future_only" if _selected_future_has_intervals(run, uid) else "unavailable"
     if selection_horizon is not None and selection_horizon < requested_horizon and _selected_future_has_intervals(run, uid):
         return "future_only"
+    if not all(interval_support(run, uid, selected_model, level, stage="future") for level in run.spec.levels):
+        return "insufficient_observations"
     statuses = set(frame.get("interval_status", pd.Series(dtype=str)).dropna().astype(str))
     if not statuses:
         statuses = {_coverage_status_to_interval_status(status) for status in frame["coverage_status"].dropna().astype(str)}
@@ -3705,7 +3961,7 @@ def _interval_status(uid: str, selected_model: str, intervals: pd.DataFrame, run
         return "calibration_fail"
     if "calibration_warning" in statuses:
         return "calibration_warning"
-    if statuses == {"insufficient_observations"}:
+    if "insufficient_observations" in statuses:
         return "insufficient_observations"
     if "calibrated" in statuses:
         return "calibrated"
@@ -4101,25 +4357,6 @@ def _metric_row(uid: Any, model: Any, grp: pd.DataFrame, *, cutoff: Any | None =
     return row
 
 
-def _scale_maps(history: pd.DataFrame, season_length: int) -> dict[str, dict[str, float | None]]:
-    scales: dict[str, dict[str, float | None]] = {}
-    lag = max(1, int(season_length or 1))
-    for uid, grp in history.groupby("unique_id", sort=True):
-        y = pd.to_numeric(grp.sort_values("ds")["y"], errors="coerce").dropna().to_numpy(dtype="float64")
-        active_lag = lag if lag > 1 and len(y) > lag else 1
-        if len(y) <= active_lag:
-            scales[str(uid)] = {"mase_scale": None, "rmsse_scale": None}
-            continue
-        diff = y[active_lag:] - y[:-active_lag]
-        abs_scale = float(pd.Series(diff).abs().mean())
-        squared_scale = float((pd.Series(diff) ** 2).mean() ** 0.5)
-        scales[str(uid)] = {
-            "mase_scale": abs_scale if abs_scale > 0 else None,
-            "rmsse_scale": squared_scale if squared_scale > 0 else None,
-        }
-    return scales
-
-
 def _first_finite_positive(values: Any) -> float | None:
     if values is None:
         return None
@@ -4190,7 +4427,7 @@ def _future_interval_status(
         return "calibration_fail"
     if "calibration_warning" in statuses:
         return "calibration_warning"
-    if statuses == {"insufficient_observations"}:
+    if "insufficient_observations" in statuses:
         return "insufficient_observations"
     if "calibrated" in statuses:
         return "calibrated"
@@ -4209,19 +4446,12 @@ def _coverage_status_to_interval_status(status: str) -> str:
     return "unavailable"
 
 
-def _interval_method(model: str, *, has_interval: bool | None = None) -> str:
-    family = model_family(model)
-    if model == "WeightedEnsemble":
+def _interval_method(model: str, *, has_interval: bool | None = None, run=None, uid=None, stage="future") -> str:
+    from nixtla_scaffold.intervals import interval_provenance
+
+    if has_interval is False or model == "WeightedEnsemble":
         return "point_forecast_only"
-    if family == "statsforecast":
-        return "statsforecast_conformal_distribution"
-    if family == "mlforecast":
-        return "mlforecast_conformal_distribution"
-    if family == "baseline" and has_interval:
-        return "statsforecast_conformal_distribution"
-    if family == "ensemble":
-        return "point_forecast_only"
-    return "not_applicable"
+    return interval_provenance(run, uid, model, stage=stage)["method"] if run is not None else "unverified_legacy"
 
 
 def _interval_evidence(status: str, metadata: dict[str, Any]) -> str:
@@ -4248,6 +4478,8 @@ def _cv_metadata_map(run: ForecastRun) -> dict[tuple[str, str], dict[str, Any]]:
         "requested_horizon",
         "selection_horizon",
         "cv_windows",
+        "cv_disjoint_windows",
+        "selection_eligible",
         "cv_step_size",
         "cv_horizon_matches_requested",
     ]

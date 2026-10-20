@@ -44,6 +44,30 @@ def _demo_frame() -> pd.DataFrame:
     )
 
 
+@pytest.mark.parametrize("variant", ["log_transform", "recent_history", "nonseasonal"])
+def test_declared_treatments_persist_one_changed_recipe_and_matched_control(tmp_path, variant):
+    from nixtla_scaffold.schema import EvaluationPolicy
+    frame = pd.DataFrame({"unique_id": "test", "ds": pd.date_range("2020-01-01", periods=60, freq="MS"),
+                          "y": [100 + i + 3 * (i % 4) for i in range(60)]})
+    result = run_experiment(
+        frame, ForecastSpec(horizon=2, freq="MS", season_length=4, model_policy="baseline",
+                            evaluation=EvaluationPolicy(max_windows=2)),
+        output_dir=tmp_path, variants=(variant,), max_variants=1,
+    )
+    summary = result.summary.set_index("variant")
+    assert summary.loc[variant, "status"] == "success"
+    assert summary.loc["baseline", "status"] == "success"
+    saved = json.loads((tmp_path / "variants" / variant / "manifest.json").read_text())
+    evidence = json.loads((tmp_path / "variants" / variant / "audit" / "candidate_evidence.json").read_text())
+    assert saved["spec"]["horizon"] == 2
+    if variant == "log_transform":
+        assert all(recipe["execution"]["target_transform"]["target"] == "log" for recipe in evidence["recipes"].values())
+    elif variant == "recent_history":
+        assert all(recipe["execution"]["training_window"] == 24 for recipe in evidence["recipes"].values())
+    else:
+        assert saved["spec"]["season_length"] == 1
+
+
 def _driver_candidate_frame() -> pd.DataFrame:
     minutes = [100, 105, 111, 118, 126, 137, 149, 162, 176, 191, 207, 224, 242, 261]
     rolling = pd.Series(minutes).rolling(3, min_periods=1).mean().shift(1).bfill()
@@ -124,6 +148,29 @@ def test_explicit_experiment_adds_matched_control_and_candidate_fingerprint(tmp_
         == rows.loc["baseline", "resolved_candidate_fingerprint"]
     )
     assert bool(rows.loc["log1p_transform", "candidate_set_compatible"]) is True
+
+
+def test_anomaly_matched_control_preserves_declared_event_and_regressor_intent(tmp_path) -> None:
+    from nixtla_scaffold.schema import DriverEvent, EvaluationPolicy, KnownFutureRegressor
+
+    frame = pd.DataFrame({
+        "unique_id": "test", "ds": pd.date_range("2024-01-01", periods=180),
+        "y": [100 + i * .1 for i in range(180)], "volume": range(180),
+    })
+    spec = ForecastSpec(
+        horizon=7, freq="D", model_policy="baseline", levels=(), weighted_ensemble=False,
+        evaluation=EvaluationPolicy(max_windows=1),
+        events=(DriverEvent(name="Declared scenario", start="2024-07-01", magnitude=.1),),
+        regressors=(KnownFutureRegressor(name="Observed volume", value_col="volume"),),
+    )
+    result = run_experiment(frame, spec, output_dir=tmp_path,
+                            variants=("anomaly_adjustment",), max_variants=1)
+    assert result.summary.status.eq("success").all()
+    control = next(run for run in result.manifest["child_runs"] if run["variant"] == "baseline")
+    assert control["spec"] == spec.to_dict()
+    treatment = next(run for run in result.manifest["child_runs"] if run["variant"] == "anomaly_adjustment")
+    assert treatment["spec"]["events"] == control["spec"]["events"]
+    assert treatment["spec"]["regressors"] == control["spec"]["regressors"]
 
 
 def test_unexpected_candidate_fingerprint_drift_blocks_ranking() -> None:
@@ -424,15 +471,14 @@ def test_run_experiment_detects_candidate_drivers_for_autoresearch_context(tmp_p
     assert candidates
     assert candidates[0]["value_col"] == "rolling_minutes"
     assert candidates[0]["regressor_json"]["availability"] == "historical_only"
-    assert candidates[0]["regressor_json"]["mode"] == "model_candidate"
+    assert candidates[0]["regressor_json"]["mode"] == "audit_only"
+    assert candidates[0]["screening"]["disposition"] == "insufficient_evidence"
     assert "same_period_correlation_abs" in candidates[0]
     assert "best_lag" in candidates[0]
     assert "relationship_timing" in candidates[0]
     assert "active_flag" not in {candidate["value_col"] for candidate in candidates}
     assert result.llm_context["manifest"]["base_spec"]["regressors"] == []
-    assert result.llm_context["autoresearch_hypotheses"][0]["command_seed"].count("--train-known-future-regressors") == 1
-    assert "avg_mae" in result.llm_context["autoresearch_hypotheses"][0]["metric"]
-    assert "avg_wape" not in result.llm_context["autoresearch_hypotheses"][0]["metric"]
+    assert result.llm_context["autoresearch_hypotheses"] == []
 
     recommendation = (output_dir / "experiment_recommendation.md").read_text(encoding="utf-8")
     assert "Context to collect from human" in recommendation

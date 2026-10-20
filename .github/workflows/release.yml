@@ -33,13 +33,13 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --extra dev --extra ml --extra hierarchy --extra datasets
+        run: uv sync --frozen --extra dev --extra ml --extra hierarchy --extra datasets
 
       - name: Run tests
-        run: uv run pytest -q
+        run: uv run --no-sync pytest -q
 
       - name: Run release gates
-        run: uv run nixtla-scaffold release-gates --output runs\release_gates_ci --no-live-streamlit --scenario-count 3
+        run: uv run --no-sync nixtla-scaffold release-gates --output runs\release_gates_ci --no-live-streamlit --scenario-count 3
 
       - name: Upload release gate artifacts
         if: always()
@@ -49,9 +49,116 @@ jobs:
           path: runs\release_gates_ci
           if-no-files-found: ignore
 
+  optional:
+    name: Pinned optional engines
+    runs-on: windows-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --python 3.12 --frozen --extra dev --extra smooth --extra conformal
+      - name: Execute optional contracts without skips
+        env:
+          NIXTLA_FAIL_ON_SKIP: "1"
+        run: uv run --no-sync pytest -q tests\test_smooth_models.py tests\test_conformal.py tests\test_advanced_ml_features.py tests\test_runtime_capabilities.py tests\test_workbench_confirmation.py
+
+  frontend:
+    name: Workbench source and packaged UI
+    runs-on: windows-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: .github/extensions/nixtla-workbench/ui/package-lock.json
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --python 3.12 --frozen --extra dev
+      - run: npm ci
+        working-directory: .github/extensions/nixtla-workbench/ui
+      - run: npm test && npm run build && npm run test:service
+        working-directory: .github/extensions/nixtla-workbench/ui
+      - run: uv run --no-sync python tools\build_workbench_bundle.py
+      - run: uv run --no-sync pytest -q tests\test_workbench_install.py tests\test_workbench_confirmation.py
+      - name: Build browser fixture
+        run: uv run --no-sync python tools\runtime_benchmark.py --output runs\runtime_acceptance
+      - name: Verify browser evidence
+        env:
+          NIXTLA_E2E_MODEL_RUN: ${{ github.workspace }}\runs\runtime_acceptance\run
+          NIXTLA_E2E_FINANCE_RUN: ${{ github.workspace }}\runs\runtime_acceptance\run
+          NIXTLA_E2E_OUTPUT: ${{ github.workspace }}\runs\browser_acceptance
+        run: npx playwright test "runtime-capabilities|finance-evidence"
+        working-directory: .github/extensions/nixtla-workbench/ui
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verified-workbench-bundle
+          path: src/nixtla_scaffold/workbench_assets.zip
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: workbench-browser-evidence
+          path: runs/browser_acceptance
+          if-no-files-found: warn
+
+  portability:
+    name: Standalone wheel (${{ matrix.os }})
+    needs: frontend
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: verified-workbench-bundle
+          path: src/nixtla_scaffold
+      - run: uv sync --python 3.12 --frozen
+      - name: Build and execute outside the checkout
+        shell: pwsh
+        run: |
+          @'
+          from dataclasses import asdict
+          import json
+          import os
+          from pathlib import Path
+          from nixtla_scaffold.release_gates import _build_gate, _install_smoke_gate
+
+          output = Path(os.environ["RUNNER_TEMP"]) / "nixtla-portability"
+          output.mkdir(exist_ok=False)
+          build, wheel = _build_gate(output)
+          results = [asdict(build)]
+          if build.status == "passed":
+              results.append(asdict(_install_smoke_gate(output, wheel)))
+          (output / "portability.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
+          print(json.dumps(results, indent=2))
+          raise SystemExit(0 if len(results) == 2 and all(r["status"] == "passed" for r in results) else 1)
+          '@ | uv run --no-sync python -
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: portability-${{ matrix.os }}
+          path: ${{ runner.temp }}/nixtla-portability/portability.json
+          if-no-files-found: warn
+
   release:
     name: Create GitHub release
-    needs: validate
+    needs: [validate, optional, frontend, portability]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: windows-latest
     timeout-minutes: 30
@@ -93,6 +200,12 @@ jobs:
           } else {
             "RELEASE_EXISTS=false" >> $env:GITHUB_ENV
           }
+
+      - name: Use verified workbench build
+        uses: actions/download-artifact@v4
+        with:
+          name: verified-workbench-bundle
+          path: src/nixtla_scaffold
 
       - name: Build distributions
         if: env.RELEASE_EXISTS != 'true'

@@ -10,7 +10,6 @@ from nixtla_scaffold import DataProfile, ForecastRun, ForecastSpec, TransformSpe
 from nixtla_scaffold.citations import FPPY_CITATION
 from nixtla_scaffold.cli import _coerce_sheet, main
 from nixtla_scaffold.drivers import DriverFeatureBundle
-from nixtla_scaffold.forecast import _apply_shrinkage_toward_last_actual
 from nixtla_scaffold.model_families import canonical_model_name, model_family
 from nixtla_scaffold.models import (
     ModelResult,
@@ -377,9 +376,10 @@ def test_mstl_feature_arima_backtests_on_mature_rolling_origin_folds() -> None:
     metrics = run.backtest_metrics[run.backtest_metrics["model"] == "AutoARIMA_MSTLFeatures"].iloc[0]
     assert "AutoARIMA_MSTLFeatures" in run.all_models.columns
     assert run.all_models["AutoARIMA_MSTLFeatures"].notna().all()
-    assert int(metrics["observations"]) == 24
-    assert int(metrics["cv_windows"]) == 2
-    assert any("AutoARIMA_MSTLFeatures backtested on 2 of 3 rolling-origin folds" in warning for warning in run.warnings)
+    assert int(metrics["observations"]) == 156
+    assert int(metrics["cv_windows"]) == 13
+    assert bool(metrics["selection_eligible"])
+    assert min(origin["training_rows"] for origin in run.model_policy_resolution["evaluation"]["origins"]) == 24
     assert not any("AutoARIMA_MSTLFeatures backtest skipped because the shortest rolling-origin" in warning for warning in run.warnings)
 
 
@@ -448,7 +448,7 @@ def test_model_allowlist_ml_only_resolution_marks_classical_families_skipped(mon
     )
 
     def fake_mlforecast(history, profile, spec):
-        future = pd.date_range(pd.Timestamp("2026-01-31"), periods=spec.horizon, freq="ME")
+        future = pd.date_range(profile.end, periods=spec.horizon + 1, freq=profile.freq)[1:]
         return ModelResult(
             forecast=pd.DataFrame({"unique_id": "Revenue", "ds": future, "LightGBM": [200.0, 205.0, 210.0]}),
             backtest_metrics=pd.DataFrame(
@@ -611,7 +611,7 @@ def test_model_pareto_frontier_marks_tradeoffs_without_changing_selection() -> N
     assert by_model.loc["LowBias", "selection_alignment"] == "pareto_alternative"
     assert by_model.loc["Dominated", "selection_alignment"] == "dominated_challenger"
     assert by_model.loc["RMSEWinner", "metrics_considered"] == "rmse|mae"
-    assert set(frontier["dominance_scope"]) == {"within_unique_id"}
+    assert set(frontier["dominance_scope"]) == {"within_unique_id_legacy_unverified"}
 
 
 def test_pareto_outputs_empty_schema_without_backtest(tmp_path) -> None:
@@ -774,17 +774,31 @@ def test_statsforecast_cv_intervals_feed_interval_diagnostics() -> None:
         "cv_step_size",
         "cv_horizon_matches_requested",
     }.issubset(diagnostics.columns)
-    assert set(diagnostics["interval_method"].dropna()) <= {"statsforecast_conformal_distribution"}
+    methods = {method for value in diagnostics["interval_method"].dropna()
+               for method in value.removeprefix("mixed:").split(",")}
+    assert methods <= {"statsforecast_conformal_distribution", "statsforecast_native",
+                       "statsforecast_native_tbats", "point_forecast_only"}
+    assert "statsforecast_native_tbats" in methods
     assert set(diagnostics["interval_status"].dropna()) <= {
         "calibrated",
         "calibration_warning",
         "calibration_fail",
         "insufficient_observations",
     }
-    assert any("StatsForecast CV conformal intervals enabled" in warning for warning in run.warnings)
+    for _, window in run.backtest_predictions.groupby("cutoff"):
+        assert window[["Naive-lo-80", "Naive-hi-80"]].notna().all().all()
 
 
-def test_statsforecast_candidate_failure_does_not_drop_classical_family() -> None:
+def test_statsforecast_candidate_failure_does_not_drop_classical_family(monkeypatch) -> None:
+    from statsforecast.models import HoltWinters
+    original_predict = HoltWinters.predict
+
+    def point_only(self, h, X=None, level=None):
+        if level:
+            raise ValueError("forced interval failure")
+        return original_predict(self, h, X=X, level=level)
+
+    monkeypatch.setattr(HoltWinters, "predict", point_only)
     values = [
         2061161.212,
         2113074.407,
@@ -864,9 +878,12 @@ def test_statsforecast_candidate_failure_does_not_drop_classical_family() -> Non
         "MSTL",
         "MSTL_AutoARIMA",
         "AutoARIMA_MSTLFeatures",
-        "MFLES",
-        "AutoMFLES",
     }.issubset(model_cols)
+    if model_module._statsforecast_sklearn_import_error() is None:
+        assert {"MFLES", "AutoMFLES"}.issubset(model_cols)
+    else:
+        assert not {"MFLES", "AutoMFLES"} & model_cols
+        assert any("MFLES" in warning and "scikit-learn" in warning for warning in run.warnings)
     assert "WeightedEnsemble" in model_cols
     assert set(run.model_selection["selection_horizon"]) == {16}
     assert not any("StatsForecast failed; used baseline engine" in warning for warning in run.warnings)
@@ -878,9 +895,9 @@ def test_mlforecast_ladder_uses_multiple_regressor_families() -> None:
     pytest.importorskip("sklearn")
     df = pd.DataFrame(
         {
-            "unique_id": ["Revenue"] * 42,
-            "ds": pd.date_range("2022-01-01", periods=42, freq="MS"),
-            "y": [100 + i * 4 + (20 if i % 12 in {10, 11} else 0) for i in range(42)],
+            "unique_id": ["Revenue"] * 84,
+            "ds": pd.date_range("2022-01-01", periods=84, freq="MS"),
+            "y": [100 + i * 4 + (20 if i % 12 in {10, 11} else 0) for i in range(84)],
         }
     )
 
@@ -934,7 +951,7 @@ def test_light_policy_attempts_mlforecast_when_cv_feasible_below_regressor_gate(
 
     def fake_mlforecast(history, profile, spec):
         calls.append(profile.min_obs_per_series)
-        future = pd.date_range("2026-01-01", periods=spec.horizon, freq="MS")
+        future = pd.date_range(profile.end, periods=spec.horizon + 1, freq=profile.freq)[1:]
         return ModelResult(
             forecast=pd.DataFrame({"unique_id": "Revenue", "ds": future, "LinearRegression": [140.0, 143.0]}),
             backtest_metrics=model_module._empty_backtest_metrics(),
@@ -952,7 +969,7 @@ def test_light_policy_attempts_mlforecast_when_cv_feasible_below_regressor_gate(
         ForecastSpec(horizon=2, freq="MS", levels=(), model_policy="light", weighted_ensemble=False, verbose=False),
     )
 
-    assert calls == [12]
+    assert calls == [12, 8, 9, 10]
     families = {row["family"]: row for row in run.model_policy_resolution["families"]}
     assert families["mlforecast"]["eligible"]
     assert families["mlforecast"]["ran"]
@@ -1019,7 +1036,9 @@ def test_standard_policy_runs_smooth_when_optional_dependency_is_available(monke
     assert families["smooth"]["requested"]
     assert families["smooth"]["eligible"]
     assert families["smooth"]["ran"]
-    assert families["smooth"]["contributed_models"] == ["SmoothADAM_CCC", "SmoothADAM_CustomPool", "SmoothADAM_ZXZ"]
+    assert families["smooth"]["contributed_models"] == ["SmoothADAM_CCC", "SmoothADAM_ZXZ"]
+    assert "SmoothADAM_CustomPool" not in run.all_models.columns
+    assert any("quarantined" in warning for warning in run.warnings)
     assert "SmoothADAM_ZXZ" in run.all_models.columns
     assert "smooth optional dependency active: version=1.0.3, license=LGPL-2.1" in run.warnings
 
@@ -1416,43 +1435,6 @@ def test_weighted_ensemble_can_be_disabled() -> None:
     assert any("weighted ensemble disabled" in warning for warning in run.warnings)
 
 
-def test_shrinkage_shifts_intervals_with_selected_yhat() -> None:
-    forecast = pd.DataFrame(
-        {
-            "unique_id": ["A", "A"],
-            "ds": pd.date_range("2026-01-31", periods=2, freq="ME"),
-            "yhat": [200.0, 210.0],
-            "model": ["ModelA", "ModelA"],
-            "yhat_lo_80": [180.0, 190.0],
-            "yhat_hi_80": [220.0, 230.0],
-        }
-    )
-    history = pd.DataFrame(
-        {
-            "unique_id": ["A", "A", "A"],
-            "ds": pd.date_range("2025-10-31", periods=3, freq="ME"),
-            "y": [100.0, 101.0, 80.0],
-        }
-    )
-    backtest = pd.DataFrame(
-        {
-            "unique_id": ["A", "A", "A"],
-            "ds": pd.date_range("2025-10-31", periods=3, freq="ME"),
-            "cutoff": [pd.Timestamp("2025-09-30")] * 3,
-            "y": [100.0, 101.0, 102.0],
-            "ModelA": [200.0, 50.0, 250.0],
-        }
-    )
-
-    out, warnings = _apply_shrinkage_toward_last_actual(forecast, history, backtest)
-
-    assert warnings
-    assert out["yhat"].iloc[0] < forecast["yhat"].iloc[0]
-    assert out["yhat_hi_80"].iloc[0] - out["yhat_lo_80"].iloc[0] == forecast["yhat_hi_80"].iloc[0] - forecast["yhat_lo_80"].iloc[0]
-    assert (out["yhat_lo_80"] <= out["yhat"]).all()
-    assert (out["yhat"] <= out["yhat_hi_80"]).all()
-
-
 def test_model_selection_records_cv_horizon_contract() -> None:
     df = pd.DataFrame(
         {
@@ -1462,7 +1444,7 @@ def test_model_selection_records_cv_horizon_contract() -> None:
         }
     )
 
-    run = run_forecast(df, ForecastSpec(horizon=6, model_policy="baseline"))
+    run = run_forecast(df, ForecastSpec(horizon=6, model_policy="baseline", strict_cv_horizon=False))
 
     assert {"requested_horizon", "selection_horizon", "cv_windows", "cv_step_size", "cv_horizon_matches_requested"}.issubset(
         run.model_selection.columns
@@ -1528,7 +1510,8 @@ def test_horizon_planning_rows_expose_success_reason_and_review_context() -> Non
         }
     )
 
-    run = run_forecast(df, ForecastSpec(horizon=6, model_policy="baseline", strict_cv_horizon=True))
+    # Exercise the component horizon gate independently of learned-ensemble warmup.
+    run = run_forecast(df, ForecastSpec(horizon=6, model_policy="baseline", strict_cv_horizon=True, weighted_ensemble=False))
 
     forecast_long = build_forecast_long(run)
     selected_rows = forecast_long[forecast_long["is_selected_model"]]
@@ -1553,7 +1536,7 @@ def test_horizon_planning_rows_expose_success_reason_and_review_context() -> Non
     assert stakeholder_review["next_actions"].notna().all()
 
 
-def test_single_window_full_horizon_discloses_limited_claim(tmp_path) -> None:
+def test_single_disjoint_window_full_horizon_discloses_limited_claim(tmp_path) -> None:
     df = pd.DataFrame(
         {
             "unique_id": ["Revenue"] * 8,
@@ -1566,10 +1549,11 @@ def test_single_window_full_horizon_discloses_limited_claim(tmp_path) -> None:
 
     selected = run.model_selection.iloc[0]
     assert selected["selection_horizon"] == selected["requested_horizon"] == 3
-    assert selected["cv_windows"] == 1
+    assert selected["cv_windows"] == 2
+    assert selected["cv_disjoint_windows"] == 1
     trust = build_trust_summary(run).iloc[0]
     assert trust["horizon_trust_state"] == "full_horizon_validated"
-    assert trust["horizon_gate_result"] == "warning_single_cv_window"
+    assert trust["horizon_gate_result"] == "warning_insufficient_disjoint_windows"
     assert not bool(trust["full_horizon_claim_allowed"])
     assert trust["trust_score_0_100"] <= 65
     forecast_long = build_forecast_long(run)
@@ -1578,20 +1562,20 @@ def test_single_window_full_horizon_discloses_limited_claim(tmp_path) -> None:
     assert set(selected_rows["row_horizon_status"]) == {"full_horizon_validated"}
     assert selected_rows["planning_eligible"].eq(False).all()
     assert set(selected_rows["planning_eligibility_scope"]) == {"horizon_validation_only"}
-    assert selected_rows["horizon_warning"].str.contains("only 1 rolling-origin window").all()
+    assert selected_rows["horizon_warning"].str.contains("only 1 disjoint requested-horizon window").all()
     selected_forecast = build_selected_forecast(run, forecast_long)
     assert selected_forecast["planning_eligible"].eq(False).all()
     assert set(selected_forecast["planning_eligibility_scope"]) == {"horizon_validation_only"}
-    assert "only 1 rolling-origin window" in run.explanation()
+    assert "1 disjoint full-horizon window" in run.explanation()
     headline = build_executive_headline(run)
-    assert "evaluated on only 1 CV window(s)" in headline.paragraph
+    assert "only 1 disjoint full-horizon window(s)" in headline.paragraph
     assert "planning claim limited" in headline.paragraph
     receipts = {item["id"]: item["status"] for item in run.best_practice_receipts()}
     assert receipts["horizon_claim_audited"] == "warning"
 
     output_dir = run.to_directory(tmp_path / "single_window")
     decoded_report = base64.b64decode((output_dir / "report_base64.txt").read_text(encoding="utf-8")).decode("utf-8")
-    assert "only 1 CV window(s)" in decoded_report
+    assert "only 1 disjoint full-horizon window(s)" in decoded_report
     assert "planning claim limited" in decoded_report
     streamlit_app = (output_dir / "streamlit_app.py").read_text(encoding="utf-8")
     assert "planning-ready champion claim is limited" in streamlit_app
@@ -2772,7 +2756,7 @@ def test_executive_headline_zero_recent_average_keeps_absolute_delta() -> None:
     assert "absolute delta" in headline.paragraph
 
 
-def test_executive_headline_portfolio_prioritizes_low_then_medium_actions() -> None:
+def test_executive_headline_portfolio_prioritizes_low_then_medium_actions(monkeypatch) -> None:
     df = pd.DataFrame(
         {
             "unique_id": ["Richer"] * 24 + ["Short"] * 6 + ["Tiny"] * 2,
@@ -2783,6 +2767,9 @@ def test_executive_headline_portfolio_prioritizes_low_then_medium_actions() -> N
         }
     )
     run = run_forecast(df, ForecastSpec(horizon=3, freq="MS", model_policy="baseline"))
+    trust = build_trust_summary(run)
+    trust["trust_level"] = trust["unique_id"].map({"Richer": "High", "Short": "Medium", "Tiny": "Low"})
+    monkeypatch.setattr("nixtla_scaffold.outputs.build_trust_summary", lambda _: trust)
 
     headline = build_executive_headline(run)
 

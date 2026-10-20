@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -48,10 +49,55 @@ def write_refresh_artifacts(previous_run: str | Path, current_run: str | Path) -
         "delta_types": sorted(delta["delta_type"].dropna().astype(str).unique().tolist()) if not delta.empty else [],
         "artifacts": {"refresh_delta": "appendix/refresh_delta.csv"},
     }
+    if previous_manifest.get("spec", {}).get("regressors") or current_manifest.get("spec", {}).get("regressors"):
+        monitor = _driver_refresh_monitor(previous, current, previous_manifest, current_manifest)
+        (appendix / "driver_refresh_monitor.json").write_text(json.dumps(monitor, indent=2, default=str) + "\n", encoding="utf-8")
+        payload["artifacts"]["driver_refresh_monitor"] = "appendix/driver_refresh_monitor.json"
     manifest_path = current / "refresh_manifest.json"
     manifest_path.write_text(json.dumps(payload, indent=2, default=str) + "\n", encoding="utf-8")
     _add_refresh_outputs_to_manifest(current / "manifest.json")
     return payload | {"paths": {"refresh_manifest": str(manifest_path), "refresh_delta": str(delta_path)}}
+
+
+def _driver_refresh_monitor(previous: Path, current: Path, prior: dict, present: dict) -> dict:
+    def identities(manifest):
+        return {item["source_id"]: item["sha256"] for item in manifest.get("spec", {}).get("driver_snapshots", [])}
+    prior_spec, current_spec = prior.get("spec", {}), present.get("spec", {})
+    recipe_fields = ("regressors", "transform", "feature_recipe", "mlforecast_feature_policy", "model_allowlist")
+    recipe_unchanged = all(prior_spec.get(key) == current_spec.get(key) for key in recipe_fields)
+    features = _read_csv(current / "appendix" / "driver_model_features.csv")
+    availability = features.to_dict(orient="records")
+    history = _read_csv(current / "appendix" / "observed_history.csv")
+    if history.empty:
+        history = _read_csv(current / "appendix" / "history.csv")
+    forecasts = _read_csv(previous / "audit" / "all_models.csv")
+    landed = []
+    if not history.empty and not forecasts.empty and "Naive" in forecasts:
+        for frame in (history, forecasts):
+            frame["ds"] = pd.to_datetime(frame.ds)
+        overlap = forecasts.merge(history[["unique_id", "ds", "y"]], on=["unique_id", "ds"], validate="one_to_one")
+        for uid, group in overlap.groupby("unique_id"):
+            for model in ("Ridge", "RandomForest", "LightGBM"):
+                if model not in group:
+                    continue
+                numeric = group[["y", "Naive", model]].apply(pd.to_numeric, errors="coerce")
+                complete = numeric.apply(lambda column: column.map(math.isfinite)).all().all()
+                candidate_rmse = ((numeric[model] - numeric.y).pow(2).mean() ** 0.5) if complete else None
+                naive_rmse = ((numeric.Naive - numeric.y).pow(2).mean() ** 0.5) if complete else None
+                landed.append({"unique_id": str(uid), "model": model, "observations": len(group),
+                               "complete": bool(complete), "rmse": candidate_rmse, "naive_rmse": naive_rmse,
+                               "status": "insufficient_evidence" if not complete or len(group) < prior_spec.get("horizon", 1)
+                               else "reference_regression" if candidate_rmse > naive_rmse else "no_reference_regression"})
+    return {
+        "schema_version": "nixtla_scaffold.driver_refresh.v1",
+        "frozen_recipe_unchanged": recipe_unchanged,
+        "snapshot_hashes_unchanged": identities(prior) == identities(present),
+        "availability": availability, "availability_status": "recorded" if availability else "unavailable",
+        "landed_forecast_monitor": landed,
+        "incremental_feature_value": "not_reconfirmed",
+        "limitations": "Landed errors versus Naive monitor reference regression, not the isolated causal or incremental feature effect. Changed availability or lost skill requires a new matched evaluation and human review.",
+        "automatic_replacement": False,
+    }
 
 
 def build_refresh_delta(
@@ -93,6 +139,12 @@ def build_refresh_delta(
 
 def _spec_delta_rows(previous_spec: dict[str, Any], current_spec: dict[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    # Content identity and granted entities define a frozen source; storage relocation does not.
+    previous_spec, current_spec = [
+        {**spec, "driver_snapshots": [{key: value for key, value in grant.items() if key != "path"}
+                                     for grant in spec.get("driver_snapshots", [])]}
+        for spec in (previous_spec, current_spec)
+    ]
     previous_flat = _flatten_dict(previous_spec)
     current_flat = _flatten_dict(current_spec)
     for key in sorted(set(previous_flat) | set(current_flat)):

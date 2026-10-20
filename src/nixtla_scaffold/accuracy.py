@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import pandas as pd
 
 from nixtla_scaffold.signals import signal_discovery_summary
@@ -53,7 +54,9 @@ def build_context_receipt(run: ForecastRun) -> dict[str, Any]:
     context_complete = not missing_fields and discovery_complete and signal_discovery["complete"]
     return {
         "schema_version": CONTEXT_RECEIPT_SCHEMA_VERSION,
-        "accuracy_first": True,
+        "accuracy_first": run.spec.accuracy_first,
+        "run_mode": run.spec.run_mode,
+        "policy_version": run.spec.policy_version,
         "context_complete": context_complete,
         "missing_required_fields": missing_fields,
         "decision": context.decision,
@@ -253,7 +256,10 @@ def build_accuracy_gate(run: ForecastRun, trust_summary: pd.DataFrame) -> dict[s
         passed=context_receipt["context_complete"] or not policy.require_context_discovery,
         required=policy.require_context_discovery,
         evidence=context_receipt["source_discovery"]["status"],
-        remediation="Complete intake and record a final disposition for each relevant connected source.",
+        remediation=(
+            "Planning context not recorded: " + ", ".join(context_receipt["missing_required_fields"])
+            + ". This does not block a directional baseline; do not invent context or source authorization."
+        ),
     )
     driver_gate = _driver_gate(run, required=policy.require_driver_clearance)
     series_rows: list[dict[str, Any]] = []
@@ -262,10 +268,20 @@ def build_accuracy_gate(run: ForecastRun, trust_summary: pd.DataFrame) -> dict[s
 
     for row in trust_summary.to_dict(orient="records"):
         uid = str(row.get("unique_id", ""))
+        selected = run.forecast.loc[run.forecast["unique_id"].astype(str).eq(uid)]
+        values = pd.to_numeric(selected.get("yhat", pd.Series(dtype=float)), errors="coerce")
+        finite_complete = (
+            len(selected) == run.spec.horizon
+            and "ds" in selected
+            and selected["ds"].notna().all()
+            and not selected["ds"].duplicated().any()
+            and len(values) == run.spec.horizon
+            and np.isfinite(values.to_numpy(dtype=float)).all()
+        )
         forecast_gate = _gate(
-            passed=uid in forecast_ids,
+            passed=bool(finite_complete),
             required=True,
-            evidence="selected future rows present" if uid in forecast_ids else "no selected future rows",
+            evidence="complete finite future path" if finite_complete else "missing, duplicate, or nonfinite future rows",
             remediation="Resolve the modeling failure and rerun the forecast.",
         )
         horizon_pass = _as_bool(row.get("full_horizon_claim_allowed"))
@@ -314,8 +330,39 @@ def build_accuracy_gate(run: ForecastRun, trust_summary: pd.DataFrame) -> dict[s
             "hierarchy": hierarchy_gate,
             "driver_clearance": driver_gate,
         }
+        if run.spec.production is not None:
+            readiness = run.model_policy_resolution.get("production", {}).get("readiness", {})
+            gates["production_release"] = _gate(
+                passed=readiness.get("release_allowed") is True, required=True,
+                evidence=str(readiness.get("status", "missing production qualification")),
+                remediation="Resolve the exact failed contract checks in production_readiness.json; "
+                            "component evidence cannot override a rejected deployed-policy release.",
+            )
+        if run.spec.run_mode == "quick":
+            gates["run_intent"] = _gate(
+                passed=False, required=True, evidence="explicit exploratory quick mode",
+                remediation="Run an accuracy-first evaluation before making a planning-ready claim.",
+            )
+        configuration = getattr(run, "model_policy_resolution", {}).get("configuration")
+        if run.spec.accuracy_first and configuration is not None:
+            gates["configuration_review"] = _gate(
+                passed=uid not in configuration.get("review_series", []), required=True,
+                evidence="selected path versus seasonal-shape and recent cycle-change diagnostics",
+                remediation="Review audit/configuration.json and evaluate a frozen configuration treatment on matched origins; do not cap or promote automatically.",
+            )
+        if run.spec.accuracy_first and not run.spec.paired_validation:
+            gates["comparison_support"] = _gate(
+                passed=False, required=True, evidence="paired validation explicitly disabled",
+                remediation="Compare candidates on exact shared support before making a planning-ready claim.",
+            )
+        if run.spec.accuracy_first and run.spec.hierarchy_reconciliation != "none":
+            gates["deployed_path"] = _gate(
+                passed=False, required=True,
+                evidence="component backtests do not certify the jointly selected reconciled point policy",
+                remediation="Retain reconciliation as advisory until the complete deployed policy has matched origin-level evidence.",
+            )
         failed = [name for name, gate in gates.items() if gate["required"] and not gate["passed"]]
-        critical = [name for name in failed if name in {"forecast", "hierarchy", "driver_clearance"}]
+        critical = [name for name in failed if name in {"forecast", "hierarchy", "driver_clearance", "production_release"}]
         if critical or (failed and not policy.allow_directional_baseline):
             status = "blocked"
         elif failed:
@@ -362,7 +409,9 @@ def build_accuracy_gate(run: ForecastRun, trust_summary: pd.DataFrame) -> dict[s
         overall_status = "planning_ready"
     return {
         "schema_version": ACCURACY_GATE_SCHEMA_VERSION,
-        "accuracy_first": True,
+        "accuracy_first": run.spec.accuracy_first,
+        "run_mode": run.spec.run_mode,
+        "policy_version": run.spec.policy_version,
         "status": overall_status,
         "forecast_produced": bool(forecast_ids),
         "full_requested_horizon_validated": bool(full_horizon_flags) and all(full_horizon_flags),

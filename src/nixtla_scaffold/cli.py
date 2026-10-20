@@ -39,7 +39,7 @@ from nixtla_scaffold.ops import (
     write_status_outputs,
 )
 from nixtla_scaffold.pipelines import refresh_pipeline, run_pipeline
-from nixtla_scaffold.presets import PRESET_NAMES, forecast_spec_preset, preset_catalog
+from nixtla_scaffold.presets import PRESET_NAMES, forecast_spec_preset, preset_catalog, resolve_forecast_spec
 from nixtla_scaffold.profile import profile_dataset
 from nixtla_scaffold.release_gates import OPTIONAL_EXTRAS, format_release_gate_console_summary, run_release_gates
 from nixtla_scaffold.reports import write_report_artifacts_from_directory
@@ -53,6 +53,7 @@ from nixtla_scaffold.schema import (
     FeatureRecipeSpec,
     ForecastContext,
     ForecastSpec,
+    IntervalCalibrationSpec,
     ParallelSpec,
     ResearchBudget,
     TransformSpec,
@@ -104,8 +105,8 @@ def main(argv: list[str] | None = None) -> int:
     setup_cmd.add_argument("--time-col", default="ds")
     setup_cmd.add_argument("--id-col", default="unique_id")
     setup_cmd.add_argument("--id-value", default=None, help="Series ID to inject for one-metric query results")
-    setup_cmd.add_argument("--preset", choices=PRESET_NAMES, default="standard", help="Starter forecast preset for generated commands/config")
-    setup_cmd.add_argument("--horizon", type=int, default=12)
+    setup_cmd.add_argument("--preset", choices=PRESET_NAMES, default="accuracy-first", help="Starter forecast preset for generated commands/config")
+    setup_cmd.add_argument("--horizon", type=int, default=6)
     setup_cmd.add_argument("--freq", default=None)
     setup_cmd.add_argument("--intervals", choices=INTERVAL_MODES, default="auto")
     setup_cmd.add_argument("--model-families", nargs="+", choices=MODEL_FAMILIES, default=["standard"])
@@ -131,14 +132,14 @@ def main(argv: list[str] | None = None) -> int:
 
     forecast_cmd = sub.add_parser("forecast", help="Run an explainable forecast")
     _add_input_args(forecast_cmd)
-    forecast_cmd.add_argument("--preset", choices=PRESET_NAMES, default=None, help="Opinionated defaults: quick, accuracy-first, standard, strict, or hierarchy; finance is a legacy alias for standard")
-    forecast_cmd.add_argument("--horizon", type=int, default=12)
+    forecast_cmd.add_argument("--preset", choices=PRESET_NAMES, default=None, help="Opinionated defaults including production (fail-closed statistical release); finance aliases standard")
+    forecast_cmd.add_argument("--horizon", type=int, default=6)
     forecast_cmd.add_argument("--freq", default=None)
     forecast_cmd.add_argument("--season-length", type=int, default=None)
     forecast_cmd.add_argument("--levels", nargs="+", type=int, default=[80, 95], help="Prediction interval levels, e.g. --levels 80 95")
     forecast_cmd.add_argument("--unit-label", default=None, help="Optional unit/currency label for headline values, e.g. $, USD, seats, ARR")
     forecast_cmd.add_argument("--fill-method", choices=["ffill", "zero", "interpolate", "drop"], default="ffill")
-    forecast_cmd.add_argument("--model-policy", choices=MODEL_POLICY_CHOICES, default="light", help=MODEL_POLICY_HELP)
+    forecast_cmd.add_argument("--model-policy", choices=MODEL_POLICY_CHOICES, default="standard", help=MODEL_POLICY_HELP)
     _add_model_allowlist_args(forecast_cmd)
     forecast_cmd.add_argument("--target-transform", choices=["none", "log", "log1p"], default="none", help="Optional target transform for modeling; outputs are inverse-transformed for reporting")
     forecast_cmd.add_argument("--normalization-factor-col", default=None, help="Positive factor column used to normalize y before modeling, e.g. price_factor, fx_rate, inflation_index")
@@ -214,16 +215,16 @@ def main(argv: list[str] | None = None) -> int:
     forecast_cmd.add_argument("--output", default="runs/latest")
     _add_ledger_registration_args(forecast_cmd)
 
-    compare_models_cmd = sub.add_parser("compare-models", help="Write a clean advisory leaderboard for the existing model tournament")
+    compare_models_cmd = sub.add_parser("compare-models", help="Run a native forecast tournament and write an advisory leaderboard")
     _add_input_args(compare_models_cmd)
     compare_models_cmd.add_argument("--preset", choices=PRESET_NAMES, default=None)
-    compare_models_cmd.add_argument("--horizon", type=int, default=12)
+    compare_models_cmd.add_argument("--horizon", type=int, default=6)
     compare_models_cmd.add_argument("--freq", default=None)
     compare_models_cmd.add_argument("--season-length", type=int, default=None)
     compare_models_cmd.add_argument("--levels", nargs="+", type=int, default=[80, 95])
     compare_models_cmd.add_argument("--unit-label", default=None)
     compare_models_cmd.add_argument("--fill-method", choices=["ffill", "zero", "interpolate", "drop"], default="ffill")
-    compare_models_cmd.add_argument("--model-policy", choices=MODEL_POLICY_CHOICES, default="light", help=MODEL_POLICY_HELP)
+    compare_models_cmd.add_argument("--model-policy", choices=MODEL_POLICY_CHOICES, default="standard", help=MODEL_POLICY_HELP)
     _add_model_allowlist_args(compare_models_cmd)
     compare_models_cmd.add_argument("--target-transform", choices=["none", "log", "log1p"], default="none")
     compare_models_cmd.add_argument("--normalization-factor-col", default=None)
@@ -249,13 +250,13 @@ def main(argv: list[str] | None = None) -> int:
     experiment_cmd = sub.add_parser("experiment", help="Run bounded advisory forecast variants and recommend the next agent iteration")
     _add_input_args(experiment_cmd)
     experiment_cmd.add_argument("--preset", choices=PRESET_NAMES, default=None)
-    experiment_cmd.add_argument("--horizon", type=int, default=12)
+    experiment_cmd.add_argument("--horizon", type=int, default=6)
     experiment_cmd.add_argument("--freq", default=None)
     experiment_cmd.add_argument("--season-length", type=int, default=None)
     experiment_cmd.add_argument("--levels", nargs="+", type=int, default=[80, 95])
     experiment_cmd.add_argument("--unit-label", default=None)
     experiment_cmd.add_argument("--fill-method", choices=["ffill", "zero", "interpolate", "drop"], default="ffill")
-    experiment_cmd.add_argument("--model-policy", choices=MODEL_POLICY_CHOICES, default="light", help=MODEL_POLICY_HELP)
+    experiment_cmd.add_argument("--model-policy", choices=MODEL_POLICY_CHOICES, default="standard", help=MODEL_POLICY_HELP)
     _add_model_allowlist_args(experiment_cmd)
     experiment_cmd.add_argument("--target-transform", choices=["none", "log", "log1p"], default="none")
     experiment_cmd.add_argument("--normalization-factor-col", default=None)
@@ -291,13 +292,13 @@ def main(argv: list[str] | None = None) -> int:
     optimize_cmd = sub.add_parser("optimize", help="Run bounded evidence-led experiments with untouched promotion confirmation")
     _add_input_args(optimize_cmd)
     optimize_cmd.add_argument("--preset", choices=PRESET_NAMES, default=None)
-    optimize_cmd.add_argument("--horizon", type=int, default=12)
+    optimize_cmd.add_argument("--horizon", type=int, default=6)
     optimize_cmd.add_argument("--freq", default=None)
     optimize_cmd.add_argument("--season-length", type=int, default=None)
     optimize_cmd.add_argument("--levels", nargs="+", type=int, default=[80, 95])
     optimize_cmd.add_argument("--unit-label", default=None)
     optimize_cmd.add_argument("--fill-method", choices=["ffill", "zero", "interpolate", "drop"], default="ffill")
-    optimize_cmd.add_argument("--model-policy", choices=MODEL_POLICY_CHOICES, default="light", help=MODEL_POLICY_HELP)
+    optimize_cmd.add_argument("--model-policy", choices=MODEL_POLICY_CHOICES, default="standard", help=MODEL_POLICY_HELP)
     _add_model_allowlist_args(optimize_cmd)
     optimize_cmd.add_argument("--target-transform", choices=["none", "log", "log1p"], default="none")
     optimize_cmd.add_argument("--normalization-factor-col", default=None)
@@ -348,6 +349,7 @@ def main(argv: list[str] | None = None) -> int:
     refresh_cmd.add_argument("--train-known-future-regressors", action=argparse.BooleanOptionalAction, default=None)
     refresh_cmd.add_argument("--mlforecast-feature-policy", choices=["basic", "rolling"], default=None)
     refresh_cmd.add_argument("--require-backtest", action=argparse.BooleanOptionalAction, default=None)
+    _add_evidence_args(refresh_cmd)
     refresh_cmd.add_argument("--strict-cv-horizon", action=argparse.BooleanOptionalAction, default=None)
     refresh_cmd.add_argument("--weighted-ensemble", action=argparse.BooleanOptionalAction, default=None)
     _add_finn_inspired_args(refresh_cmd)
@@ -372,13 +374,13 @@ def main(argv: list[str] | None = None) -> int:
     ingest_cmd.add_argument("--output", required=True, help="Canonical CSV output path")
     ingest_cmd.add_argument("--forecast-output", default=None, help="Optional run directory; if provided, forecast immediately after ingest")
     ingest_cmd.add_argument("--preset", choices=PRESET_NAMES, default=None, help="Opinionated defaults when forecasting after ingest")
-    ingest_cmd.add_argument("--horizon", type=int, default=12)
+    ingest_cmd.add_argument("--horizon", type=int, default=6)
     ingest_cmd.add_argument("--freq", default=None)
     ingest_cmd.add_argument("--season-length", type=int, default=None)
     ingest_cmd.add_argument("--levels", nargs="+", type=int, default=[80, 95], help="Prediction interval levels when forecasting after ingest")
     ingest_cmd.add_argument("--unit-label", default=None, help="Optional unit/currency label for headline values when forecasting after ingest")
     ingest_cmd.add_argument("--fill-method", choices=["ffill", "zero", "interpolate", "drop"], default="ffill")
-    ingest_cmd.add_argument("--model-policy", choices=MODEL_POLICY_CHOICES, default="light", help=MODEL_POLICY_HELP)
+    ingest_cmd.add_argument("--model-policy", choices=MODEL_POLICY_CHOICES, default="standard", help=MODEL_POLICY_HELP)
     _add_model_allowlist_args(ingest_cmd)
     ingest_cmd.add_argument("--target-transform", choices=["none", "log", "log1p"], default="none")
     ingest_cmd.add_argument("--normalization-factor-col", default=None)
@@ -391,6 +393,7 @@ def main(argv: list[str] | None = None) -> int:
     ingest_cmd.add_argument("--weighted-ensemble", action=argparse.BooleanOptionalAction, default=True)
     _add_finn_inspired_args(ingest_cmd)
     _add_context_args(ingest_cmd)
+    _add_evidence_args(ingest_cmd)
     ingest_cmd.add_argument("--verbose", action=argparse.BooleanOptionalAction, default=True)
     ingest_cmd.add_argument("--event", action="append", default=[], help="Driver/event scenario JSON when forecasting after ingest")
     ingest_cmd.add_argument("--event-file", action="append", default=[], help="JSON/YAML/CSV event file when forecasting after ingest")
@@ -678,6 +681,28 @@ def main(argv: list[str] | None = None) -> int:
     guide_cmd = sub.add_parser("guide", help="Search Nixtla/FPPy best-practice guidance")
     guide_cmd.add_argument("query", nargs="?", default=None, help="Optional search term, e.g. intervals or hierarchy")
 
+    runtime_cmd = sub.add_parser("runtime", help="Inspect environment imports and registered recipes without fitting")
+    runtime_cmd.add_argument("--python", default=None, help="Explicit matching interpreter to inspect; never switches the active runtime")
+
+    workbench_cmd = sub.add_parser("workbench", help="Local Copilot forecasting workbench")
+    workbench_sub = workbench_cmd.add_subparsers(dest="workbench_command", required=True)
+    install_cmd = workbench_sub.add_parser("install", help="Install the version-matched optional canvas bundle")
+    install_cmd.add_argument("--target", required=True, help="Empty or previously managed extension folder")
+    install_cmd.add_argument("--yes", action="store_true", required=True, help="Approve local canvas installation/update")
+    worker_cmd = workbench_sub.add_parser("worker", help="Typed JSON workbench worker (stdin/stdout)")
+    worker_cmd.add_argument("--workspace", required=True)
+    worker_cmd.add_argument("--job-id", default=None)
+    worker_cmd.add_argument("--terminal-status", choices=["cancelled", "interrupted", "failed"], default=None)
+
+    analyze_cmd = sub.add_parser("analyze", help="Bounded analyst workflow: baseline and at most two improvements")
+    analyze_cmd.add_argument("--input", help="CSV/workbook source (not required when resuming)")
+    analyze_cmd.add_argument("--workspace", required=True, help="Persistent local catalog, shared with the workbench")
+    analyze_cmd.add_argument("--spec-file", help="Full saved forecast spec JSON; defaults to accuracy-first")
+    analyze_cmd.add_argument("--horizon", type=int, default=None)
+    analyze_cmd.add_argument("--max-seconds", type=float, default=900)
+    analyze_cmd.add_argument("--improvement-policy", choices=["legacy", "greedy"], default="legacy")
+    analyze_cmd.add_argument("--resume-job", help="Resume only under the original remaining budget")
+
     args = parser.parse_args(raw_argv)
     args._provided_flags = _provided_flags(raw_argv)
 
@@ -696,6 +721,34 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run(args: argparse.Namespace) -> int:
+    if args.command == "analyze":
+        from nixtla_scaffold.analysis import analyze, resume_analysis
+        if args.resume_job:
+            if args.input or args.spec_file or args.horizon is not None or args.max_seconds != 900 or args.improvement_policy != "legacy":
+                raise ValueError("Resume reuses the saved source, spec and original budget; do not supply replacements.")
+            result = resume_analysis(args.workspace, args.resume_job)
+        else:
+            if not args.input:
+                raise ValueError("analyze requires --input unless --resume-job is supplied")
+            settings = json.loads(Path(args.spec_file).read_text(encoding="utf-8")) if args.spec_file else {}
+            if args.horizon is not None:
+                settings["horizon"] = args.horizon
+            result = analyze(args.input, settings, workspace=args.workspace,
+                             max_wall_clock_seconds=args.max_seconds, improvement_policy=args.improvement_policy)
+        print(json.dumps(result, indent=2, default=str))
+        return 0
+    if args.command == "runtime":
+        from nixtla_scaffold.runtime import inspect_runtime
+        print(json.dumps(inspect_runtime(args.python), indent=2))
+        return 0
+    if args.command == "workbench":
+        if args.workbench_command == "install":
+            from nixtla_scaffold.workbench_install import install_workbench
+            print(json.dumps(install_workbench(args.target, confirmed=args.yes), indent=2))
+            return 0
+        from nixtla_scaffold.workbench import worker_main
+        return worker_main(args.workspace, job_id=args.job_id, terminal_status=args.terminal_status)
+
     if args.command == "setup":
         answers = _setup_answers_from_args(args)
         if args.interactive:
@@ -719,7 +772,14 @@ def _run(args: argparse.Namespace) -> int:
     if args.command == "forecast":
         spec = _spec_from_args(args)
         run = run_forecast(args.input, spec, sheet=_coerce_sheet(args.sheet))
-        output_dir = run.to_directory(args.output)
+        from nixtla_scaffold.production import ProductionReleaseError
+        try:
+            output_dir = run.to_directory(args.output)
+        except ProductionReleaseError as exc:
+            print(str(exc))
+            return 2
+        if run.spec.production is not None:
+            print(f"Production statistical release qualified: {output_dir / 'release'} (not business approval)")
         challenger_summary = _maybe_run_challengers(output_dir)
         ledger_result = _maybe_register_ledger(args, output_dir)
         print(f"Forecast written to {output_dir}")
@@ -781,7 +841,14 @@ def _run(args: argparse.Namespace) -> int:
     if args.command == "refresh":
         spec = _refresh_spec_from_args(args)
         run = run_forecast(args.input, spec, sheet=_coerce_sheet(args.sheet))
-        output_dir = run.to_directory(args.output)
+        from nixtla_scaffold.production import ProductionReleaseError
+        try:
+            output_dir = run.to_directory(args.output)
+        except ProductionReleaseError as exc:
+            print(str(exc))
+            return 2
+        if run.spec.production is not None:
+            print(f"Production statistical release qualified: {output_dir / 'release'} (not business approval)")
         refresh_result = write_refresh_artifacts(args.previous_run, output_dir)
         challenger_summary = _maybe_run_challengers(output_dir)
         ledger_result = _maybe_register_ledger(args, output_dir)
@@ -981,7 +1048,7 @@ def _run(args: argparse.Namespace) -> int:
         if args.skill_command == "check":
             payload = check_agent_skill(args.target)
             print(json.dumps(payload, indent=2, default=str))
-            return 0 if payload["in_sync"] else 1
+            return 0 if payload["in_sync"] and payload["package_compatible"] is True else 1
         if args.skill_command == "sync":
             payload = sync_agent_skill(args.target, confirmed=args.yes)
             print(json.dumps(payload, indent=2, default=str))
@@ -990,7 +1057,7 @@ def _run(args: argparse.Namespace) -> int:
 
     if args.command == "guide":
         if args.query in {"skill", "agent-skill", "nixtla-forecast"}:
-            print(load_agent_skill())
+            print(load_agent_skill().replace("\r\n", "\n"))
             return 0
         if args.query == "presets":
             print(json.dumps(preset_catalog(), indent=2, default=str))
@@ -1120,11 +1187,23 @@ def _finn_external_kwargs_from_args(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _add_input_args(parser: argparse.ArgumentParser) -> None:
+    _add_evidence_args(parser)
     parser.add_argument("--input", required=True, help="CSV, XLSX, or XLSM file")
     parser.add_argument("--sheet", default=None, help="Excel sheet name/index")
     parser.add_argument("--id-col", default="unique_id", help="Series identifier column, e.g. Product or Account")
     parser.add_argument("--time-col", default="ds", help="Date/time column, e.g. Month or Week")
     parser.add_argument("--target-col", default="y", help="Numeric value to forecast, e.g. Revenue or ARR")
+
+
+def _add_evidence_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--evidence-directory", default=None, help="Local target-exposure ledger scope; never change scopes to relabel known exposure")
+    parser.add_argument("--known-target-exposure", action="store_const", const="exposed", default=None,
+                        help="Record that target history has already been viewed; confirmation stays advisory")
+
+
+def _evaluation_from_args(args, base):
+    return replace(base, evidence_directory=_override(base.evidence_directory, args, "evidence_directory"),
+                   known_target_exposure=_override(base.known_target_exposure, args, "known_target_exposure"))
 
 
 def _add_byo_model_args(parser: argparse.ArgumentParser) -> None:
@@ -1178,6 +1257,18 @@ def _add_model_allowlist_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_finn_inspired_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--configuration-guard", choices=["exclude", "warn"], default=None,
+                        help="Exclude configuration-review candidates from selection, or explicitly retain warning-only behavior")
+    parser.add_argument("--selection-objective", choices=["daily_rmse", "monthly_landing"], default=None,
+                        help="Declared objective; monthly landing scores complete current/next calendar-month flow totals")
+    parser.add_argument("--clip-negative-points", action=argparse.BooleanOptionalAction, default=None,
+                        help="Clip each origin and future model prediction at zero before scoring; never clips actuals")
+    parser.add_argument("--aggregate-intervals", action=argparse.BooleanOptionalAction, default=None,
+                        help="Experimental month/quarter total-error calibration; never sums daily bands")
+    parser.add_argument("--interval-backend", choices=["native", "split_conformal", "nexcp"], default=None,
+                        help="Opt-in experimental residual intervals; native preserves existing behavior")
+    parser.add_argument("--interval-rho", type=float, default=None, help="Fixed NexCP recency decay, not tuned on scored outcomes")
+    parser.add_argument("--interval-max-windows", type=int, default=None, help="Retained disjoint, fully observed calibration windows (20-256)")
     parser.add_argument(
         "--ensemble-policy",
         action="append",
@@ -1198,10 +1289,23 @@ def _add_finn_inspired_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--feature-recipe", action="append", default=None, help="Named feature recipe to record in run manifests")
     parser.add_argument("--feature-selection", action=argparse.BooleanOptionalAction, default=None, help="Record whether automated feature selection is intended")
+    parser.add_argument("--date-features-as-dummies", action=argparse.BooleanOptionalAction, default=None, help="Opt into MLForecast calendar one-hot features inside each fit and backtest fold")
+    parser.add_argument("--mlforecast-strategy", choices=["recursive", "direct"], default=None)
+    parser.add_argument("--horizon-features", type=json.loads, default=None, help='JSON mapping of direct horizons to contracted dynamic columns, e.g. {"1":["promo"]}')
+    parser.add_argument("--lookup-lag-column", action="append", default=None, help="Contracted numeric event/calendar bucket; requires direct strategy")
+    parser.add_argument("--pooled-rolling-window", type=int, default=None)
+    parser.add_argument("--pooled-partition-column", action="append", default=None)
+    parser.add_argument("--pooled-series-id", action="append", default=None, help="Exact aligned cohort member; pooled targets also require common declared units")
     parser.add_argument("--pca", action=argparse.BooleanOptionalAction, default=None, help="Record whether PCA is intended for feature recipes")
     parser.add_argument("--weekly-to-daily", action=argparse.BooleanOptionalAction, default=None, help="Record weekly-to-daily allocation intent")
     parser.add_argument("--clean-missing-values", action=argparse.BooleanOptionalAction, default=None, help="Record missing-value cleaning policy intent")
-    parser.add_argument("--clean-outliers", action=argparse.BooleanOptionalAction, default=None, help="Record outlier cleaning policy intent")
+    parser.add_argument("--clean-outliers", action=argparse.BooleanOptionalAction, default=None, help="Enable guarded origin-local training adjustments; never revises actuals")
+    parser.add_argument("--anomaly-mode", choices=["off", "detect", "adjust"], default=None)
+    parser.add_argument("--anomaly-lookback", type=int, default=None, help="Detector lookback in observations, separate from model training history")
+    parser.add_argument("--enhanced-calendar", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--holiday-calendar", choices=["none", "us_federal", "custom"], default=None)
+    parser.add_argument("--holiday-date", action="append", default=None, help="Explicit custom holiday YYYY-MM-DD; repeat as needed")
+    parser.add_argument("--calendar-known-as-of", default=None, help="Required publication timestamp for custom holidays")
     parser.add_argument("--negative-forecast", action=argparse.BooleanOptionalAction, default=None, help="Allow negative forecasts when the metric can go below zero")
     parser.add_argument("--combo-cleanup-date", default=None, help="Optional combo cleanup cutoff date to record in cleaning policy receipts")
     parser.add_argument("--parallel-processing", choices=["none", "local_machine", "spark"], default=None, help="Execution intent metadata only; no cloud orchestration is started")
@@ -1218,6 +1322,8 @@ def _add_finn_inspired_args(parser: argparse.ArgumentParser) -> None:
 
 def _add_context_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--context-file", default=None, help="Accuracy-first ForecastContext JSON or YAML produced during intake/discovery")
+    parser.add_argument("--driver-snapshot", action="append", default=[],
+                        help="Explicit local driver grant JSON: source_id, absolute path, sha256 and series_ids. Repeat for up to eight approved snapshots.")
     parser.add_argument("--research-budget", choices=["time-boxed", "balanced", "deep", "custom"], default=None)
     parser.add_argument("--research-max-iterations", type=int, default=None)
     parser.add_argument("--research-max-variants-per-iteration", type=int, default=None)
@@ -1450,7 +1556,7 @@ def _arg_or_preset(
     preset_value: Any,
     provided_flags: set[str],
 ) -> Any:
-    if getattr(args, "preset", None) and not _flag_was_provided(provided_flags, flag):
+    if not _flag_was_provided(provided_flags, flag):
         return preset_value
     return getattr(args, attr, preset_value)
 
@@ -1499,7 +1605,7 @@ def _byo_model_kwargs_from_args(args: argparse.Namespace) -> dict[str, Any]:
 def _spec_from_args(args: argparse.Namespace) -> ForecastSpec:
     preset_name = getattr(args, "preset", None)
     provided_flags = getattr(args, "_provided_flags", set())
-    base = forecast_spec_preset(preset_name) if preset_name else ForecastSpec()
+    base = resolve_forecast_spec(preset=preset_name)
     horizon = _arg_or_preset(args, "horizon", "--horizon", base.horizon, provided_flags)
     freq = _arg_or_preset(args, "freq", "--freq", base.freq, provided_flags)
     season_length = _arg_or_preset(args, "season_length", "--season-length", base.season_length, provided_flags)
@@ -1546,6 +1652,8 @@ def _spec_from_args(args: argparse.Namespace) -> ForecastSpec:
         pca=_scalar_arg_or_preset(args, "pca", "--pca", base.feature_recipe.pca, provided_flags),
         feature_selection=_scalar_arg_or_preset(args, "feature_selection", "--feature-selection", base.feature_recipe.feature_selection, provided_flags),
         weekly_to_daily=_scalar_arg_or_preset(args, "weekly_to_daily", "--weekly-to-daily", base.feature_recipe.weekly_to_daily, provided_flags),
+        date_features_as_dummies=_scalar_arg_or_preset(args, "date_features_as_dummies", "--date-features-as-dummies", base.feature_recipe.date_features_as_dummies, provided_flags),
+        **_advanced_recipe_args(args, base.feature_recipe),
     )
     cleaning = CleaningSpec(
         clean_missing_values=_scalar_arg_or_preset(
@@ -1585,6 +1693,14 @@ def _spec_from_args(args: argparse.Namespace) -> ForecastSpec:
         challengers = tuple(challenger for challenger in challengers if challenger.engine != "finn") + (finn_challenger,)
     context = _context_from_args(args, base.context)
     return ForecastSpec(
+        run_mode=base.run_mode,
+        production=base.production,
+        anomaly=_anomaly_from_args(args, base.anomaly),
+        calendar=_calendar_from_args(args, base.calendar),
+        policy_version=base.policy_version,
+        selection_policy=_selection_from_args(args, base.selection_policy),
+        evaluation=_evaluation_from_args(args, base.evaluation),
+        interval_calibration=_interval_from_args(args, base.interval_calibration),
         horizon=horizon,
         freq=freq,
         season_length=season_length,
@@ -1598,6 +1714,7 @@ def _spec_from_args(args: argparse.Namespace) -> ForecastSpec:
         unit_label=getattr(args, "unit_label", None),
         events=_parse_events(getattr(args, "event", []), getattr(args, "event_file", [])),
         regressors=_parse_regressors(getattr(args, "regressor", []), getattr(args, "regressor_file", [])),
+        driver_snapshots=_parse_driver_snapshots(getattr(args, "driver_snapshot", [])),
         custom_models=_parse_custom_models(args),
         transform=TransformSpec(
             target=getattr(args, "target_transform", "none"),
@@ -1615,6 +1732,7 @@ def _spec_from_args(args: argparse.Namespace) -> ForecastSpec:
         require_backtest=require_backtest,
         strict_cv_horizon=strict_cv_horizon,
         weighted_ensemble=weighted_ensemble,
+        paired_validation=base.paired_validation,
         verbose=verbose,
         context=context,
     )
@@ -1659,6 +1777,9 @@ def _refresh_spec_from_args(args: argparse.Namespace) -> ForecastSpec:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     base = forecast_spec_from_dict(manifest.get("spec", {}))
     provided_flags = getattr(args, "_provided_flags", set())
+    if not _flag_was_provided(provided_flags, "--driver-snapshot"):
+        from nixtla_scaffold.feature_sources import bind_saved_driver_snapshots
+        base = bind_saved_driver_snapshots(base, Path(args.previous_run), manifest)
     model_allowlist = base.model_allowlist
     if _flag_was_provided(provided_flags, "--model") or _flag_was_provided(provided_flags, "--model-allowlist"):
         model_allowlist = _parse_model_allowlist(args)
@@ -1682,6 +1803,8 @@ def _refresh_spec_from_args(args: argparse.Namespace) -> ForecastSpec:
         pca=_override(base.feature_recipe.pca, args, "pca"),
         feature_selection=_override(base.feature_recipe.feature_selection, args, "feature_selection"),
         weekly_to_daily=_override(base.feature_recipe.weekly_to_daily, args, "weekly_to_daily"),
+        date_features_as_dummies=_override(base.feature_recipe.date_features_as_dummies, args, "date_features_as_dummies"),
+        **_advanced_recipe_args(args, base.feature_recipe),
     )
     cleaning = CleaningSpec(
         clean_missing_values=_override(base.cleaning.clean_missing_values, args, "clean_missing_values"),
@@ -1702,6 +1825,11 @@ def _refresh_spec_from_args(args: argparse.Namespace) -> ForecastSpec:
     )
     return replace(
         base,
+        anomaly=_anomaly_from_args(args, base.anomaly),
+        calendar=_calendar_from_args(args, base.calendar),
+        selection_policy=_selection_from_args(args, base.selection_policy),
+        evaluation=_evaluation_from_args(args, base.evaluation),
+        interval_calibration=_interval_from_args(args, base.interval_calibration),
         horizon=_override(base.horizon, args, "horizon"),
         freq=_override(base.freq, args, "freq"),
         season_length=_override(base.season_length, args, "season_length"),
@@ -1715,6 +1843,8 @@ def _refresh_spec_from_args(args: argparse.Namespace) -> ForecastSpec:
         unit_label=_override(base.unit_label, args, "unit_label"),
         events=events,
         regressors=regressors,
+        driver_snapshots=(_parse_driver_snapshots(args.driver_snapshot)
+                          if getattr(args, "driver_snapshot", []) else base.driver_snapshots),
         transform=transform,
         feature_recipe=feature_recipe,
         cleaning=cleaning,
@@ -1733,6 +1863,50 @@ def _refresh_spec_from_args(args: argparse.Namespace) -> ForecastSpec:
 def _override(default: Any, args: argparse.Namespace, attr: str) -> Any:
     value = getattr(args, attr, None)
     return default if value is None else value
+
+
+def _anomaly_from_args(args, base):
+    mode = _override(base.mode, args, "anomaly_mode")
+    if getattr(args, "clean_outliers", None) is True:
+        if getattr(args, "anomaly_mode", None) not in {None, "adjust"}:
+            raise ValueError("--clean-outliers conflicts with the explicit --anomaly-mode")
+        mode = "adjust"
+    elif getattr(args, "clean_outliers", None) is False and getattr(args, "anomaly_mode", None) is None:
+        mode = "detect"
+    return replace(base, mode=mode, lookback=_override(base.lookback, args, "anomaly_lookback"))
+
+
+def _calendar_from_args(args, base):
+    return replace(base, enabled=_override(base.enabled, args, "enhanced_calendar"),
+                   holiday_calendar=_override(base.holiday_calendar, args, "holiday_calendar"),
+                   custom_dates=tuple(_override(base.custom_dates, args, "holiday_date")),
+                   known_as_of=_override(base.known_as_of, args, "calendar_known_as_of"))
+
+
+def _interval_from_args(args: argparse.Namespace, base: IntervalCalibrationSpec) -> IntervalCalibrationSpec:
+    return IntervalCalibrationSpec(
+        method=_override(base.method, args, "interval_backend"),
+        rho=_override(base.rho, args, "interval_rho"),
+        max_windows=_override(base.max_windows, args, "interval_max_windows"),
+        aggregate_totals=_override(base.aggregate_totals, args, "aggregate_intervals"),
+    )
+
+
+def _selection_from_args(args, base):
+    return replace(base, objective=_override(base.objective, args, "selection_objective"),
+                   clip_negative=_override(base.clip_negative, args, "clip_negative_points"),
+                   configuration_guard=_override(base.configuration_guard, args, "configuration_guard"))
+
+
+def _advanced_recipe_args(args: argparse.Namespace, base: FeatureRecipeSpec) -> dict[str, Any]:
+    return {
+        "mlforecast_strategy": _override(base.mlforecast_strategy, args, "mlforecast_strategy"),
+        "horizon_features": _override(base.horizon_features, args, "horizon_features"),
+        "lookup_lag_columns": _override_tuple(base.lookup_lag_columns, args, "lookup_lag_column"),
+        "pooled_rolling_window": _override(base.pooled_rolling_window, args, "pooled_rolling_window"),
+        "pooled_partition_columns": _override_tuple(base.pooled_partition_columns, args, "pooled_partition_column"),
+        "pooled_series_ids": _override_tuple(base.pooled_series_ids, args, "pooled_series_id"),
+    }
 
 
 def _override_tuple(default: tuple[Any, ...], args: argparse.Namespace, attr: str) -> tuple[Any, ...]:
@@ -1848,6 +2022,11 @@ def _parse_events(values: list[str], files: list[str] | None = None):
 
 def _parse_regressors(values: list[str], files: list[str] | None = None):
     return parse_known_future_regressors(values, files or [])
+
+
+def _parse_driver_snapshots(values: list[str]):
+    from nixtla_scaffold.schema import DriverSnapshotGrant
+    return tuple(DriverSnapshotGrant.from_dict(json.loads(value)) for value in values)
 
 
 if __name__ == "__main__":

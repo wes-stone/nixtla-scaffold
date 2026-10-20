@@ -5,6 +5,8 @@ import sys
 import tarfile
 import zipfile
 
+import pytest
+
 from nixtla_scaffold.cli import main
 import nixtla_scaffold.release_gates as release_gates
 from nixtla_scaffold.release_gates import (
@@ -64,6 +66,59 @@ def test_package_metadata_gate_requires_public_publish_metadata() -> None:
 
     assert result.status == "passed"
     assert result.details["missing"] == []
+    assert "neural" not in release_gates.OPTIONAL_EXTRAS
+
+
+def test_clean_wheel_smoke_restores_frozen_dependencies_before_no_deps_install(tmp_path, monkeypatch):
+    calls = []
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return {"returncode": 0, "stdout_head": '"quick" name: nixtla-forecast standalone_native_forecast_passed', "stderr_head": ""}
+    monkeypatch.setattr(release_gates, "_run_command", run)
+    result = release_gates._install_smoke_gate(tmp_path, tmp_path / "package.whl")
+    assert result.status == "passed"
+    commands = [command for command, _ in calls]
+    assert "--frozen" in commands[1] and "--no-emit-project" in commands[1]
+    assert commands[2][:3] == ["uv", "pip", "sync"]
+    assert "--no-deps" in commands[3]
+    assert all(kwargs["cwd"] == tmp_path for _, kwargs in calls[2:])
+    assert "-I" in commands[4]
+    assert "run_forecast(history" in commands[4][-1]
+    assert "sys.addaudithook(standalone_only)" in commands[4][-1]
+    assert "install_workbench(canvas" in commands[4][-1]
+
+
+def test_clean_wheel_smoke_requires_execution_not_just_imports(tmp_path, monkeypatch):
+    monkeypatch.setattr(release_gates, "_run_command", lambda *args, **kwargs: {
+        "returncode": 0, "stdout_head": '"quick" name: nixtla-forecast', "stderr_head": "",
+    })
+    result = release_gates._install_smoke_gate(tmp_path, tmp_path / "package.whl")
+    assert result.status == "failed"
+    assert result.details["failures"] == ["standalone native forecast and portable canvas installation failed"]
+
+
+def test_standalone_smoke_guard_handles_windows_and_posix_commands(tmp_path, monkeypatch):
+    calls = []
+    def run(command, **kwargs):
+        calls.append(command)
+        return {"returncode": 0, "stdout_head": "", "stderr_head": ""}
+    monkeypatch.setattr(release_gates, "_run_command", run)
+    release_gates._install_smoke_gate(tmp_path, tmp_path / "package.whl")
+    namespace = {}
+    exec(calls[4][-1].split("sys.addaudithook", 1)[0], namespace)
+    guard = namespace["standalone_only"]
+    guard("subprocess.Popen", (None, "git rev-parse HEAD", None, None))
+    guard("subprocess.Popen", ("/usr/bin/git", ["git", "rev-parse", "HEAD"], None, None))
+    for executable, command in (
+        (None, '"C:\\Program Files\\R\\bin\\Rscript.exe" --version'),
+        (None, ["Rscript", "--version"]),
+        ("/usr/bin/node", ["node", "server.mjs"]),
+        ("pwsh", ["pwsh", "-File", "helper.ps1"]),
+    ):
+        with pytest.raises(RuntimeError, match="optional host/runtime"):
+            guard("subprocess.Popen", (executable, command, None, None))
+    with pytest.raises(RuntimeError, match="network"):
+        guard("socket.connect", ())
 
 
 def test_build_inspection_requires_bundled_skill_in_wheel_and_sdist(tmp_path) -> None:
@@ -87,6 +142,52 @@ def test_build_inspection_requires_bundled_skill_in_wheel_and_sdist(tmp_path) ->
 
     assert inspection["missing"][str(wheel)] == ["nixtla_scaffold/skills/nixtla-forecast/SKILL.md"]
     assert inspection["missing"][str(sdist)] == ["skills/nixtla-forecast/SKILL.md"]
+
+
+def test_package_inspection_rejects_local_state_in_both_distributions(tmp_path):
+    wheel = tmp_path / "package.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for name in (*release_gates.REQUIRED_WHEEL_MEMBERS, "nixtla_scaffold/.azure/profile.json",
+                     "nixtla_scaffold/workspace.sqlite3"):
+            archive.writestr(name, "")
+    sdist = tmp_path / "package.tar.gz"
+    with tarfile.open(sdist, "w:gz") as archive:
+        for name in (*release_gates.REQUIRED_SDIST_MEMBERS,
+                     ".github/extensions/nixtla-workbench/runtime.json", ".env"):
+            archive.addfile(tarfile.TarInfo("package/" + name))
+    inspection = _inspect_package_artifacts([wheel], [sdist])
+    assert inspection["missing"] == {}
+    assert inspection["private_files"][str(wheel)] == [
+        "nixtla_scaffold/.azure/profile.json", "nixtla_scaffold/workspace.sqlite3",
+    ]
+    assert inspection["private_files"][str(sdist)] == [
+        "package/.env", "package/.github/extensions/nixtla-workbench/runtime.json",
+    ]
+
+
+def test_package_hygiene_allows_code_samples_locks_and_license_notices():
+    names = ["package/examples/synthetic.csv", "package/.env.example", "package/uv.lock",
+             "package/nixtla_scaffold/runtime.py", "package/tests/test_finn_bridge.py",
+             "package/third-party/echarts-LICENSE", "package/README.md"]
+    assert release_gates._private_package_members(names) == []
+    assert release_gates._private_package_members(["package\\secrets\\token.json", "package/.venv/pyvenv.cfg"]) == [
+        "package/.venv/pyvenv.cfg", "package\\secrets\\token.json",
+    ]
+
+
+def test_build_gate_fails_when_distributions_contain_local_state(tmp_path, monkeypatch):
+    def build(command, **kwargs):
+        build_dir = tmp_path / "build"
+        (build_dir / "package.whl").touch()
+        (build_dir / "package.tar.gz").touch()
+        return {"returncode": 0, "stdout_head": "", "stderr_head": ""}
+    monkeypatch.setattr(release_gates, "_run_command", build)
+    monkeypatch.setattr(release_gates, "_inspect_package_artifacts", lambda *args: {
+        "missing": {}, "private_files": {"package.whl": ["runtime.json"]},
+    })
+    result, _ = release_gates._build_gate(tmp_path)
+    assert result.status == "failed"
+    assert "local state" in release_gates._primary_failure_reason(result)
 
 
 def test_release_gates_cli_compact_success_is_low_noise(tmp_path, capsys) -> None:
@@ -184,6 +285,15 @@ def test_optional_extras_gate_reports_unknown_required_group() -> None:
 
     assert result.status == "failed"
     assert "unknown optional extra" in result.details["failures"][0]
+
+
+def test_required_ml_uses_import_name_instead_of_distribution_name(monkeypatch) -> None:
+    installed = {"mlforecast", "lightgbm", "sklearn"}
+    monkeypatch.setattr(release_gates.importlib.util, "find_spec",
+                        lambda name: object() if name in installed else None)
+    result = _optional_extras_gate(("ml",))
+    assert result.status == "passed"
+    assert result.details["failures"] == []
 
 
 def test_optional_extras_include_datasetsforecast_group() -> None:

@@ -1,0 +1,156 @@
+import { test, expect as baseExpect } from "@playwright/test";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { configuration, createService, startServer } from "../../server.mjs";
+
+const expect = baseExpect.configure({ timeout: 120000 });
+let service, server, workspace, run, sourceId;
+test.beforeAll(async () => {
+  if (!process.env.NIXTLA_E2E_OUTPUT) throw new Error("Set NIXTLA_E2E_OUTPUT to a disposable session-artifact directory.");
+  await mkdir(process.env.NIXTLA_E2E_OUTPUT, { recursive: true });
+  workspace = await mkdtemp(join(resolve(process.env.NIXTLA_E2E_OUTPUT), "explore-"));
+  const input = join(workspace, "synthetic-run");
+  await mkdir(input);
+  await writeFile(join(input, "manifest.json"), JSON.stringify({ spec: { horizon: 1, freq: "MS" } }));
+  await writeFile(join(input, "forecast.csv"), "unique_id,ds,yhat\nsynthetic,2026-01-01,1000\n");
+  await writeFile(join(input, "large-rows.csv"), "unique_id,detail\n" + Array.from({ length: 30 }, (_, i) => `${i},${"x".repeat(70000)}`).join("\n"));
+  await writeFile(join(input, "observations.csv"), "unique_id,ds,model,yhat,note\n" + Array.from({ length: 240 }, (_, i) =>
+    `${["001", "NA", "1"][i % 3]},2026-${String(Math.floor(i / 20) + 1).padStart(2, "0")}-01,${["AutoARIMA", "MSTL", "Naive"][i % 3]},${1000 + i}.00001,${i ? "synthetic" : "=unsafe()"}`).join("\n"));
+  const protectedPath = join(workspace, "synthetic-protected.csv");
+  await writeFile(protectedPath, "unique_id,ds,y\n" + Array.from({ length: 48 }, (_, i) =>
+    `001,${2020 + Math.floor(i / 12)}-${String(i % 12 + 1).padStart(2, "0")}-01,${i}`).join("\n"));
+  const { runtime, contract } = await configuration();
+  service = createService({ workspace, python: runtime.python, contract });
+  await service.call("initialize");
+  run = await service.call("import_run", { path: input, name: "Synthetic exploration fixture" });
+  sourceId = (await service.call("profile", { path: protectedPath, horizon: 3, holdoutWindows: 2 })).sourceId;
+  const catalog = await service.call("catalog");
+  await service.call("save_state", { expectedRevision: catalog.revision, state: { documents: [
+    { id: "explore", title: "Synthetic table exploration", runId: run.id, artifactName: "observations.csv", view: "Explore data", intake: { sourceId } },
+    { id: "source", kind: "source", title: "Protected source", view: "Data", intake: { sourceId } },
+    { id: "artifact", kind: "artifact", title: "Saved CSV", view: "Data", runId: run.id, artifactName: "observations.csv" },
+  ], activeId: "explore", theme: "light" } });
+  server = await startServer({ workspace, service });
+});
+test.afterAll(async () => { await server?.close(); await service?.close(); });
+
+test("explore full data, pivot/filter, export, save/reopen and preserve protected rows", async ({ page }) => {
+  test.setTimeout(600000);
+  const capture = async name => {
+    if (process.env.NIXTLA_E2E_CAPTURE !== "0") await page.screenshot({ path: join(workspace, name), fullPage: true });
+  };
+  const errors = [], mutations = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("request", request => {
+    const body = request.url().endsWith("/api") ? request.postDataJSON() : null;
+    if (body && ["start_job", "adopt_blend", "import_run", "profile"].includes(body.operation)) mutations.push(body.operation);
+  });
+  await page.goto(server.url);
+  const explorer = page.getByRole("region", { name: "Explore data", exact: true });
+  const result = page.getByRole("region", { name: "Exploration output", exact: true });
+  await expect(result).toContainText("1–100 of 240 result rows");
+  await expect(result.getByRole("cell", { name: "001", exact: true }).first()).toBeVisible();
+  await explorer.getByRole("button", { name: "Export full result", exact: true }).click();
+  const receipt = page.getByRole("region", { name: "Export receipt", exact: true });
+  await expect(receipt).toContainText("240 result rows");
+  const [download] = await Promise.all([page.waitForEvent("download"), receipt.getByRole("button", { name: "Download CSV", exact: true }).click()]);
+  const csv = await readFile(await download.path(), "utf8");
+  expect(csv.trim().split(/\r?\n/)).toHaveLength(241);
+  expect(csv).toContain("1000.00001");
+  expect(csv).toContain("'=unsafe()");
+  await expect(receipt).toContainText("1 formula-like cells");
+  await explorer.getByRole("button", { name: "Pivot", exact: true }).click();
+  await explorer.getByRole("button", { name: "Group rows by ds", exact: true }).click();
+  await explorer.getByLabel("Pivot column", { exact: true }).selectOption("model");
+  await explorer.getByLabel("Pivot value", { exact: true }).selectOption("yhat");
+  await expect(explorer.getByRole("button", { name: "Export full result", exact: true })).toBeDisabled();
+  await explorer.getByRole("button", { name: "Run query", exact: true }).click();
+  await expect(result).toContainText("1–12 of 12 result rows");
+  await expect(result.getByRole("columnheader", { name: 'model = "AutoARIMA"', exact: true })).toBeVisible();
+  const mstlKey = await explorer.getByLabel("Sort result by", { exact: true }).locator("option").filter({ hasText: 'model = "MSTL"' }).getAttribute("value");
+  await explorer.getByLabel("Sort result by", { exact: true }).selectOption(mstlKey);
+  await explorer.getByRole("button", { name: "Add filter", exact: true }).click();
+  await expect(explorer.getByLabel("Sort result by", { exact: true })).toHaveValue("");
+  await explorer.getByLabel("Filter 1 field").selectOption("ds");
+  await explorer.getByLabel("Filter 1 condition").selectOption("gte");
+  await explorer.getByLabel("Filter 1 value").fill("2026-07-01");
+  await explorer.getByRole("button", { name: "Run query", exact: true }).click();
+  await expect(result).toContainText("1–6 of 6 result rows");
+  await expect(explorer.locator(".explore-run-bar")).toContainText("120 matching source rows");
+  await explorer.getByLabel("Query name", { exact: true }).fill("Second half · monthly model totals");
+  await explorer.getByRole("button", { name: "Save query", exact: true }).click();
+  await expect(explorer).toContainText('Saved "Second half · monthly model totals"');
+  const saved = (await service.call("explore_queries")).queries[0];
+  expect(saved.query.dataset.runId).toBe(run.id);
+  expect(saved.query.filters[0].value).toBe("2026-07-01");
+  await explorer.getByRole("button", { name: "Export full result", exact: true }).click();
+  await expect(receipt).toContainText("6 result rows");
+  const [queryFile] = await Promise.all([page.waitForEvent("download"), receipt.getByRole("button", { name: "Download query JSON", exact: true }).click()]);
+  const recipe = JSON.parse(await readFile(await queryFile.path(), "utf8"));
+  expect(recipe.query).toEqual(saved.query);
+  expect(recipe.matchedRows).toBe(120);
+  await page.locator(".document-body").evaluate(element => { element.scrollTop = 0; });
+  await capture("explore-desktop.png");
+  await result.scrollIntoViewIfNeeded();
+  await capture("explore-desktop-result.png");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole("button", { name: "Toggle library", exact: true }).click();
+  await page.getByLabel("Appearance").selectOption("dark");
+  await page.locator(".document-body").evaluate(element => { element.scrollTop = 0; });
+  await capture("explore-mobile-dark.png");
+  await explorer.locator(".explore-configuration").scrollIntoViewIfNeeded();
+  await capture("explore-mobile-builder.png");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await explorer.getByLabel("Exploration table", { exact: true }).selectOption({ label: "forecast.csv" });
+  await expect(result).toContainText("1–1 of 1 result rows");
+  await explorer.getByRole("button", { name: /^Saved queries/ }).click();
+  await explorer.getByRole("button", { name: /Second half · monthly model totals/ }).click();
+  await expect(explorer.getByLabel("Pivot column", { exact: true })).toHaveValue("model");
+  await expect(result).toContainText("1–6 of 6 result rows");
+  // Reopen on the same dataset too; this must not leave an empty result panel.
+  await explorer.getByRole("button", { name: /^Saved queries/ }).click();
+  await explorer.getByRole("button", { name: /Second half · monthly model totals/ }).click();
+  await expect(result).toContainText("1–6 of 6 result rows");
+  await expect(page.locator(".save-state")).toContainText("Saved");
+  await page.reload();
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await expect(result).toContainText("1–6 of 6 result rows");
+  await expect(explorer.getByLabel("Query name", { exact: true })).toHaveValue("Second half · monthly model totals");
+  // A conflicting writer must not be overwritten by the UI.
+  await service.call("explore_save", { id: saved.id, expectedRevision: saved.revision, name: "Edited elsewhere", query: saved.query });
+  await explorer.getByRole("button", { name: "Update saved query", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("another panel");
+  await explorer.getByRole("button", { name: /^Saved queries/ }).click();
+  await explorer.getByRole("button", { name: /Edited elsewhere/ }).click();
+  await expect(result).toContainText("1–6 of 6 result rows");
+  await explorer.getByLabel("Exploration table", { exact: true }).selectOption({ label: "Source snapshot · synthetic-protected.csv" });
+  await expect(result).toContainText("1–42 of 42 result rows");
+  await expect(explorer).toContainText("6 protected observations remain withheld");
+  await explorer.getByRole("button", { name: "Pivot", exact: true }).click();
+  await explorer.getByLabel("Pivot calculation", { exact: true }).selectOption("max");
+  await explorer.getByLabel("Pivot value", { exact: true }).selectOption("y");
+  await explorer.getByRole("button", { name: "Run query", exact: true }).click();
+  await expect(result.getByRole("cell", { name: "41", exact: true })).toBeVisible();
+  await expect(result.getByRole("cell", { name: "47", exact: true })).toHaveCount(0);
+  await page.getByRole("navigation", { name: "Open analysis documents" }).getByRole("button", { name: "Protected source", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Explore data", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Explore data", exact: true }).click();
+  await expect(result).toContainText("1–42 of 42 result rows");
+  await page.getByRole("navigation", { name: "Open analysis documents" }).getByRole("button", { name: "Saved CSV", exact: true }).click();
+  await page.getByRole("button", { name: "Explore data", exact: true }).click();
+  await expect(result).toContainText("1–100 of 240 result rows");
+  await explorer.getByLabel("Exploration table", { exact: true }).selectOption({ label: "large-rows.csv" });
+  await expect(result.locator(".table-footer")).toContainText("1–14 of 30 result rows");
+  await explorer.getByRole("button", { name: "Next result page", exact: true }).click();
+  await expect(result.locator(".table-footer")).toContainText("15–28 of 30 result rows");
+  await explorer.getByRole("button", { name: "Next result page", exact: true }).click();
+  await expect(result.locator(".table-footer")).toContainText("29–30 of 30 result rows");
+  await explorer.getByRole("button", { name: "Previous result page", exact: true }).click();
+  await expect(result.locator(".table-footer")).toContainText("15–28 of 30 result rows");
+  await explorer.getByRole("button", { name: "Previous result page", exact: true }).click();
+  await expect(result.locator(".table-footer")).toContainText("1–14 of 30 result rows");
+  expect(errors).toEqual([]);
+  expect(mutations).toEqual([]);
+  expect((await service.call("catalog")).jobs).toEqual([]);
+  console.log(`Explore-data artifacts: ${workspace}`);
+});

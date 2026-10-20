@@ -11,6 +11,7 @@ import socket
 import subprocess
 import sys
 import tarfile
+from textwrap import dedent
 import time
 from typing import Any
 from urllib.request import urlopen
@@ -25,29 +26,57 @@ from nixtla_scaffold.workbench_qa import APP_TEST_TIMEOUT_SECONDS, run_workbench
 
 
 OPTIONAL_EXTRAS: dict[str, tuple[str, ...]] = {
-    "ml": ("mlforecast", "lightgbm"),
+    "ml": ("mlforecast", "lightgbm", "sklearn"),
     "hierarchy": ("hierarchicalforecast",),
-    "neural": ("neuralforecast",),
     "datasets": ("datasetsforecast",),
     "smooth": ("smooth",),
+    "conformal": ("conformalforecast",),
 }
 REQUIRED_PACKAGE_MEMBERS = (
     "nixtla_scaffold/cli.py",
     "nixtla_scaffold/custom_models.py",
     "nixtla_scaffold/forecast.py",
+    "nixtla_scaffold/evaluation.py",
+    "nixtla_scaffold/exposure.py",
+    "nixtla_scaffold/candidates.py",
+    "nixtla_scaffold/intervals.py",
+    "nixtla_scaffold/conformal.py",
+    "nixtla_scaffold/runtime.py",
+    "nixtla_scaffold/finance.py",
+    "nixtla_scaffold/ml_features.py",
+    "nixtla_scaffold/feature_sources.py",
+    "nixtla_scaffold/driver_research.py",
     "nixtla_scaffold/headline.py",
     "nixtla_scaffold/reports.py",
     "nixtla_scaffold/workbench_qa.py",
     "nixtla_scaffold/scenario_lab.py",
     "nixtla_scaffold/release_gates.py",
+    "nixtla_scaffold/workbench.py",
+    "nixtla_scaffold/workbench_library.py",
+    "nixtla_scaffold/workbench_store.py",
+    "nixtla_scaffold/workbench_jobs.py",
+    "nixtla_scaffold/workbench_operations.py",
+    "nixtla_scaffold/workbench_execution.py",
+    "nixtla_scaffold/processes.py",
+    "nixtla_scaffold/workbench_confirmation.py",
+    "nixtla_scaffold/workbench_install.py",
+    "nixtla_scaffold/workbench_contract.json",
+    "nixtla_scaffold/workbench_assets.zip",
+    "nixtla_scaffold/blend.py",
+    "nixtla_scaffold/greedy.py",
+    "nixtla_scaffold/analysis.py",
+    "nixtla_scaffold/prediction_cache.py",
 )
 REQUIRED_WHEEL_MEMBERS = (
     *REQUIRED_PACKAGE_MEMBERS,
+    "nixtla_scaffold/runtime.lock",
     "nixtla_scaffold/skills/nixtla-forecast/SKILL.md",
 )
 REQUIRED_SDIST_MEMBERS = (
     *REQUIRED_PACKAGE_MEMBERS,
     "skills/nixtla-forecast/SKILL.md",
+    "tools/feature_benchmark.py",
+    "tools/forecast_benchmark.json",
 )
 REQUIRED_RUN_OUTPUTS = (
     "appendix/history.csv",
@@ -89,6 +118,9 @@ REQUIRED_RUN_OUTPUTS = (
     "audit/backtest_predictions.csv",
     "audit/backtest_windows.csv",
     "audit/seasonality_diagnostics.csv",
+    "audit/candidate_evidence.json",
+    "audit/candidate_fits.csv",
+    "appendix/ensemble_comparisons.json",
 )
 
 
@@ -227,7 +259,6 @@ def _package_metadata_gate() -> ReleaseGateResult:
         "[project.optional-dependencies]",
         "hierarchy",
         "ml",
-        "neural",
         "datasets",
     ]
     missing = [needle for needle in required if needle not in text]
@@ -251,7 +282,7 @@ def _build_gate(output_dir: Path) -> tuple[ReleaseGateResult, Path | None]:
     wheels = sorted(build_dir.glob("*.whl"))
     sdists = sorted(build_dir.glob("*.tar.gz"))
     inspection = _inspect_package_artifacts(wheels, sdists)
-    status = "passed" if wheels and sdists and not inspection["missing"] else "failed"
+    status = "passed" if wheels and sdists and not inspection["missing"] and not inspection["private_files"] else "failed"
     details = {**completed, **inspection, "wheels": [str(path) for path in wheels], "sdists": [str(path) for path in sdists]}
     return (
         ReleaseGateResult(
@@ -271,30 +302,88 @@ def _install_smoke_gate(output_dir: Path, wheel_path: Path | None) -> ReleaseGat
     venv_dir = output_dir / "install_smoke_venv"
     if venv_dir.exists():
         shutil.rmtree(venv_dir)
-    create = _run_command(["uv", "venv", str(venv_dir)], cwd=output_dir, timeout=180)
+    create = _run_command(["uv", "venv", "--python", sys.executable, str(venv_dir)], cwd=output_dir, timeout=180)
     if create["returncode"] != 0:
         return _failed("install_smoke", {"step": "uv venv", **create}, artifact=str(venv_dir))
     python_exe = venv_dir / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
-    install = _run_command(["uv", "pip", "install", "--python", str(python_exe), str(wheel_path)], cwd=output_dir, timeout=300)
+    project = _repo_root()
+    requirements = output_dir / "install_smoke_requirements.txt"
+    export = _run_command(["uv", "export", "--frozen", "--no-dev", "--no-emit-project",
+                           "--output-file", str(requirements)], cwd=project, timeout=180)
+    if export["returncode"] != 0:
+        return _failed("install_smoke", {"step": "frozen dependency export", **export}, artifact=str(venv_dir))
+    dependencies = _run_command(["uv", "pip", "sync", "--python", str(python_exe), str(requirements)],
+                                cwd=output_dir, timeout=300)
+    if dependencies["returncode"] != 0:
+        return _failed("install_smoke", {"step": "locked dependency restore", **dependencies}, artifact=str(venv_dir))
+    install = _run_command(["uv", "pip", "install", "--no-deps", "--python", str(python_exe), str(wheel_path)], cwd=output_dir, timeout=300)
     if install["returncode"] != 0:
         return _failed("install_smoke", {"step": "uv pip install", **install}, artifact=str(venv_dir))
-    code = (
-        "from nixtla_scaffold import ForecastSpec, build_executive_headline, forecast_spec_preset; "
-        "from nixtla_scaffold.knowledge import load_agent_skill; "
-        "from nixtla_scaffold.cli import main; "
-        "assert ForecastSpec(horizon=1).horizon == 1; "
-        "assert forecast_spec_preset('quick').model_policy == 'baseline'; "
-        "assert callable(build_executive_headline); "
-        "assert 'name: nixtla-forecast' in load_agent_skill(); "
-        "raise SystemExit(main(['guide', 'presets']))"
-    )
-    smoke = _run_command([str(python_exe), "-c", code], cwd=output_dir, timeout=120)
+    code = dedent("""\
+        import json
+        import shlex
+        import sys
+        from pathlib import Path
+
+        def standalone_only(event, args):
+            if event in {"socket.connect", "socket.getaddrinfo", "socket.gethostbyname"}:
+                raise RuntimeError("Standalone forecast must not require network access")
+            if event == "subprocess.Popen":
+                command = args[1]
+                executable = args[0] or (
+                    shlex.split(command, posix=False)[0].strip('"') if isinstance(command, str) else command[0]
+                )
+                if Path(str(executable).replace("\\\\", "/")).stem.lower() in {
+                    "r", "rscript", "az", "node", "powershell", "pwsh",
+                }:
+                    raise RuntimeError("Standalone forecast must not execute an optional host/runtime")
+
+        sys.addaudithook(standalone_only)
+        import nixtla_scaffold
+        import numpy as np
+        import pandas as pd
+        from nixtla_scaffold import ForecastSpec, build_executive_headline, forecast_spec_preset, run_forecast
+        from nixtla_scaffold.knowledge import load_agent_skill
+        from nixtla_scaffold.cli import main
+        from nixtla_scaffold.finance import finance_scorecard
+        from nixtla_scaffold.workbench_install import install_workbench
+
+        assert Path(nixtla_scaffold.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
+        assert ForecastSpec(horizon=1).horizon == 1
+        assert forecast_spec_preset("quick").model_policy == "baseline"
+        assert callable(build_executive_headline)
+        assert "name: nixtla-forecast" in load_agent_skill()
+        history = pd.DataFrame({"unique_id": "A", "ds": pd.date_range("2026-01-01", "2026-03-31"), "y": 100.})
+        cv = history.loc[history.ds.gt("2026-01-10")].assign(cutoff=pd.Timestamp("2026-01-10"), Model=100.)
+        scores, windows = finance_scorecard(history, cv, ["Model"], horizon=81)
+        assert scores.landing_mape_pct.item() == 0 and scores.landing_windows.item() == 2
+
+        run = run_forecast(history, forecast_spec_preset("quick", horizon=7, freq="D", season_length=7, verbose=False))
+        output = Path.cwd() / "installed_native_forecast"
+        run.to_directory(output)
+        forecast = pd.read_csv(output / "forecast.csv")
+        assert len(forecast) == 7 and np.isfinite(forecast.yhat).all()
+        assert pd.to_datetime(forecast.ds).tolist() == pd.date_range("2026-04-01", periods=7).tolist()
+        assert np.allclose(forecast.yhat, 100.)
+        assert (output / "manifest.json").is_file() and (output / "report.html").is_file()
+
+        canvas = Path.cwd() / "installed_canvas"
+        installed = install_workbench(canvas, confirmed=True)
+        assert not installed["executedModels"]
+        assert (canvas / "ui" / "dist" / "index.html").is_file()
+        assert Path(json.loads((canvas / "runtime.json").read_text())["python"]).resolve() == Path(sys.executable).resolve()
+        print("standalone_native_forecast_passed")
+        raise SystemExit(main(["guide", "presets"]))
+    """)
+    smoke = _run_command([str(python_exe), "-I", "-c", code], cwd=output_dir, timeout=120)
     console_script = venv_dir / ("Scripts/nixtla-scaffold.exe" if sys.platform == "win32" else "bin/nixtla-scaffold")
     console_smoke = _run_command([str(console_script), "guide", "presets"], cwd=output_dir, timeout=120)
     console_skill_smoke = _run_command([str(console_script), "guide", "skill"], cwd=output_dir, timeout=120)
     failures: list[str] = []
     if smoke["returncode"] != 0 or not _command_output_contains(smoke, '"quick"'):
         failures.append("public API smoke failed")
+    if smoke["returncode"] != 0 or not _command_output_contains(smoke, "standalone_native_forecast_passed"):
+        failures.append("standalone native forecast and portable canvas installation failed")
     if console_smoke["returncode"] != 0 or not _command_output_contains(console_smoke, '"quick"'):
         failures.append("installed console-script smoke failed")
     if console_skill_smoke["returncode"] != 0 or not _command_output_contains(console_skill_smoke, "name: nixtla-forecast"):
@@ -306,6 +395,7 @@ def _install_smoke_gate(output_dir: Path, wheel_path: Path | None) -> ReleaseGat
         details={
             "venv": str(venv_dir),
             "wheel": str(wheel_path),
+            "locked_requirements": str(requirements),
             "python_executable": str(python_exe),
             "console_script": str(console_script),
             "public_api_smoke": smoke,
@@ -560,25 +650,51 @@ def _release_smoke_frame() -> pd.DataFrame:
 
 def _inspect_package_artifacts(wheels: list[Path], sdists: list[Path]) -> dict[str, Any]:
     missing: dict[str, list[str]] = {}
+    private_files: dict[str, list[str]] = {}
     for wheel in wheels:
         with zipfile.ZipFile(wheel) as archive:
             names = archive.namelist()
         absent = [member for member in REQUIRED_WHEEL_MEMBERS if not _package_member_present(names, member)]
         if absent:
             missing[str(wheel)] = absent
+        private = _private_package_members(names)
+        if private:
+            private_files[str(wheel)] = private
     for sdist in sdists:
         with tarfile.open(sdist, "r:gz") as archive:
             names = archive.getnames()
         absent = [member for member in REQUIRED_SDIST_MEMBERS if not _package_member_present(names, member)]
         if absent:
             missing[str(sdist)] = absent
+        private = _private_package_members(names)
+        if private:
+            private_files[str(sdist)] = private
     return {
         "required_members": {
             "wheel": list(REQUIRED_WHEEL_MEMBERS),
             "sdist": list(REQUIRED_SDIST_MEMBERS),
         },
         "missing": missing,
+        "private_files": private_files,
     }
+
+
+def _private_package_members(names: list[str]) -> list[str]:
+    local_directories = {
+        ".azure", ".copilot", ".venv", ".nixtla-workbench", ".nixtla-evidence",
+        ".runtime-cache", "node_modules", "__pycache__", "secrets",
+    }
+    private_suffixes = {".db", ".sqlite", ".sqlite3", ".pem", ".key", ".pfx", ".p12", ".secret", ".pyc"}
+    private = []
+    for name in names:
+        parts = name.replace("\\", "/").lower().split("/")
+        filename = parts[-1]
+        if (local_directories.intersection(parts)
+                or filename in {"runtime.json", ".nixtla-install.json"}
+                or (filename == ".env" or filename.startswith(".env.") and filename != ".env.example")
+                or Path(filename).suffix in private_suffixes):
+            private.append(name)
+    return sorted(private)
 
 
 def _package_member_present(names: list[str], member: str) -> bool:
@@ -962,13 +1078,16 @@ def _primary_reason_from_row(row: dict[str, Any]) -> str:
     missing = details.get("missing")
     if missing:
         return f"missing: {missing}"
+    private_files = details.get("private_files")
+    if private_files:
+        return f"local state or credential files in distribution: {private_files}"
     return "See gate details"
 
 
 def _remediation_for(gate: str) -> str:
     return {
         "package_metadata": "Check pyproject.toml for project metadata, console script, and optional dependency groups.",
-        "build": "Run uv build from the repository root and inspect the captured stdout/stderr head and tail.",
+        "build": "Inspect missing and private_files in the build receipt; include required resources, exclude local state/credentials, then rebuild.",
         "install_smoke": "Rebuild the wheel, reinstall it into an isolated venv, and verify both public imports and the installed nixtla-scaffold console script.",
         "scenario_lab_numeric": "Open the scenario_lab artifacts, inspect failed scenarios and recommendations, then fix validity/explainability regressions before rerunning.",
         "quick_forecast_numeric": "Open the quick_forecast diagnostics, forecast.csv, and appendix/trust_summary.csv; restore finite selected forecasts and headline/trust artifacts.",

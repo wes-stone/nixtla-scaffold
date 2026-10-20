@@ -41,7 +41,7 @@ def _passing_trust_row() -> pd.DataFrame:
 def test_accuracy_gate_allows_planning_ready_only_when_every_required_gate_passes() -> None:
     run = SimpleNamespace(
         spec=ForecastSpec(horizon=3, context=_complete_context()),
-        forecast=pd.DataFrame({"unique_id": ["Revenue"], "ds": [pd.Timestamp("2026-01-31")], "yhat": [100.0]}),
+        forecast=pd.DataFrame({"unique_id": ["Revenue"] * 3, "ds": pd.date_range("2026-01-31", periods=3, freq="ME"), "yhat": [100.0] * 3}),
         driver_availability_audit=pd.DataFrame(),
     )
 
@@ -60,7 +60,7 @@ def test_accuracy_gate_allows_planning_ready_only_when_every_required_gate_passe
 def test_failed_trained_driver_audit_blocks_claims() -> None:
     run = SimpleNamespace(
         spec=ForecastSpec(horizon=3, context=_complete_context(), train_known_future_regressors=True),
-        forecast=pd.DataFrame({"unique_id": ["Revenue"], "ds": [pd.Timestamp("2026-01-31")], "yhat": [100.0]}),
+        forecast=pd.DataFrame({"unique_id": ["Revenue"] * 3, "ds": pd.date_range("2026-01-31", periods=3, freq="ME"), "yhat": [100.0] * 3}),
         driver_availability_audit=pd.DataFrame(
             {
                 "name": ["Future actual proxy"],
@@ -74,6 +74,40 @@ def test_failed_trained_driver_audit_blocks_claims() -> None:
 
     assert gate["status"] == "blocked"
     assert gate["series"][0]["failed_gates"] == ["driver_clearance"]
+
+
+def test_configuration_warning_limits_claim_without_rewriting_forecast() -> None:
+    forecast = pd.DataFrame({"unique_id": ["Revenue"] * 3,
+                            "ds": pd.date_range("2026-01-31", periods=3, freq="ME"), "yhat": [100.] * 3})
+    run = SimpleNamespace(
+        spec=ForecastSpec(horizon=3, context=_complete_context()), forecast=forecast.copy(),
+        driver_availability_audit=pd.DataFrame(),
+        model_policy_resolution={"configuration": {"review_series": ["Revenue"]}},
+    )
+    gate = build_accuracy_gate(run, _passing_trust_row())
+    assert gate["status"] == "directional_only"
+    assert gate["series"][0]["failed_gates"] == ["configuration_review"]
+    pd.testing.assert_frame_equal(run.forecast, forecast)
+
+
+def test_unknown_business_context_allows_baseline_but_never_planning_claim(monkeypatch) -> None:
+    def no_interview(*args):
+        raise AssertionError("Unknown business context must not force an intake interview.")
+
+    monkeypatch.setattr("builtins.input", no_interview)
+    frame = pd.DataFrame({
+        "unique_id": ["Revenue"] * 36,
+        "ds": pd.date_range("2020-01-01", periods=36, freq="MS"),
+        "y": [100 + i for i in range(36)],
+    })
+    context = ForecastContext(requested_horizon=3)
+    run = run_forecast(frame, ForecastSpec(horizon=3, freq="MS", model_policy="baseline", context=context))
+    assert len(run.forecast) == 3
+    assert run.forecast["yhat"].notna().all()
+    assert run.spec.context.decision == run.spec.context.audience == run.spec.context.units == ""
+    gate = build_accuracy_gate(run, _passing_trust_row())
+    assert gate["status"] == "directional_only"
+    assert not gate["planning_ready_claim_allowed"]
 
 
 def test_discovered_context_driver_never_enters_training_implicitly() -> None:

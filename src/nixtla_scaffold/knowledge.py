@@ -7,6 +7,7 @@ import json
 from importlib import resources
 from pathlib import Path
 import shutil
+import sys
 from typing import Any
 
 from nixtla_scaffold.citations import FPPY_CITATION
@@ -43,12 +44,16 @@ def check_agent_skill(target: str | Path | None = None) -> dict[str, Any]:
     expected_hash = str(manifest.get("source_sha256", ""))
     canonical_hash = _sha256_bytes(canonical)
     installed_hash = _sha256_path(skill_path) if skill_path.is_file() else None
+    installed_manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.is_file() else {}
+    if not isinstance(installed_manifest, dict):
+        raise ValueError("installed skill manifest must be a JSON object")
+    manifest_matches = all(installed_manifest.get(key) == value for key, value in manifest.items())
     canonical_valid = bool(expected_hash) and canonical_hash == expected_hash
     if not canonical_valid:
         status = "canonical_manifest_mismatch"
     elif installed_hash is None:
         status = "missing"
-    elif installed_hash == canonical_hash:
+    elif installed_hash == canonical_hash and manifest_matches:
         status = "in_sync"
     else:
         status = "drift"
@@ -67,6 +72,8 @@ def check_agent_skill(target: str | Path | None = None) -> dict[str, Any]:
         "installed_sha256": installed_hash,
         "skill_path": str(skill_path),
         "manifest_path": str(manifest_path),
+        "installed_manifest_matches": manifest_matches,
+        "installed_runtime": installed_manifest.get("installed_runtime"),
     }
 
 
@@ -82,6 +89,8 @@ def sync_agent_skill(
     before = check_agent_skill(target)
     if not before["canonical_valid"]:
         raise RuntimeError("canonical skill hash does not match skill_manifest.json; refusing to sync")
+    if before["package_compatible"] is not True:
+        raise RuntimeError("skill sync requires a verified compatible installed package")
     skill_path, manifest_path = _skill_target_paths(target)
     skill_path.parent.mkdir(parents=True, exist_ok=True)
     backup = None
@@ -91,7 +100,11 @@ def sync_agent_skill(
         shutil.copy2(skill_path, backup_path)
         backup = str(backup_path)
     skill_path.write_bytes(_canonical_skill_bytes(SKILL_FILE))
-    manifest_path.write_bytes(_canonical_skill_bytes(SKILL_MANIFEST_FILE))
+    installed_manifest = {
+        **load_skill_manifest(),
+        "installed_runtime": {"python": sys.executable, "package_version": before["package_version"]},
+    }
+    manifest_path.write_text(json.dumps(installed_manifest, indent=2) + "\n", encoding="utf-8")
     after = check_agent_skill(target)
     return {
         **after,

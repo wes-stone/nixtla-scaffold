@@ -747,7 +747,11 @@ def _row_scales(scored_frame: pd.DataFrame, actuals: pd.DataFrame, *, season_len
 def _cutoff_scale(history: pd.DataFrame, cutoff: pd.Timestamp, *, season_length: int) -> dict[str, float | None]:
     lag = max(1, int(season_length or 1))
     past = history[pd.to_datetime(history["ds"]) <= cutoff].sort_values("ds")
-    values = pd.to_numeric(past["y"], errors="coerce").dropna().to_numpy(dtype="float64")
+    observed = pd.to_numeric(past["y"], errors="coerce")
+    if "available_at" in past:
+        released = pd.to_datetime(past["available_at"], errors="coerce")
+        observed = observed.where(released.notna() & released.le(cutoff))
+    values = observed.to_numpy(dtype="float64", na_value=np.nan)
     active_lag = lag if lag > 1 and len(values) > lag else 1
     if len(values) <= active_lag:
         return {
@@ -757,6 +761,12 @@ def _cutoff_scale(history: pd.DataFrame, cutoff: pd.Timestamp, *, season_length:
             "effective_season_length": None,
         }
     diff = values[active_lag:] - values[:-active_lag]
+    diff = diff[np.isfinite(diff)]
+    if not len(diff):
+        return {
+            "mase_scale": None, "rmsse_scale": None,
+            "scale_basis": "insufficient_observed_pairs", "effective_season_length": active_lag,
+        }
     abs_scale = float(np.nanmean(np.abs(diff)))
     rmsse_scale = float(np.sqrt(np.nanmean(diff ** 2)))
     return {

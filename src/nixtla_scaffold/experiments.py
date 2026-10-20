@@ -32,7 +32,16 @@ EXPERIMENT_VARIANTS = (
     "events",
     "known_future_regressors",
     "log1p_transform",
+    "log_transform",
+    "recent_history",
+    "mfles_additive",
+    "mfles_identified_fourier",
+    "nonseasonal",
     "rolling_features",
+    "calendar_dummies",
+    "anomaly_adjustment",
+    "enhanced_calendar",
+    "direct_horizons",
     "all_models",
     "hierarchy_methods",
     "finn",
@@ -123,6 +132,8 @@ class ExperimentHypothesis:
     seeded_by: str = "initial_evidence"
     signal_id: str = ""
     probe_id: str = ""
+    regressor_name: str = ""
+    driver_model: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -141,6 +152,8 @@ class ExperimentHypothesis:
             "seeded_by": self.seeded_by,
             "signal_id": self.signal_id,
             "probe_id": self.probe_id,
+            "regressor_name": self.regressor_name,
+            "driver_model": self.driver_model,
         }
 
 
@@ -157,6 +170,7 @@ class ExperimentContext:
     candidate_drivers: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     human_context_questions: tuple[str, ...] = field(default_factory=tuple)
     autoresearch_hypotheses: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+    driver_screening: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -171,6 +185,7 @@ class ExperimentContext:
             "candidate_drivers": list(self.candidate_drivers),
             "human_context_questions": list(self.human_context_questions),
             "autoresearch_hypotheses": list(self.autoresearch_hypotheses),
+            "driver_screening": self.driver_screening,
         }
 
 
@@ -284,11 +299,18 @@ def run_experiment(
         if not ok:
             summary_rows.append(_skipped_row(name, "not_applicable", reason, description=variant.description))
             continue
-        variant_spec = replace(variant.build_spec(base_spec), challengers=())
+        unchanged_control = (name == "baseline" and control_auto_added
+                             and set(selected).issubset({"anomaly_adjustment", "enhanced_calendar"}))
+        if unchanged_control:
+            variant = replace(variant, description="Unchanged declared control for the anomaly/calendar treatment.")
+        variant_spec = replace(base_spec if unchanged_control else variant.build_spec(base_spec), challengers=())
         variant_dir = out / "variants" / name
         try:
             run = run_forecast(data, variant_spec, sheet=sheet)
-            run.to_directory(variant_dir)
+            if run.spec.production is not None:
+                run.to_directory(variant_dir, release=False)
+            else:
+                run.to_directory(variant_dir)
             challenger_result = None
             if name == "finn":
                 from nixtla_scaffold.challengers import run_challengers
@@ -308,7 +330,8 @@ def run_experiment(
                 "variant": name,
                 "description": variant.description,
                 "path": str(variant_dir),
-                "spec": variant_spec.to_dict(),
+                "spec": run.spec.to_dict(),
+                "production_qualification": run.model_policy_resolution.get("production", {}).get("readiness", {}).get("status"),
                 "selected_models": _selected_model_counts(run),
                 "resolved_candidate_fingerprint": run.model_policy_resolution.get(
                     "resolved_candidate_fingerprint", ""
@@ -377,6 +400,7 @@ def run_experiment(
         "recommendation": _recommendation_payload(summary, context),
         "human_context_questions": list(context.human_context_questions),
         "candidate_drivers": list(context.candidate_drivers),
+        "driver_screening": context.driver_screening,
         "autoresearch_hypotheses": list(context.autoresearch_hypotheses),
         "manifest": manifest,
     }
@@ -472,7 +496,8 @@ def build_model_leaderboard(run: ForecastRun) -> pd.DataFrame:
     sort_cols = [col for col in ["unique_id", "rmse", "mase", "mae", "wape", "abs_bias"] if col in audit.columns]
     if sort_cols:
         audit = audit.sort_values(sort_cols, na_position="last")
-    audit["leaderboard_rank"] = audit.groupby("unique_id").cumcount() + 1
+    comparable = audit["selection_eligible"].fillna(False) if "selection_eligible" in audit else pd.Series(True, index=audit.index)
+    audit["leaderboard_rank"] = (audit.loc[comparable].groupby("unique_id").cumcount() + 1).astype("Int64")
     if "is_pareto_optimal" in audit.columns:
         audit["is_pareto_optimal"] = audit["is_pareto_optimal"].fillna(False).astype(bool)
     columns = [
@@ -495,6 +520,9 @@ def build_model_leaderboard(run: ForecastRun) -> pd.DataFrame:
         "requested_horizon",
         "selection_horizon",
         "cv_windows",
+        "cv_disjoint_windows",
+        "selection_eligible",
+        "comparison_support",
         "cv_step_size",
         "cv_horizon_matches_requested",
         "trust_level",
@@ -574,11 +602,14 @@ def build_experiment_recommendation(summary: pd.DataFrame, context: ExperimentCo
 
 def _recommendation_payload(summary: pd.DataFrame, context: ExperimentContext) -> dict[str, Any]:
     success = summary[summary["status"].eq("success")].copy() if not summary.empty and "status" in summary.columns else pd.DataFrame()
+    if not success.empty:
+        eligible = success.get("promotion_evidence_eligible", pd.Series(True, index=success.index))
+        success = success.loc[eligible.fillna(False).astype(bool)]
     top_candidate = context.candidate_drivers[0] if context.candidate_drivers else None
     command_hint = top_candidate.get("experiment_command_seed") if top_candidate else None
     if success.empty:
         best_variant = "none"
-        rationale = "No variant completed successfully; inspect failed/skipped reasons and fix the smallest blocker first."
+        rationale = "No comparable variant completed successfully; inspect failed/skipped reasons and comparison exclusions first."
         hypothesis = "Fix the first failed or skipped variant, then rerun the same bounded experiment."
     else:
         success = success.sort_values(["advisory_rank", "avg_rmse", "avg_mae"], na_position="last")
@@ -610,6 +641,18 @@ def _recommendation_payload(summary: pd.DataFrame, context: ExperimentContext) -
         "executor": "uv run nixtla-scaffold experiment",
         "keep_rule": "Keep only if RMSE improves, or RMSE ties while MAE/Pareto review is no worse and no new trust/horizon caveats appear. Treat WAPE as diagnostic context only.",
     }
+    if not success.empty and success.iloc[0].get("selection_objective") == "monthly_landing":
+        rationale = (
+            f"`{best_variant}` had the strongest declared monthly-landing rank: "
+            f"Landing MAPE={_fmt(best.get('avg_landing_mape_pct'))}%, "
+            f"Next28 MAPE={_fmt(best.get('avg_next28_mape_pct'))}%. Retrospective, not promotion."
+        )
+        autoresearch_next_iteration.update(
+            metric="Landing MAPE primary; Next28 MAPE then date-averaged WMAPE",
+            direction="lower avg_landing_mape_pct",
+            keep_rule="Require matched closed windows, practical primary improvement, acceptable secondary/bias and later untouched confirmation.",
+            hypothesis="Test one diagnosed dimension against the unchanged declared monthly-landing objective.",
+        )
     if command_hint:
         autoresearch_next_iteration["command_hint"] = command_hint
     return {
@@ -725,6 +768,21 @@ def _coerce_experiment_hypothesis(
 
 def _successful_row(name: str, description: str, path: Path, run: ForecastRun) -> dict[str, Any]:
     selection = run.model_selection.copy()
+    production = run.model_policy_resolution.get("production", {}).get("readiness")
+    assessment_fingerprint = ""
+    if run.spec.production is not None:
+        from nixtla_scaffold.production import _frame_hash
+
+        if not production or not production.get("series"):
+            raise ValueError("Production experiment requires saved deployed-policy assessment evidence")
+        selection = pd.DataFrame([
+            score for series in production["series"] for score in series["scores"] if score["model"] == "Policy"
+        ])
+        if len(selection) != len(production["series"]):
+            raise ValueError("Production experiment is missing a series' deployed-policy assessment score")
+        replay = pd.DataFrame(run.model_policy_resolution["production"]["backtest"])
+        assessed = replay.loc[replay.assessment.eq(True)]
+        assessment_fingerprint = _frame_hash(assessed, columns=["unique_id", "cutoff", "ds", "y"])
     trust = build_trust_summary(run)
     leaderboard = build_model_leaderboard(run)
     selected = leaderboard[leaderboard["is_selected_model"].eq(True)] if not leaderboard.empty and "is_selected_model" in leaderboard.columns else selection
@@ -758,6 +816,14 @@ def _successful_row(name: str, description: str, path: Path, run: ForecastRun) -
         "variant": name,
         "description": description,
         "status": "success",
+        "production_qualification": production["status"] if production else None,
+        "scoring_scope": "deployed_policy_later_assessment" if production else "selected_component_backtests",
+        "assessment_fingerprint": assessment_fingerprint,
+        "selection_objective": run.spec.selection_policy.objective,
+        "avg_landing_mape_pct": _mean(selection, "landing_mape_pct"),
+        "avg_next28_mape_pct": _mean(selection, "next28_mape_pct"),
+        "avg_daily_wmape_pct": _mean(selection, "daily_wmape_pct"),
+        "series_count": int(selection["unique_id"].nunique()) if "unique_id" in selection else 0,
         "reason": "",
         "run_path": str(path),
         "selected_models": ", ".join(f"{model}:{count}" for model, count in _selected_model_counts(run).items()),
@@ -1069,15 +1135,42 @@ def _candidate_driver_markdown(candidates: Sequence[dict[str, Any]]) -> str:
     return _frame_to_markdown(pd.DataFrame(rows))
 
 
-def _detect_candidate_drivers(frame: pd.DataFrame, spec: ForecastSpec, *, limit: int = 5) -> tuple[dict[str, Any], ...]:
+def _screen_candidate_drivers(frame: pd.DataFrame, spec: ForecastSpec) -> dict[str, Any]:
+    excluded = _excluded_driver_columns(spec)
+    from nixtla_scaffold.signals import screen_driver_relationships
+    from nixtla_scaffold.profile import infer_frequency, season_length_for_freq
+    feature_names = tuple(sorted(str(column) for column in frame.columns
+                                 if column not in excluded and str(column).lower() not in excluded
+                                 and not pd.api.types.is_bool_dtype(frame[column])
+                                 and pd.api.types.is_numeric_dtype(frame[column])))
+    if not feature_names or len(frame) > 100_000 or frame.unique_id.nunique() > 50:
+        return {
+            "status": "scope_exceeds_bound" if feature_names else "no_numeric_features",
+            "cards": [], "tests": [], "tests_searched": 0, "collinearity": [],
+            "features_searched": [], "features_omitted_by_bound": list(feature_names),
+            "limitations": ["Optional screening is limited to 100,000 rows and 50 series; no sampling or source expansion is performed."]
+            if feature_names else [],
+        }
+    frequency = spec.freq or infer_frequency(frame)
+    season = spec.season_length or season_length_for_freq(frequency, int(frame.groupby("unique_id").size().min()))
+    return screen_driver_relationships(frame, features=feature_names, horizon=spec.horizon, season_length=season)
+
+
+def _detect_candidate_drivers(
+    frame: pd.DataFrame, spec: ForecastSpec, *, limit: int = 5,
+    screening: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], ...]:
     if frame.empty:
         return ()
     excluded = _excluded_driver_columns(spec)
-    target = pd.to_numeric(frame["y"], errors="coerce") if "y" in frame.columns else pd.Series(dtype="float64")
     target_tokens = _column_tokens(spec.target_col)
+    screening = _screen_candidate_drivers(frame, spec) if screening is None else screening
+    cards = {card["feature"]: card for card in screening["cards"]}
     candidates: list[dict[str, Any]] = []
     for column in frame.columns:
         column_name = str(column)
+        if column_name not in cards:
+            continue
         if column_name in excluded or column_name.lower() in excluded:
             continue
         name_tokens = _column_tokens(column_name)
@@ -1100,6 +1193,9 @@ def _detect_candidate_drivers(frame: pd.DataFrame, spec: ForecastSpec, *, limit:
         lag_evidence = _lagged_correlation_evidence(frame, column_name, same_period_correlation_abs=corr_abs)
         coverage = non_null / max(len(frame), 1)
         score = name_score + min(2.0, 2.0 * (corr_abs or 0.0)) + min(1.0, coverage)
+        screened = cards[column_name]["disposition"] == "eligible_for_predictive_testing"
+        if screened:
+            score += 3
         if lag_evidence.get("relationship_timing") in {"driver_leads_target", "target_leads_driver"}:
             score += 0.5
         if name_tokens & _CALENDAR_OR_METADATA_TERMS and not (name_tokens & target_tokens):
@@ -1110,7 +1206,7 @@ def _detect_candidate_drivers(frame: pd.DataFrame, spec: ForecastSpec, *, limit:
             "name": column_name,
             "value_col": column_name,
             "availability": "historical_only",
-            "mode": "model_candidate",
+            "mode": "model_candidate" if screened else "audit_only",
             "known_as_of_col": "known_as_of",
         }
         why = _candidate_driver_why(column_name, matched_terms, target_tokens, corr_abs, lag_evidence=lag_evidence)
@@ -1120,7 +1216,15 @@ def _detect_candidate_drivers(frame: pd.DataFrame, spec: ForecastSpec, *, limit:
                 "value_col": column_name,
                 "role": "detected_historical_input_column",
                 "suggested_availability": "historical_only",
-                "suggested_mode": "model_candidate",
+                "suggested_mode": "model_candidate" if screened else "audit_only",
+                "screening": cards[column_name],
+                "screening_search": {
+                    "tests_searched": screening["tests_searched"],
+                    "features_omitted_by_bound": screening["features_omitted_by_bound"],
+                    "limitations": screening["limitations"],
+                    "tests": [row for row in screening["tests"] if row["feature"] == column_name],
+                    "collinearity": [row for row in screening["collinearity"] if column_name in (row["left"], row["right"])],
+                },
                 "score": round(float(score), 4),
                 "non_null_fraction": round(float(coverage), 4),
                 "unique_values": unique_count,
@@ -1175,19 +1279,20 @@ def _human_context_questions(
 
 def _autoresearch_hypotheses(candidates: Sequence[dict[str, Any]]) -> tuple[dict[str, Any], ...]:
     hypotheses: list[dict[str, Any]] = []
-    for index, candidate in enumerate(candidates[:3], start=1):
+    eligible = [item for item in candidates if item.get("screening", {}).get("disposition") == "eligible_for_predictive_testing"]
+    for index, candidate in enumerate(eligible[:3], start=1):
         value_col = str(candidate["value_col"])
         hypotheses.append(
             {
                 "id": f"candidate-driver-{index}-{_slug(value_col)}",
                 "category": "candidate_driver",
                 "hypothesis": (
-                    f"`{value_col}` contains useful leading or trailing signal; declaring it as a historical-only "
-                    "MLForecast model_candidate will improve rolling-origin RMSE without adding trust caveats."
+                    f"`{value_col}` passed tuning-only association screening; a source-validated "
+                    "historical-lag experiment may add incremental predictive value."
                 ),
                 "test_plan": "Run one bounded experiment comparing baseline against known_future_regressors with only this candidate declared.",
                 "metric": "avg_rmse primary; review avg_mae, RMSE/MAE Pareto status, trust_score, and driver_model_cv_delta as guardrails",
-                "keep_rule": "Keep only if RMSE improves, or RMSE ties while MAE/Pareto review is no worse and no new leakage/future-coverage warnings appear. Do not optimize on WAPE.",
+                "keep_rule": "Require a source/vintage contract, a matched no-feature learner, practical improvement and later protected confirmation. Ties retain the baseline; no automatic adoption.",
                 "command_seed": candidate["experiment_command_seed"],
             }
         )
@@ -1413,8 +1518,32 @@ def _slug(value: str) -> str:
 
 
 def _variant_catalog() -> dict[str, ExperimentVariant]:
+    from nixtla_scaffold.configuration import mfles_additive_spec, mfles_identified_fourier_spec
+    from nixtla_scaffold.anomalies import anomaly_adjustment_spec, enhanced_calendar_spec
     always = lambda context, spec: (True, "")
+    mfles_allowed = lambda spec: (
+        spec.model_policy in {"standard", "light", "statsforecast", "all"}
+        and (not spec.model_allowlist or bool({"MFLES", "AutoMFLES"} & set(spec.model_allowlist)))
+    )
     return {
+        "anomaly_adjustment": ExperimentVariant(
+            name="anomaly_adjustment",
+            description="Origin-local robust seasonal adjustment of isolated training transients; untouched actuals and outer residual calibration.",
+            build_spec=anomaly_adjustment_spec,
+            applicable=lambda context, spec: (
+                spec.evaluation.strategy == "rolling-origin" and spec.anomaly.mode != "adjust",
+                "requires rolling-origin evaluation and a control without anomaly adjustment",
+            ),
+        ),
+        "enhanced_calendar": ExperimentVariant(
+            name="enhanced_calendar",
+            description="Native categorical weekday/month, month-boundary and explicitly declared holiday features; no forecast multiplier.",
+            build_spec=enhanced_calendar_spec,
+            applicable=lambda context, spec: (
+                spec.model_policy in {"standard", "mlforecast", "light", "all"} and not spec.calendar.enabled,
+                "requires an existing ML-enabled daily control without enhanced calendar features",
+            ),
+        ),
         "baseline": ExperimentVariant(
             name="baseline",
             description="Current scaffold behavior with driver/event inputs removed for a clean statistical baseline.",
@@ -1433,7 +1562,7 @@ def _variant_catalog() -> dict[str, ExperimentVariant]:
         "known_future_regressors": ExperimentVariant(
             name="known_future_regressors",
             description="Opt-in MLForecast training with declared model_candidate regressors that pass leakage/future-coverage gates.",
-            build_spec=lambda spec: replace(spec, events=(), train_known_future_regressors=True, model_policy="all" if spec.model_policy == "baseline" else spec.model_policy),
+            build_spec=lambda spec: replace(spec, events=(), train_known_future_regressors=True),
             applicable=lambda context, spec: (
                 context.has_regressors,
                 "no known-future regressors were declared; add --regressor or --regressor-file with future values/scenarios",
@@ -1454,8 +1583,71 @@ def _variant_catalog() -> dict[str, ExperimentVariant]:
         "rolling_features": ExperimentVariant(
             name="rolling_features",
             description="Curated MLForecast rolling target feature policy.",
-            build_spec=lambda spec: replace(spec, mlforecast_feature_policy="rolling", model_policy="all" if spec.model_policy == "baseline" else spec.model_policy),
-            applicable=always,
+            build_spec=lambda spec: replace(spec, mlforecast_feature_policy="rolling"),
+            applicable=lambda context, spec: (
+                spec.model_policy in {"mlforecast", "light", "all"},
+                "rolling features require an existing ML-enabled control; model families are not broadened",
+            ),
+        ),
+        "calendar_dummies": ExperimentVariant(
+            name="calendar_dummies",
+            description="Fold-local one-hot calendar features with the unchanged model family and lag recipe.",
+            build_spec=lambda spec: replace(spec, feature_recipe=replace(spec.feature_recipe, date_features_as_dummies=True)),
+            applicable=lambda context, spec: (
+                spec.model_policy in {"mlforecast", "light", "all"} and not spec.feature_recipe.date_features_as_dummies,
+                "requires an ML-enabled control without calendar dummies",
+            ),
+        ),
+        "direct_horizons": ExperimentVariant(
+            name="direct_horizons",
+            description="One separately fitted estimator per horizon with the unchanged inputs and model family.",
+            build_spec=lambda spec: replace(spec, feature_recipe=replace(spec.feature_recipe, mlforecast_strategy="direct")),
+            applicable=lambda context, spec: (
+                spec.model_policy in {"mlforecast", "light", "all"} and spec.feature_recipe.mlforecast_strategy == "recursive",
+                "requires a recursive ML-enabled control",
+            ),
+        ),
+        "log_transform": ExperimentVariant(
+            name="log_transform",
+            description="Log target recipe; positive observations required, with inverse-scale bias assessed rather than assumed corrected.",
+            build_spec=lambda spec: replace(spec, transform=replace(spec.transform, target="log")),
+            applicable=lambda context, spec: (context.target_nonnegative and spec.transform.target == "none",
+                                               "log requires a strictly positive untransformed target; zeros fail validation"),
+        ),
+        "recent_history": ExperimentVariant(
+            name="recent_history",
+            description="One declared recent-history window at every origin and the final refit.",
+            build_spec=lambda spec: replace(spec, evaluation=replace(
+                spec.evaluation, training_window=max(24, 2 * (spec.season_length or 1), 2 * spec.horizon),
+            )),
+            applicable=lambda context, spec: (
+                context.row_count / max(1, context.series_count) > max(24, 2 * (spec.season_length or 1), 2 * spec.horizon),
+                "insufficient history to compare a meaningful recent-history window",
+            ),
+        ),
+        "nonseasonal": ExperimentVariant(
+            name="nonseasonal", description="Single nonseasonal comparator; no seasonal-period grid search.",
+            build_spec=lambda spec: replace(spec, season_length=1), applicable=always,
+        ),
+        "mfles_additive": ExperimentVariant(
+            name="mfles_additive",
+            description="Force additive MFLES seasonality while preserving its native search grid, other families and evaluation schedule.",
+            build_spec=mfles_additive_spec,
+            applicable=lambda context, spec: (
+                mfles_allowed(spec) and spec.model_configuration.mfles_seasonality != "additive",
+                "requires an existing MFLES-enabled control not already fixed to additive seasonality",
+            ),
+        ),
+        "mfles_identified_fourier": ExperimentVariant(
+            name="mfles_identified_fourier",
+            description="Use at most three nonredundant MFLES harmonics below Nyquist, without changing other families or history.",
+            build_spec=mfles_identified_fourier_spec,
+            applicable=lambda context, spec: (
+                mfles_allowed(spec) and (spec.season_length or 1) >= 3
+                and all(period >= 3 for period in spec.model_configuration.seasonal_periods)
+                and spec.model_configuration.mfles_fourier_order is None,
+                "requires an MFLES-enabled control with an explicit seasonal period >= 3 and no Fourier-order override",
+            ),
         ),
         "all_models": ExperimentVariant(
             name="all_models",
@@ -1510,7 +1702,8 @@ def _resolve_variants(variants: Sequence[str] | None, context: ExperimentContext
 def _experiment_context(data: str | Path | pd.DataFrame, spec: ForecastSpec, *, sheet: str | int | None) -> ExperimentContext:
     frame = load_forecast_dataset(data, sheet=sheet, spec=spec)
     has_hierarchy = bool(_HIERARCHY_COLUMNS.intersection(frame.columns))
-    candidate_drivers = _detect_candidate_drivers(frame, spec)
+    screening = _screen_candidate_drivers(frame, spec)
+    candidate_drivers = _detect_candidate_drivers(frame, spec, screening=screening)
     return ExperimentContext(
         has_events=bool(spec.events),
         has_regressors=bool(spec.regressors),
@@ -1523,6 +1716,7 @@ def _experiment_context(data: str | Path | pd.DataFrame, spec: ForecastSpec, *, 
         series_count=int(frame["unique_id"].nunique()) if "unique_id" in frame.columns else 0,
         source_hash_sha256=_source_hash(data, frame),
         candidate_drivers=candidate_drivers,
+        driver_screening=screening,
         human_context_questions=_human_context_questions(
             candidate_drivers,
             has_events=bool(spec.events),
@@ -1549,10 +1743,8 @@ def _source_hash(data: str | Path | pd.DataFrame, frame: pd.DataFrame) -> str | 
 
 
 def _mean(frame: pd.DataFrame, column: str) -> float | None:
-    if frame.empty or column not in frame.columns:
-        return None
-    value = pd.to_numeric(frame[column], errors="coerce").mean()
-    return None if pd.isna(value) else float(value)
+    from nixtla_scaffold.evaluation import complete_metric_mean
+    return complete_metric_mean(frame, column)
 
 
 def _selected_model_counts(run: ForecastRun) -> dict[str, int]:
@@ -1581,7 +1773,13 @@ def _assign_advisory_ranks(summary: pd.DataFrame) -> pd.DataFrame:
     eligible = summary.get("promotion_evidence_eligible", pd.Series(True, index=summary.index)).fillna(False).astype(bool)
     success_mask = summary["status"].eq("success") & eligible
     sort_cols = [col for col in ["avg_rmse", "avg_mae", "advisory_rank_score"] if col in summary.columns]
-    ranked = summary.loc[success_mask].sort_values(sort_cols, na_position="last")
+    if "selection_objective" in summary and summary.loc[success_mask, "selection_objective"].eq("monthly_landing").any():
+        success_mask &= summary["selection_objective"].eq("monthly_landing")
+        sort_cols = ["avg_landing_mape_pct", "avg_next28_mape_pct", "avg_daily_wmape_pct"]
+        success_mask &= summary[sort_cols].apply(pd.to_numeric, errors="coerce").notna().all(axis=1)
+    ranked = summary.loc[success_mask].assign(
+        _control_priority=lambda frame: frame["variant"].ne("baseline").astype(int),
+    ).sort_values([*sort_cols, "_control_priority"], na_position="last")
     summary.loc[ranked.index, "advisory_rank"] = range(1, len(ranked) + 1)
     return summary
 
@@ -1616,6 +1814,10 @@ def _apply_candidate_set_compatibility(summary: pd.DataFrame) -> pd.DataFrame:
             status = "candidate_set_change_is_treatment"
         else:
             status = "candidate_set_changed"
+        if baseline.iloc[0].get("scoring_scope") == "deployed_policy_later_assessment":
+            cohort = row.get("assessment_fingerprint")
+            if not cohort or cohort != baseline.iloc[0].get("assessment_fingerprint"):
+                compatible, status = False, "assessment_cohort_mismatch"
         out.at[index, "candidate_set_changed"] = changed
         out.at[index, "candidate_set_compatible"] = compatible
         out.at[index, "candidate_set_comparison_status"] = status

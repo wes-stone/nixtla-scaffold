@@ -64,6 +64,7 @@ HORIZON_TRUST_LABELS = {
 HORIZON_GATE_LABELS = {
     "passed": "Passed horizon gate",
     "warning_single_cv_window": "Only one CV window",
+    "warning_insufficient_disjoint_windows": "Insufficient disjoint horizon evidence",
     "warning_partial_horizon_validation": "Partial-horizon validation",
     "fail_less_than_half_horizon_validated": "Less than half of requested horizon validated",
     "fail_no_rolling_origin_validation": "No rolling-origin validation",
@@ -1822,6 +1823,7 @@ def build_streamlit_app() -> str:
         HORIZON_GATE_LABELS = {
             "passed": "Passed horizon gate",
             "warning_single_cv_window": "Only one CV window",
+            "warning_insufficient_disjoint_windows": "Insufficient disjoint horizon evidence",
             "warning_partial_horizon_validation": "Partial-horizon validation",
             "fail_less_than_half_horizon_validated": "Less than half of requested horizon validated",
             "fail_no_rolling_origin_validation": "No rolling-origin validation",
@@ -7461,6 +7463,8 @@ def _payload_horizon_summary(payload: dict[str, Any], uid: str) -> str:
             state = str(row.get("horizon_trust_state") or "no_rolling_origin_evidence")
             if state == "full_horizon_validated":
                 if not full_claim:
+                    if row.get("cv_disjoint_windows") is not None:
+                        return f"requested horizon {requested} evaluated on {cv_windows} rolling origins, but only {row['cv_disjoint_windows']} disjoint full-horizon window(s); planning claim limited"
                     return f"requested horizon {requested} evaluated, but only {cv_windows} CV window(s); planning claim limited"
                 return f"validated through requested horizon {validated}"
             if state == "partial_horizon_validated":

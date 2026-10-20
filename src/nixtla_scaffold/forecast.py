@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import pandas as pd
 
 from nixtla_scaffold.custom_models import append_custom_model_result
@@ -12,6 +13,7 @@ from nixtla_scaffold.models import (
     forecast_with_policy,
     rebuild_result_metrics_on_output_scale,
     select_champions,
+    paired_comparison_result,
 )
 from nixtla_scaffold.profile import profile_dataset, repair_time_index
 from nixtla_scaffold.schema import ForecastRun, ForecastSpec, TargetTransform
@@ -27,9 +29,24 @@ def run_forecast(
     """Run the simple load -> profile -> repair -> forecast -> select flow."""
 
     spec = spec or ForecastSpec()
+    if spec.production is not None:
+        from nixtla_scaffold.production import prepare_production_spec
+        spec = prepare_production_spec(spec)
+    if spec.anomaly.mode == "adjust" and spec.evaluation.strategy != "rolling-origin":
+        raise ValueError("Anomaly adjustment requires rolling-origin evaluation; legacy/full-frame cleaning is not allowed")
     dataset = load_forecast_dataset(data, sheet=sheet, spec=spec)
+    from nixtla_scaffold.exposure import record_exposure
+    record_exposure(dataset, spec)
     modeling_dataset, transformation_audit, transform_warnings = prepare_modeling_target(dataset, spec.transform)
     profile = profile_dataset(modeling_dataset, spec)
+    if spec.calendar.enabled and profile.freq not in {"D", "B"}:
+        raise ValueError("Enhanced calendar features currently require daily or business-daily observations")
+    if spec.selection_policy.objective == "monthly_landing" and profile.freq != "D":
+        raise ValueError("Monthly landing selection requires daily flow observations")
+    if spec.interval_calibration.aggregate_totals and (
+        profile.freq != "D" or spec.events or spec.hierarchy_reconciliation != "none"
+    ):
+        raise ValueError("Aggregate intervals require daily flows and the unchanged, unreconciled statistical point path")
 
     warnings = list(transform_warnings) + list(profile.warnings)
     if "hierarchy_level" in dataset.columns:
@@ -55,14 +72,74 @@ def run_forecast(
     )
     repaired_profile = profile_dataset(reporting_history, spec)
 
-    model_result = forecast_with_policy(history, repaired_profile, spec)
-    model_result = append_custom_model_result(model_result, history=history, profile=repaired_profile, spec=spec)
+    observed_history = pd.DataFrame()
+    if spec.evaluation.strategy == "rolling-origin":
+        from nixtla_scaffold.evaluation import forecast_with_evaluation
+        # Calendar completion is structural; actual targets and repairs remain origin-local.
+        evaluation_history = history[["unique_id", "ds"]].merge(
+            modeling_dataset, on=["unique_id", "ds"], how="left", validate="one_to_one",
+        )
+        observed_history = _restore_audited_reporting_target(
+            _inverse_history_target_transform(evaluation_history, spec.transform.target), transformation_audit,
+        )
+        model_result = forecast_with_evaluation(evaluation_history, repaired_profile, spec, fit=forecast_with_policy)
+    else:
+        model_result = forecast_with_policy(history, repaired_profile, spec)
+        model_result = append_custom_model_result(model_result, history=history, profile=repaired_profile, spec=spec)
+        from nixtla_scaffold.anomalies import review_training
+        _, anomaly_review = review_training(history, spec, repaired_profile, stage="future", observed=modeling_dataset)
+        model_result = replace(model_result, model_policy_resolution={
+            **model_result.model_policy_resolution,
+            "anomalies": {"version": 1, "mode": spec.anomaly.mode, "actuals_changed": False, "prefixes": [anomaly_review]},
+        })
+    if spec.anomaly.mode == "adjust":
+        warnings.append("Anomaly adjustments affect training copies only; actuals and outer evaluation targets are unchanged. Native inner intervals are disabled; outer residual calibration needs sufficient untouched scoring targets.")
+    if spec.cleaning.clean_outliers and spec.anomaly.mode == "off":
+        warnings.append("Saved clean_outliers intent is not executed while anomaly.mode is off; use an explicit versioned anomaly treatment.")
     if spec.transform.target != "none":
         model_result = _inverse_model_result_target_transform(model_result, spec.transform.target)
-        model_result = rebuild_result_metrics_on_output_scale(model_result, reporting_history, repaired_profile, spec)
+    scoring_history = observed_history if not observed_history.empty else reporting_history
+    if spec.selection_policy.clip_negative:
+        from nixtla_scaffold.finance import clip_model_result
+        model_result = clip_model_result(model_result)
+    model_result = rebuild_result_metrics_on_output_scale(model_result, scoring_history, repaired_profile, spec)
+    if spec.paired_validation:
+        model_result = paired_comparison_result(model_result, scoring_history, repaired_profile, spec)
+    if spec.interval_calibration.method != "native":
+        from nixtla_scaffold.conformal import apply_experimental_intervals
+        model_result = apply_experimental_intervals(model_result, scoring_history, spec, freq=repaired_profile.freq)
+    from nixtla_scaffold.finance import apply_finance_objective
+    model_result = apply_finance_objective(model_result, scoring_history, spec, freq=repaired_profile.freq)
+    if spec.interval_calibration.aggregate_totals:
+        if repaired_profile.freq != "D" or spec.events or spec.hierarchy_reconciliation != "none":
+            raise ValueError("Aggregate intervals require daily flows and the unchanged, unreconciled statistical point path")
+        from nixtla_scaffold.finance import aggregate_intervals
+        from nixtla_scaffold.models import model_columns
+        records = aggregate_intervals(
+            scoring_history, model_result.backtest_predictions, model_result.forecast,
+            [name for name in model_columns(model_result.forecast) if name != "WeightedEnsemble"],
+            horizon=spec.horizon, levels=spec.levels, clip_negative=spec.selection_policy.clip_negative,
+        )
+        model_result = replace(model_result, model_policy_resolution={
+            **model_result.model_policy_resolution, "aggregate_intervals": records,
+        })
     warnings.extend(model_result.warnings)
+    from nixtla_scaffold.configuration import screen_candidates
+    selection_paths, selection_metrics, admission = screen_candidates(
+        scoring_history, model_result.forecast, model_result.backtest_metrics, spec,
+        freq=repaired_profile.freq, season=repaired_profile.season_length,
+    )
+    model_result = replace(model_result, backtest_metrics=selection_metrics)
+    warnings.extend(
+        f"{row['unique_id']}/{row['model']}: excluded from selection by the declared configuration guard; "
+        "changing seasonal shape and an unusual next-cycle change. Original predictions and errors are retained."
+        for row in admission if not row["eligible"]
+    )
     if spec.require_backtest:
-        backtested_ids = set(model_result.backtest_metrics["unique_id"]) if not model_result.backtest_metrics.empty else set()
+        eligible_metrics = model_result.backtest_metrics
+        if "selection_eligible" in eligible_metrics:
+            eligible_metrics = eligible_metrics.loc[eligible_metrics["selection_eligible"].fillna(False)]
+        backtested_ids = set(eligible_metrics["unique_id"]) if not eligible_metrics.empty else set()
         missing_backtests = sorted(set(reporting_history["unique_id"]) - backtested_ids)
         if missing_backtests:
             raise ValueError(
@@ -70,10 +147,15 @@ def run_forecast(
                 f"{missing_backtests}; add history, reduce horizon, or disable strict backtest mode"
             )
 
-    selection = select_champions(model_result.forecast, model_result.backtest_metrics)
+    selection = select_champions(selection_paths, selection_metrics, policy=spec.selection_policy)
+    if any(not row["eligible"] for row in admission):
+        excluded_ids = {row["unique_id"] for row in admission if not row["eligible"]}
+        selection.loc[selection.unique_id.astype(str).isin(excluded_ids), "selection_reason"] += (
+            "; configuration-review candidates excluded under declared policy"
+        )
+    from nixtla_scaffold.ensemble import selected_ensemble_comparisons
+    ensemble_comparisons = selected_ensemble_comparisons(model_result.backtest_predictions, selection)
     forecast = build_selected_forecast(model_result.forecast, selection, spec.levels)
-    forecast, shrinkage_warnings = _apply_shrinkage_toward_last_actual(forecast, reporting_history, model_result.backtest_predictions)
-    warnings.extend(shrinkage_warnings)
     metadata = hierarchy_metadata(dataset)
     if not metadata.empty:
         forecast = forecast.merge(metadata, on="unique_id", how="left")
@@ -109,8 +191,9 @@ def run_forecast(
     )
     warnings.extend(driver_warnings)
 
-    return ForecastRun(
+    run = ForecastRun(
         history=reporting_history,
+        observed_history=observed_history,
         forecast=forecast,
         all_models=model_result.forecast,
         model_selection=selection,
@@ -131,8 +214,30 @@ def run_forecast(
         hierarchy_reconciliation_comparison=hierarchy_reconciliation_comparison,
         warnings=list(dict.fromkeys(warnings)),
         engine=model_result.engine,
-        model_policy_resolution=model_result.model_policy_resolution,
+        model_policy_resolution={
+            **model_result.model_policy_resolution,
+            "ensemble_comparisons": ensemble_comparisons,
+            "configuration_admission": admission,
+            "deployed_path": {
+                "point_status": "statistical_point_backtested" if spec.hierarchy_reconciliation == "none"
+                                else "reconciled_point_requires_joint_policy_backtest",
+                "scenario_status": "conditional_assumption_not_accuracy_evidence" if spec.events else "not_requested",
+                "output_scale": "normalized_units" if spec.transform.normalization_factor_col else "raw_units",
+                "postprocessing": spec.hierarchy_reconciliation,
+            },
+        },
     )
+    from nixtla_scaffold.configuration import build_configuration_report
+    configuration = build_configuration_report(run)
+    run = replace(run, model_policy_resolution={**run.model_policy_resolution, "configuration": configuration},
+                   warnings=[*run.warnings, *[
+                       f"{uid}: selected forecast requires configuration review: changing seasonal shape and an unusual next-cycle change."
+                       for uid in configuration["review_series"]
+                   ]])
+    if spec.production is not None:
+        from nixtla_scaffold.production import qualify_production_run
+        run = qualify_production_run(run)
+    return run
 
 
 def _inverse_history_target_transform(history: pd.DataFrame, transform: TargetTransform) -> pd.DataFrame:
@@ -180,103 +285,3 @@ def _inverse_model_result_target_transform(result: ModelResult, transform: Targe
 def _forecast_value_columns(frame: pd.DataFrame) -> list[str]:
     excluded = {"unique_id", "ds", "cutoff", "model", "event_names"}
     return [column for column in frame.columns if column not in excluded]
-
-
-def _apply_shrinkage_toward_last_actual(
-    forecast: pd.DataFrame,
-    history: pd.DataFrame,
-    backtest_predictions: pd.DataFrame,
-) -> tuple[pd.DataFrame, list[str]]:
-    """James-Stein-style shrinkage: blend forecast toward last actual value.
-
-    alpha = model_var / (model_var + residual_var) where residual_var is
-    estimated from backtest prediction errors. For series with high residual
-    variance (e.g. distribution shift), alpha → 0 (trust last actual).
-    For smooth series, alpha → 1 (trust model).
-    """
-    import numpy as np
-
-    out = forecast.copy()
-    warnings_out: list[str] = []
-    if backtest_predictions.empty or "y" not in backtest_predictions.columns:
-        return out, warnings_out
-
-    last_actual: dict[str, float] = {}
-    for uid, grp in history.groupby("unique_id", sort=True):
-        last_actual[str(uid)] = float(grp.sort_values("ds")["y"].iloc[-1])
-
-    model_cols_in_bt = [c for c in backtest_predictions.columns if c not in {"unique_id", "ds", "cutoff", "y"} and "-lo-" not in c and "-hi-" not in c]
-    if not model_cols_in_bt:
-        return out, warnings_out
-
-    alpha_by_series: dict[str, float] = {}
-    for uid, grp in backtest_predictions.groupby("unique_id", sort=True):
-        actual = grp["y"].to_numpy(dtype="float64")
-        if len(actual) < 2:
-            alpha_by_series[str(uid)] = 1.0
-            continue
-        # Use the selected model's predictions if available, otherwise average
-        errors = []
-        for mc in model_cols_in_bt:
-            if mc in grp.columns:
-                pred = pd.to_numeric(grp[mc], errors="coerce").to_numpy(dtype="float64")
-                valid = np.isfinite(pred) & np.isfinite(actual)
-                if valid.any():
-                    errors.extend((pred[valid] - actual[valid]).tolist())
-        if not errors:
-            alpha_by_series[str(uid)] = 1.0
-            continue
-        residual_var = float(np.var(errors))
-        model_var = float(np.var(actual))
-        if residual_var + model_var <= 0:
-            alpha_by_series[str(uid)] = 1.0
-        else:
-            alpha_by_series[str(uid)] = float(np.clip(model_var / (model_var + residual_var), 0.3, 1.0))
-
-    shrunk_count = 0
-    for uid in out["unique_id"].unique():
-        uid_str = str(uid)
-        alpha = alpha_by_series.get(uid_str, 1.0)
-        if alpha >= 0.99 or uid_str not in last_actual:
-            continue
-        mask = out["unique_id"] == uid
-        yhat = pd.to_numeric(out.loc[mask, "yhat"], errors="coerce")
-        last_val = last_actual[uid_str]
-        shrunk_yhat = alpha * yhat + (1.0 - alpha) * last_val
-        delta = shrunk_yhat - yhat
-        out.loc[mask, "yhat"] = shrunk_yhat.to_numpy(dtype="float64")
-        for level in _forecast_interval_levels(out):
-            lo_col = f"yhat_lo_{level}"
-            hi_col = f"yhat_hi_{level}"
-            out.loc[mask, lo_col] = pd.to_numeric(out.loc[mask, lo_col], errors="coerce") + delta
-            out.loc[mask, hi_col] = pd.to_numeric(out.loc[mask, hi_col], errors="coerce") + delta
-        shrunk_count += 1
-
-    if shrunk_count:
-        _ensure_selected_intervals_contain_point(out)
-        warnings_out.append(f"James-Stein shrinkage applied to {shrunk_count} series to reduce distribution shift risk")
-    return out, warnings_out
-
-
-def _forecast_interval_levels(frame: pd.DataFrame) -> list[str]:
-    levels: list[str] = []
-    for column in frame.columns:
-        if column.startswith("yhat_lo_"):
-            level = column.rsplit("_", 1)[-1]
-            if f"yhat_hi_{level}" in frame.columns:
-                levels.append(level)
-    return sorted(set(levels), key=lambda item: int(item) if item.isdigit() else item)
-
-
-def _ensure_selected_intervals_contain_point(frame: pd.DataFrame) -> None:
-    yhat = pd.to_numeric(frame["yhat"], errors="coerce")
-    for level in _forecast_interval_levels(frame):
-        lo_col = f"yhat_lo_{level}"
-        hi_col = f"yhat_hi_{level}"
-        lo = pd.to_numeric(frame[lo_col], errors="coerce")
-        hi = pd.to_numeric(frame[hi_col], errors="coerce")
-        lower = pd.concat([lo, hi, yhat], axis=1).min(axis=1, skipna=True)
-        upper = pd.concat([lo, hi, yhat], axis=1).max(axis=1, skipna=True)
-        valid = lo.notna() & hi.notna() & yhat.notna()
-        frame.loc[valid, lo_col] = lower.loc[valid]
-        frame.loc[valid, hi_col] = upper.loc[valid]

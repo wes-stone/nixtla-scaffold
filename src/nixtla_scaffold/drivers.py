@@ -9,7 +9,7 @@ import pandas as pd
 import yaml
 
 from nixtla_scaffold.data import read_tabular_source
-from nixtla_scaffold.schema import DriverEvent, ForecastRun, ForecastSpec, KnownFutureRegressor
+from nixtla_scaffold.schema import DriverEvent, DriverSourceContract, ForecastRun, ForecastSpec, KnownFutureRegressor
 
 
 SCENARIO_ASSUMPTION_COLUMNS = [
@@ -45,6 +45,8 @@ SCENARIO_FORECAST_COLUMNS = [
 ]
 
 KNOWN_FUTURE_REGRESSOR_COLUMNS = [
+    "source",
+    "historical_lags",
     "name",
     "value_col",
     "availability",
@@ -60,6 +62,7 @@ KNOWN_FUTURE_REGRESSOR_COLUMNS = [
 ]
 
 DRIVER_AUDIT_COLUMNS = [
+    "source_receipt",
     "name",
     "value_col",
     "availability",
@@ -98,6 +101,7 @@ DRIVER_EXPERIMENT_SUMMARY_COLUMNS = [
 ]
 
 DRIVER_MODEL_FEATURE_COLUMNS = [
+    "source_receipt",
     "name",
     "value_col",
     "feature_columns",
@@ -138,6 +142,7 @@ class DriverFeatureBundle:
     audit: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=DRIVER_MODEL_FEATURE_COLUMNS))
     feature_columns: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+    source_receipts: tuple[dict[str, Any], ...] = ()
 
 
 def parse_driver_events(
@@ -232,6 +237,8 @@ def build_known_future_regressors_frame(regressors: Sequence[KnownFutureRegresso
     for regressor in regressors:
         data = regressor.to_dict()
         data["value_col"] = _regressor_value_col(regressor)
+        data["source"] = json.dumps(regressor.source.to_dict(), sort_keys=True) if regressor.source else ""
+        data["historical_lags"] = json.dumps(list(regressor.historical_lags))
         data["contract_status"] = (
             "declared_for_audit_only"
             if regressor.mode == "audit_only"
@@ -264,13 +271,18 @@ def prepare_mlforecast_regressor_features(
     warnings_out: list[str] = []
     included_cols: list[str] = []
     used_value_cols: set[str] = set()
+    source_receipts: list[dict[str, Any]] = []
 
     for regressor in spec.regressors:
         value_col = _regressor_value_col(regressor)
-        future_frame, future_error = _load_future_frame(regressor.future_file)
+        driver_history, future_frame, future_error, source_receipt = _regressor_inputs(
+            history, requirements, spec, regressor, freq=freq, origin=origin,
+        )
+        if source_receipt:
+            source_receipts.append(source_receipt)
         future_cols = set(future_frame.columns) if future_frame is not None else set()
-        source_cols = set(history.columns) | future_cols
-        historical_values = pd.to_numeric(history[value_col], errors="coerce") if value_col in history.columns else pd.Series(dtype="float64")
+        source_cols = set(driver_history.columns) | future_cols
+        historical_values = pd.to_numeric(driver_history[value_col], errors="coerce") if value_col in driver_history.columns else pd.Series(dtype="float64")
         coverage = (
             _historical_only_coverage()
             if regressor.availability == "historical_only"
@@ -301,18 +313,19 @@ def prepare_mlforecast_regressor_features(
         if regressor.mode != "model_candidate":
             reason = "regressor mode is audit_only; not a model feature"
             modeling_decision = "audit_only_not_trained"
-        elif not failures and value_col not in history.columns:
+        elif not failures and value_col not in driver_history.columns:
             reason = f"value_col '{value_col}' is absent from repaired history"
-        elif not failures and historical_values.isna().any():
+        elif not failures and regressor.availability != "historical_only" and historical_values.isna().any():
             reason = f"value_col '{value_col}' has {int(historical_values.isna().sum())} missing or non-numeric historical row(s)"
         elif not failures and regressor.availability == "historical_only":
             lag_result = _historical_only_lag_features(
-                history,
+                driver_history,
                 requirements,
                 value_col=value_col,
                 horizon=horizon,
                 season_length=season_length,
                 min_training_rows=min_training_rows,
+                lags=regressor.historical_lags,
             )
             if lag_result["included"]:
                 status = "included"
@@ -321,9 +334,10 @@ def prepare_mlforecast_regressor_features(
                 feature_columns = list(lag_result["feature_columns"])
                 safe_lags = list(lag_result["safe_lags"])
                 training_non_null_min_rows = int(lag_result["training_non_null_min_rows"])
-                for column in feature_columns:
-                    historical[column] = lag_result["historical"][column].to_numpy(dtype="float64")
-                    future[column] = lag_result["future"][column].to_numpy(dtype="float64")
+                historical = historical.merge(lag_result["historical"][["unique_id", "ds", *feature_columns]],
+                                              on=["unique_id", "ds"], how="left", validate="one_to_one")
+                future = future.merge(lag_result["future"][["unique_id", "ds", *feature_columns]],
+                                      on=["unique_id", "ds"], how="left", validate="one_to_one")
                 included_cols.extend(column for column in feature_columns if column not in included_cols)
             else:
                 reason = lag_result["reason"]
@@ -342,8 +356,12 @@ def prepare_mlforecast_regressor_features(
                 modeling_decision = "included_mlforecast_model_candidate"
                 reason = "passed leakage, known-as-of, historical, and future-value checks"
                 if value_col not in used_value_cols:
-                    historical[value_col] = historical_values.astype("float64").to_numpy()
-                    future[value_col] = pd.to_numeric(future_values[value_col], errors="coerce").astype("float64").to_numpy()
+                    historical = historical.merge(driver_history[["unique_id", "ds", value_col]],
+                                                  on=["unique_id", "ds"], how="left", validate="one_to_one")
+                    future = future.merge(future_values[["unique_id", "ds", value_col]],
+                                          on=["unique_id", "ds"], how="left", validate="one_to_one")
+                    historical[value_col] = pd.to_numeric(historical[value_col], errors="raise").astype("float64")
+                    future[value_col] = pd.to_numeric(future[value_col], errors="raise").astype("float64")
                     used_value_cols.add(value_col)
                     included_cols.append(value_col)
                     feature_columns = [value_col]
@@ -356,6 +374,7 @@ def prepare_mlforecast_regressor_features(
 
         rows.append(
             {
+                "source_receipt": json.dumps(source_receipt, sort_keys=True) if source_receipt else "",
                 "name": regressor.name,
                 "value_col": value_col,
                 "feature_columns": "; ".join(feature_columns),
@@ -364,8 +383,8 @@ def prepare_mlforecast_regressor_features(
                 "modeling_decision": modeling_decision,
                 "reason": reason,
                 "safe_lags": "; ".join(str(lag) for lag in safe_lags),
-                "historical_rows": int(len(history)) if value_col in history.columns else 0,
-                "historical_non_null_rows": int(historical_values.notna().sum()) if value_col in history.columns else 0,
+                "historical_rows": int(len(driver_history)) if value_col in driver_history.columns else 0,
+                "historical_non_null_rows": int(historical_values.notna().sum()) if value_col in driver_history.columns else 0,
                 "training_non_null_min_rows": training_non_null_min_rows,
                 "future_file": regressor.future_file or "",
                 "future_rows": coverage["future_rows"],
@@ -386,7 +405,21 @@ def prepare_mlforecast_regressor_features(
         audit=pd.DataFrame(rows, columns=DRIVER_MODEL_FEATURE_COLUMNS),
         feature_columns=tuple(included_cols),
         warnings=tuple(dict.fromkeys(warnings_out)),
+        source_receipts=tuple(source_receipts),
     )
+
+
+def _regressor_inputs(history, requirements, spec, regressor, *, freq, origin):
+    if regressor.source is None:
+        future, error = _load_future_frame(regressor.future_file)
+        return history, future, error, {}
+    from nixtla_scaffold.feature_sources import source_features
+    if origin is None:
+        raise ValueError("Contracted drivers require a known forecast origin")
+    historical, future, receipt = source_features(
+        history, requirements, spec, regressor, freq=freq, origin=origin,
+    )
+    return historical, future, "", receipt
 
 
 def audit_known_future_regressors(
@@ -419,11 +452,15 @@ def audit_known_future_regressors(
     rows: list[dict[str, Any]] = []
     for regressor in spec.regressors:
         value_col = _regressor_value_col(regressor)
-        future_frame, future_error = _load_future_frame(regressor.future_file)
+        from nixtla_scaffold.profile import profile_dataset
+        driver_history, future_frame, future_error, source_receipt = _regressor_inputs(
+            dataset, requirements, spec, regressor, freq=spec.freq or profile_dataset(dataset, spec).freq,
+            origin=origin,
+        )
         future_cols = set(future_frame.columns) if future_frame is not None else set()
-        source_cols = set(dataset.columns) | future_cols
-        historical_rows = int(len(dataset)) if value_col in dataset.columns else 0
-        historical_non_null = int(pd.to_numeric(dataset[value_col], errors="coerce").notna().sum()) if value_col in dataset.columns else 0
+        source_cols = set(driver_history.columns) | future_cols
+        historical_rows = int(len(driver_history)) if value_col in driver_history.columns else 0
+        historical_non_null = int(pd.to_numeric(driver_history[value_col], errors="coerce").notna().sum()) if value_col in driver_history.columns else 0
 
         coverage = (
             _historical_only_coverage()
@@ -494,6 +531,7 @@ def audit_known_future_regressors(
 
         rows.append(
             {
+                "source_receipt": json.dumps(source_receipt, sort_keys=True) if source_receipt else "",
                 "name": regressor.name,
                 "value_col": value_col,
                 "availability": regressor.availability,
@@ -613,8 +651,11 @@ def _historical_only_lag_features(
     horizon: int,
     season_length: int,
     min_training_rows: int,
+    lags: tuple[int, ...] = (),
 ) -> dict[str, Any]:
-    lags = _candidate_historical_regressor_lags(horizon=horizon, season_length=season_length)
+    lags = list(lags) if lags else _candidate_historical_regressor_lags(horizon=horizon, season_length=season_length)
+    if any(lag < horizon for lag in lags):
+        return _historical_lag_result(False, reason="declared historical lag is shorter than the full forecast horizon")
     if not lags:
         return _historical_lag_result(False, reason="no safe historical-only lags are available for the requested horizon")
 
@@ -873,6 +914,8 @@ def _regressor_from_mapping(payload: dict[str, Any], *, source: str) -> KnownFut
         owner=str(payload.get("owner", "")),
         refresh_latency_days=_int_or_none(payload.get("refresh_latency_days")),
         notes=str(payload.get("notes", "")),
+        source=DriverSourceContract(**payload["source"]) if payload.get("source") is not None else None,
+        historical_lags=tuple(payload.get("historical_lags", ())),
     )
 
 

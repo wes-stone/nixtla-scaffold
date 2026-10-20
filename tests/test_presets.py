@@ -52,7 +52,8 @@ def test_forecast_spec_presets_are_named_and_overridable() -> None:
     assert accuracy_first.strict_cv_horizon is True
     assert accuracy_first.require_backtest is False
     assert accuracy_first.context is not None
-    assert ForecastSpec().context is None
+    assert ForecastSpec().context is not None
+    assert ForecastSpec().run_mode == "accuracy-first"
     catalog = {row["name"]: row for row in preset_catalog()}
     assert catalog["standard"]["model_policy"] == "standard"
     assert catalog["standard"]["aliases"] == ["finance"]
@@ -213,8 +214,10 @@ def test_forecast_cli_preset_applies_defaults_and_allows_overrides(tmp_path) -> 
     assert diagnostics["spec"]["horizon"] == 2
     assert diagnostics["spec"]["model_policy"] == "baseline"
     assert diagnostics["spec"]["verbose"] is False
-    assert "context" not in diagnostics["spec"]
-    assert not (output_dir / "appendix" / "accuracy_gate.json").exists()
+    assert diagnostics["spec"]["run_mode"] == "quick"
+    gate = json.loads((output_dir / "appendix" / "accuracy_gate.json").read_text(encoding="utf-8"))
+    assert gate["accuracy_first"] is False
+    assert gate["planning_ready_claim_allowed"] is False
 
 
 def test_accuracy_first_short_history_writes_directional_claim_receipts(tmp_path, capsys) -> None:
@@ -357,6 +360,6 @@ def test_guide_presets_prints_catalog(capsys) -> None:
 
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
-    assert {row["name"] for row in payload} == {"quick", "accuracy-first", "standard", "strict", "hierarchy"}
+    assert {row["name"] for row in payload} == {"quick", "accuracy-first", "standard", "strict", "hierarchy", "production"}
     standard = next(row for row in payload if row["name"] == "standard")
     assert standard["aliases"] == ["finance"]

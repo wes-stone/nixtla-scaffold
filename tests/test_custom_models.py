@@ -134,6 +134,8 @@ def test_custom_mid_run_failure_preserves_invocation_telemetry() -> None:
     )
 
     assert "Custom_Sometimes_Fails" not in run.all_models.columns
+    assert calls["backtest"] == 2
+    assert "Custom_Sometimes_Fails" not in run.model_policy_resolution["resolved_candidate_identity"]["resolved_candidates"]
     statuses = set(run.custom_model_invocations["status"])
     assert statuses == {"succeeded", "failed"}
     failed = run.custom_model_invocations[run.custom_model_invocations["status"] == "failed"].iloc[0]
@@ -228,6 +230,11 @@ def test_custom_model_can_win_selection_without_entering_weighted_ensemble() -> 
     assert "Custom_Perfect_Finance" in run.all_models.columns
     assert "WeightedEnsemble" in run.all_models.columns
     assert "Custom_Perfect_Finance" not in set(run.model_weights["model"])
+    from dataclasses import replace
+
+    native = run_forecast(df, replace(run.spec, custom_models=()))
+    pd.testing.assert_series_equal(run.all_models["WeightedEnsemble"], native.all_models["WeightedEnsemble"])
+    pd.testing.assert_series_equal(run.backtest_predictions["WeightedEnsemble"], native.backtest_predictions["WeightedEnsemble"])
 
 
 def test_no_custom_run_does_not_emit_custom_artifacts(tmp_path) -> None:
